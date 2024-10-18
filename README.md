@@ -1,10 +1,10 @@
 # TSN Adapters
 
-This repository contains examples of how to use the TSN SDK to ingest data from various sources into TSN. It leverages [truflation/truflation](https://github.com/truflation/truflation) connectors to get data from sources, powered by [Prefect](https://www.prefect.io/) features such as resiliency, concurrency, caching, observability, UI controls and more.
+This repository contains examples of using the TSN SDK to ingest data from various sources into TSN. It leverages [truflation/truflation](https://github.com/truflation/truflation) connectors to get data from sources, powered by [Prefect](https://www.prefect.io/) features such as resiliency, concurrency, caching, observability, UI controls and more.
 
 ## Reusable Tasks
 
-We have a few reusable tasks that can be used to ingest data from various sources into TSN. They can serve as an example on how to use the TSN SDK to achieve certain tasks, or may also be reused in your own flows (you may want to install this package to use them).
+We have a few reusable tasks that can be used to ingest data from various sources into TSN. They can serve as an example of using the TSN SDK to achieve certain tasks, or may also be reused in your flows (you may want to install this package to use them).
 
 Non-exhaustive list:
 
@@ -32,7 +32,7 @@ This repository includes a `docker-compose.yaml` file to run a local development
 
 Requirements:
 - [Docker](https://docs.docker.com/get-docker/)
-- TSN Node to be tergetted (might be local or remote)
+- TSN Node to be targeted (might be local or remote)
 
 To run the development environment, run the following command:
 
