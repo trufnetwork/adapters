@@ -10,43 +10,37 @@ def reconcile_data(df_base: pd.DataFrame, df_target: pd.DataFrame) -> pd.DataFra
     expects the following columns
     - date: datetime or string
     - value: float, int or string
-    
+
     produces the following columns
     - date: string
     - value: float
     """
-    # if target is empty, return base
-    if df_target.empty:
-        return df_base
+    df_base = normalize_columns(df_base) if not df_base.empty else df_base
+    df_target = normalize_columns(df_target)
 
-    # reconcile the data, keeping only new records
-    # both should have at least the following columns: date, value
-    df_base = df_base.copy()
-    df_target = df_target.copy()
+    if df_base.empty:
+        return df_target
 
-    # check columns
-    if "date" not in df_base.columns or "date" not in df_target.columns:
-        raise ValueError("Date column is missing")
-    if "value" not in df_base.columns or "value" not in df_target.columns:
-        raise ValueError("Value column is missing")
-
-    # normalize the types
-    # we accept dates as strings or datetime, but we convert to string
-    df_base["date"] = df_base["date"].apply(lambda x: x.strftime("%Y-%m-%d") if isinstance(x, datetime) else x)
-    df_target["date"] = df_target["date"].apply(lambda x: x.strftime("%Y-%m-%d") if isinstance(x, datetime) else x)
-
-    # check if the dates are the same
-    if df_base["date"].dtype != df_target["date"].dtype:
-        raise ValueError("Date column is not of type string")
-    
-    # we accept value as string, float or int, but the result should be a float
-    df_base["value"] = df_base["value"].apply(lambda x: float(x) if not isinstance(x, float) else x)
-    df_target["value"] = df_target["value"].apply(lambda x: float(x) if not isinstance(x, float) else x)
-
-    # check if the values are the same
-    if df_base["value"].dtype != df_target["value"].dtype:
-        raise ValueError("Value column is not of type float")
-
+    # keep only the records that are not in the base
     df_result = df_target[~df_target["date"].isin(df_base["date"])]
     return df_result
-                         
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalizes the columns of a dataframe to the following:
+    - date: string
+    - value: float
+    """
+    df = df.copy()
+    
+    # check columns presence
+    if "date" not in df.columns:
+        raise ValueError("Date column is missing")
+    if "value" not in df.columns:
+        raise ValueError("Value column is missing")
+    
+    # normalize the types
+    df["date"] = df["date"].apply(lambda x: x.strftime("%Y-%m-%d") if isinstance(x, datetime) else x)
+    df["value"] = df["value"].apply(lambda x: float(x) if not isinstance(x, float) else x)
+    
+    return df

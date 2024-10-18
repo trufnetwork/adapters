@@ -13,15 +13,12 @@ def insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client
     if len(records) == 0:
         print(f"No records to insert for stream {stream_id}")
         return
-
-    # format YYYY-MM-DDT00:00:00Z
-    inserted_date = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
     
     print(f"Inserting {len(records)} records into stream {stream_id}")
     # generate tuples, [("2024-01-01", "100", inserted_date), ...]
-    args = [(record["date"], record["value"], inserted_date) for record in records.to_dict(orient="records")]
+    args = [(record["date"], str(record["value"])) for record in records.to_dict(orient="records")]
     
-    # recrods is a list of dicts with the keys: date str, value float
+    # args is a list of tuples with the keys: date str, value float
     client.execute_procedure(
         stream_id=stream_id,
         procedure="insert_record",
@@ -63,7 +60,7 @@ def deploy_primitive(stream_id: str, client: tsn_client.TSNClient):
 if __name__ == "__main__":
     @flow(log_prints=True)
     def test_get_all_tsn_records():
-        client = tsn_client.TSNClient(tsn_provider=os.environ["TSN_PROVIDER"], token=os.environ["TSN_PRIVATE_KEY"])
+        client = tsn_client.TSNClient(url=os.environ["TSN_PROVIDER"], token=os.environ["TSN_PRIVATE_KEY"])
         recs = get_all_tsn_records("st2393fded6ff3bde0e77209bc41f964", client)
         print(recs)
 

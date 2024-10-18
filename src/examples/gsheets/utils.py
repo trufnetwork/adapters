@@ -1,5 +1,6 @@
 import pandas as pd
 from prefect import task
+import tsn_sdk.client as tsn_client
 
 
 @task

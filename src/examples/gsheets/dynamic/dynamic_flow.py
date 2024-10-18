@@ -57,7 +57,8 @@ def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
 
         # Fetch the records from the sheet
         print(f"Fetching records from sheet {gsheets_id}")
-        records = read_gsheet(gsheets_id)
+        # see read_gsheet for more details about the second_column_name parameter
+        records = read_gsheet(gsheets_id, second_column_name="Month")
 
         # for each source, fetch the records and transform until we can insert them into TSN
         # insertions happen concurrently
@@ -94,7 +95,7 @@ if __name__ == "__main__":
     """
 
     repo = "truflation/tsn-adapters"
-    repo_sources_path = "examples/simple_gsheets/primitive_sources.csv"
+    repo_sources_path = "examples/gsheets/dynamic/primitive_sources.csv"
     destination_tsn_provider = os.environ["TSN_PROVIDER"]
 
     gsheets_flow(repo, repo_sources_path, destination_tsn_provider)

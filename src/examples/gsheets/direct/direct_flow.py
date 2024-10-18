@@ -35,7 +35,8 @@ def gsheets_flow(destination_tsn_provider: str):
 
     # Fetch the records from the sheet
     print(f"Fetching records from sheet {gsheets_id}")
-    records = read_gsheet(gsheets_id)
+    # see read_gsheet for more details about the second_column_name parameter
+    records = read_gsheet(gsheets_id, second_column_name="Month")
 
     # Standardize the records
     normalized_records = normalize_source(records)

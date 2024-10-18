@@ -30,7 +30,9 @@ We have two versions of the flow:
 
 This repository includes a `docker-compose.yaml` file to run a local development environment with a Postgres database and a Prefect server.
 
-Make sure you have [Docker](https://docs.docker.com/get-docker/) and the [compose plugin](https://docs.docker.com/compose/install/) available.
+Requirements:
+- [Docker](https://docs.docker.com/get-docker/)
+- TSN Node to be tergetted (might be local or remote)
 
 To run the development environment, run the following command:
 
@@ -42,4 +44,4 @@ This will start the services and keep them running in the background.
 
 Deploying Prefect or using its Cloud infrastructure is extensively documented [here](https://docs.prefect.io/3.0/deploy/index).
 
-You may try the examples just by running their python files, after installing the package in a virtual environment.
+You may try the examples just by running their python files, after installing the package in a virtual environment. Make sure to copy `.env.example` to `.env` and set the correct environment variables.
