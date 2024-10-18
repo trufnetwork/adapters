@@ -2,8 +2,6 @@
 
 This repository contains examples of how to use the TSN SDK to ingest data from various sources into TSN. It leverages [truflation/truflation](https://github.com/truflation/truflation) connectors to get data from sources, powered by [Prefect](https://www.prefect.io/) features such as resiliency, concurrency, caching, observability, UI controls and more.
 
-Each [example](examples) is a Prefect flow that can be run locally or in a remote environment.
-
 ## Reusable Tasks
 
 We have a few reusable tasks that can be used to ingest data from various sources into TSN. They can serve as an example on how to use the TSN SDK to achieve certain tasks, or may also be reused in your own flows (you may want to install this package to use them).
@@ -18,6 +16,8 @@ Non-exhaustive list:
 - [x] [Reconcile data](tsn_adapters/tasks/data_manipulation.py)
 
 ## Examples
+
+Each [example](examples) is a Prefect flow that can be run locally or in a remote environment.
 
 ### Simple GSheets
 
