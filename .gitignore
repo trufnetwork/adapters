@@ -26,6 +26,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# prefect specific
+/log
+
 # Environments
 .env
 .venv
