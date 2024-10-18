@@ -1,0 +1,42 @@
+name: prefect-server
+services:
+  postgres:
+    image: postgres:16
+    hostname: prefect-postgres
+    container_name: prefect-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: prefect
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+  prefect:
+    restart: always
+    image: prefecthq/prefect:3.0.4-python3.10-conda # WORKED
+    # image: prefecthq/prefect:3.0.5-python3.10-conda DIDN'T WORK, and after it either
+    environment:
+      PREFECT_HOME: /data
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:password@prefect-postgres/prefect
+      PREFECT_DEBUG_MODE: 1
+      PREFECT_LOGGING_LEVEL: DEBUG
+    command: prefect server start --host 0.0.0.0
+    ports:
+      - "4200:4200"
+    volumes:
+      - prefect-data:/data
+    depends_on:
+      - postgres
+
+  prefect-worker:
+    restart: always
+    image: prefecthq/prefect:3.0.4-python3.10-conda
+    command: prefect worker start -p default-workers
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+    depends_on:
+      - prefect
+
+volumes:
+  postgres-data:
+  prefect-data:
