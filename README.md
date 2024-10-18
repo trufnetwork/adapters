@@ -17,14 +17,14 @@ Non-exhaustive list:
 
 ## Examples
 
-Each [example](examples) is a Prefect flow that can be run locally or in a remote environment.
+Each [example](src/examples) is a Prefect flow that can be run locally or in a remote environment.
 
 ### Simple GSheets
 
 We have two versions of the flow:
 
-1. [Direct](examples/gsheets/direct/direct_flow.py) - In this version, we directly specify the sheet ID and the source ID to filter by.
-2. [Dynamic](examples/gsheets/dynamic/dynamic_flow.py) - In this version, we fetch the sheet ID and the source ID from a CSV file in a GitHub repository.
+1. [Direct](src/examples/gsheets/direct/direct_flow.py) - In this version, we directly specify the sheet ID and the source ID to filter by.
+2. [Dynamic](src/examples/gsheets/dynamic/dynamic_flow.py) - In this version, we fetch the sheet ID and the source ID from a CSV file in a GitHub repository.
 
 ## Local Development
 
