@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tsn-adapters"
 version = "0.1.0"
-description = "A collection of prefect tasks ingesting data into TSN"
+description = "A collection of prefect tasks and examples ingesting data into TSN"
 readme = "README.md"
 dependencies = [
     "prefect-client",

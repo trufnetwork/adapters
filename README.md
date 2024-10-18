@@ -25,3 +25,21 @@ We have two versions of the flow:
 
 1. [Direct](examples/gsheets/direct/direct_flow.py) - In this version, we directly specify the sheet ID and the source ID to filter by.
 2. [Dynamic](examples/gsheets/dynamic/dynamic_flow.py) - In this version, we fetch the sheet ID and the source ID from a CSV file in a GitHub repository.
+
+## Local Development
+
+This repository includes a `docker-compose.yaml` file to run a local development environment with a Postgres database and a Prefect server.
+
+Make sure you have [Docker](https://docs.docker.com/get-docker/) and the [compose plugin](https://docs.docker.com/compose/install/) available.
+
+To run the development environment, run the following command:
+
+```bash
+docker compose up -d
+```
+
+This will start the services and keep them running in the background.
+
+Deploying Prefect or using its Cloud infrastructure is extensively documented [here](https://docs.prefect.io/3.0/deploy/index).
+
+You may try the examples just by running their python files, after installing the package in a virtual environment.
