@@ -25,7 +25,6 @@ def gsheets_flow(destination_tsn_provider: str):
     source_id = "1.1.01"
     stream_name = "gsheets-direct-flow-stream"
     stream_id = tsn_utils.generate_stream_id(stream_name)
-    # accessible at https://docs.google.com/spreadsheets/d/1WE3Sw_ZZ4IyJmcqG5BTTtAMX6qRX0_k8dBlnH2se7dI/view
     gsheets_id = "1WE3Sw_ZZ4IyJmcqG5BTTtAMX6qRX0_k8dBlnH2se7dI"
     
     # initialize the TSN client
