@@ -3,6 +3,9 @@ from prefect import task
 from datetime import datetime
 
 @task
+def task_reconcile_data(df_base: pd.DataFrame, df_target: pd.DataFrame) -> pd.DataFrame:
+    return reconcile_data(df_base, df_target)
+
 def reconcile_data(df_base: pd.DataFrame, df_target: pd.DataFrame) -> pd.DataFrame:
     """
     Reconciles two dataframes, keeping only new records from df_target.
@@ -24,6 +27,7 @@ def reconcile_data(df_base: pd.DataFrame, df_target: pd.DataFrame) -> pd.DataFra
     # keep only the records that are not in the base
     df_result = df_target[~df_target["date"].isin(df_base["date"])]
     return df_result
+
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """

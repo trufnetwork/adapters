@@ -4,10 +4,16 @@ import tsn_sdk.client as tsn_client
 
 
 @task
+def task_filter_by_source_id(df: pd.DataFrame, source_id: str) -> pd.DataFrame:
+    return filter_by_source_id(df, source_id)
+
 def filter_by_source_id(df: pd.DataFrame, source_id: str) -> pd.DataFrame:
     return df[df["source_id"] == source_id]
 
 @task
+def task_prepare_records_for_tsn(df: pd.DataFrame) -> pd.DataFrame:
+    return prepare_records_for_tsn(df)
+
 def prepare_records_for_tsn(df: pd.DataFrame) -> pd.DataFrame:
     """
     Prepare the records for TSN by converting the date to YYYY-MM-DD format.
@@ -16,6 +22,9 @@ def prepare_records_for_tsn(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 @task
+def task_deploy_primitive_if_needed(stream_id: str, client: tsn_client.TSNClient):
+    return deploy_primitive_if_needed(stream_id, client)
+
 def deploy_primitive_if_needed(stream_id: str, client: tsn_client.TSNClient):
     """
     Deploy the primitive if it does not exist.
@@ -33,6 +42,9 @@ def deploy_primitive_if_needed(stream_id: str, client: tsn_client.TSNClient):
         print(f"Stream {stream_id} already exists.")
 
 @task
+def task_normalize_source(df: pd.DataFrame) -> pd.DataFrame:
+    return normalize_source(df)
+
 def normalize_source(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize the source data to match the expected format.

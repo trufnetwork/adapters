@@ -7,6 +7,10 @@ from prefect.tasks import task_input_hash
 
 # minute cache = it's shared between multiple runs
 @task(cache_expiration=timedelta(minutes=1), cache_key_fn=task_input_hash)
+def task_read_gsheet(gsheets_id: str, second_column_name: Optional[str] = "value"):
+    return read_gsheet(gsheets_id, second_column_name)
+
+
 def read_gsheet(gsheets_id: str, second_column_name: Optional[str] = "value"):
     """
     Read a Google Sheet and return a DataFrame.

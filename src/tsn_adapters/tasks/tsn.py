@@ -8,6 +8,9 @@ import pandas as pd
 from datetime import datetime
 
 @task(tags=["tsn", "tsn-write"])
+def task_insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client.TSNClient):
+    return insert_tsn_records(stream_id, records, client)
+
 def insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client.TSNClient):
     # check if the records are empty
     if len(records) == 0:
@@ -34,6 +37,9 @@ This task fetches all the records from the TSN for a given stream_id and data_pr
 - tsn_provider: the TSN provider to fetch the records from
 """
 @task(tags=["tsn", "tsn-read"])
+def task_get_all_tsn_records(stream_id: str, client: tsn_client.TSNClient, data_provider: Optional[str] = None) -> pd.DataFrame:
+    return get_all_tsn_records(stream_id, client, data_provider)
+
 def get_all_tsn_records(stream_id: str, client: tsn_client.TSNClient, data_provider: Optional[str] = None) -> pd.DataFrame:
     recs = client.get_records(
         stream_id=stream_id,
@@ -53,6 +59,9 @@ def get_all_tsn_records(stream_id: str, client: tsn_client.TSNClient, data_provi
     return df
 
 @task(tags=["tsn", "tsn-write"])
+def task_deploy_primitive(stream_id: str, client: tsn_client.TSNClient):
+    return deploy_primitive(stream_id, client)
+
 def deploy_primitive(stream_id: str, client: tsn_client.TSNClient):
     client.deploy_stream(stream_id, stream_type=tsn_bindings.StreamTypePrimitive, wait=True)
 
