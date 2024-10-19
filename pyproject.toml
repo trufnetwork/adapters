@@ -10,7 +10,7 @@ readme = "README.md"
 dependencies = [
     "prefect-client",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
-    "tsn_sdk_py@git+https://github.com/truflation/tsn-sdk-py.git@95f13de50c22e3663f2cb17d5202a7cc0eb86937",
+    "tsn_sdk_py@git+https://github.com/truflation/tsn-sdk-py.git@2d145ca091222fa5a37ed1c8697be72abf3645b9",
     "PyGithub",
 ]
 
