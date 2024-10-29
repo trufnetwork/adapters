@@ -5,11 +5,12 @@ from prefect import task
 import io
 
 @task
-def task_read_repo_csv_file(repo: str, path: str, branch: str = "main") -> pd.DataFrame:
-    return read_repo_csv_file(repo, path, branch)
+def task_read_repo_csv_file(repo: str, path: str, branch: str = "main", gh_token: str = None) -> pd.DataFrame:
+    return read_repo_csv_file(repo, path, branch, gh_token)
 
-def read_repo_csv_file(repo: str, path: str, branch: str = "main") -> pd.DataFrame:
-    gh_token = os.getenv("GITHUB_TOKEN")
+def read_repo_csv_file(repo: str, path: str, branch: str = "main", gh_token: str = None) -> pd.DataFrame:
+    if gh_token is None:
+        gh_token = os.getenv("GITHUB_TOKEN")
 
     g = Github(gh_token) 
     try:
