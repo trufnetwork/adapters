@@ -1,32 +1,31 @@
 import os
-from typing import Optional
+import pandas as pd
 import tsn_sdk.client as tsn_client
-import tsn_sdk.utils as tsn_utils
 import tsn_sdk_c_bindings.exports as tsn_bindings
 from prefect import flow, task
-import pandas as pd
-from datetime import datetime
+from typing import Optional
+
 
 @task(tags=["tsn", "tsn-write"])
-def task_insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client.TSNClient):
-    return insert_tsn_records(stream_id, records, client)
+def task_insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client.TSNClient, wait: bool = True):
+    return insert_tsn_records(stream_id, records, client, wait)
 
-def insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client.TSNClient):
+def insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client.TSNClient, wait: bool = True):
     # check if the records are empty
     if len(records) == 0:
         print(f"No records to insert for stream {stream_id}")
         return
-    
+
     print(f"Inserting {len(records)} records into stream {stream_id}")
     # generate tuples, [("2024-01-01", "100", inserted_date), ...]
     args = [(record["date"], str(record["value"])) for record in records.to_dict(orient="records")]
-    
+
     # args is a list of tuples with the keys: date str, value float
     client.execute_procedure(
         stream_id=stream_id,
         procedure="insert_record",
         args=args,
-        wait=True
+        wait=wait
     )
 
 """
