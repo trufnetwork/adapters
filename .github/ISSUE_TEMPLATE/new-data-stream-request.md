@@ -1,16 +1,16 @@
 ---
 name: New data stream request
-about: Request specific data to be added to Truf Network and offer compensation
-title: 'New Data: [Price of apples in the US market]'
+about: Are you a data consumer? Request specific data to be added to Truf Network
+title: 'Request Data: [Price of apples in the US market]'
 labels: ''
 assignees: ''
 
 ---
 
 # Requirements
-Describe the expected outcome of the data request
+Describe the expected outcome of the data request.
 
-## Preferred data providers
+## Preferred data providers 
 Name the data providers from which you would prefer your data to be ingested. Leave N/A if there is no preference. 
 
 ## Start date
