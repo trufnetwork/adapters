@@ -3,14 +3,14 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tsn-adapters"
+name = "trufnetwork-adapters"
 version = "0.1.0"
 description = "A collection of prefect tasks and examples ingesting data into TSN"
 readme = "README.md"
 dependencies = [
     "prefect-client",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
-    "tsn_sdk_py@git+https://github.com/trufnetwork/sdk-py.git@3ce3fa1a13d6b68bc68db42549e186619c1d7b9e",
+    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@7054517f6205ed9e1b1d626d2b9d0762968c2d2d",
     "PyGithub",
 ]
 

@@ -1,6 +1,6 @@
 import pandas as pd
 from prefect import task
-import tsn_sdk.client as tsn_client
+import trufnetwork_sdk_py.client as tn_client
 
 
 @task
@@ -22,10 +22,10 @@ def prepare_records_for_tsn(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 @task
-def task_deploy_primitive_if_needed(stream_id: str, client: tsn_client.TSNClient):
+def task_deploy_primitive_if_needed(stream_id: str, client: tn_client.TNClient):
     return deploy_primitive_if_needed(stream_id, client)
 
-def deploy_primitive_if_needed(stream_id: str, client: tsn_client.TSNClient):
+def deploy_primitive_if_needed(stream_id: str, client: tn_client.TNClient):
     """
     Deploy the primitive if it does not exist.
     """

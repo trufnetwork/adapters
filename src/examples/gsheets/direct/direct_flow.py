@@ -4,8 +4,8 @@ from examples.gsheets.utils import task_deploy_primitive_if_needed, task_filter_
 from tsn_adapters.tasks.tsn import task_insert_tsn_records, task_get_all_tsn_records
 from tsn_adapters.tasks.data_manipulation import task_reconcile_data
 from tsn_adapters.tasks.gsheet import task_read_gsheet
-import tsn_sdk.client as tsn_client
-import tsn_sdk.utils as tsn_utils
+import trufnetwork_sdk_py.client as tn_client
+import trufnetwork_sdk_py.utils as tn_utils
 
 @flow(log_prints=True)
 def gsheets_flow(destination_tsn_provider: str):
@@ -24,11 +24,11 @@ def gsheets_flow(destination_tsn_provider: str):
     """
     source_id = "1.1.01"
     stream_name = "gsheets-direct-flow-stream"
-    stream_id = tsn_utils.generate_stream_id(stream_name)
+    stream_id = tn_utils.generate_stream_id(stream_name)
     gsheets_id = "1WE3Sw_ZZ4IyJmcqG5BTTtAMX6qRX0_k8dBlnH2se7dI"
     
     # initialize the TSN client
-    client = tsn_client.TSNClient(destination_tsn_provider, token=os.environ["TSN_PRIVATE_KEY"])
+    client = tn_client.TNClient(destination_tsn_provider, token=os.environ["TSN_PRIVATE_KEY"])
 
     # deploy the source_id if needed
     task_deploy_primitive_if_needed(stream_id, client)

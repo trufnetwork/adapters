@@ -1,16 +1,16 @@
 import os
 import pandas as pd
-import tsn_sdk.client as tsn_client
-import tsn_sdk_c_bindings.exports as tsn_bindings
+import trufnetwork_sdk_py.client as tn_client
+import trufnetwork_sdk_c_bindings.exports as tsn_bindings
 from prefect import flow, task
 from typing import Optional
 
 
 @task(tags=["tsn", "tsn-write"])
-def task_insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client.TSNClient, wait: bool = True):
+def task_insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tn_client.TNClient, wait: bool = True):
     return insert_tsn_records(stream_id, records, client, wait)
 
-def insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tsn_client.TSNClient, wait: bool = True):
+def insert_tsn_records(stream_id: str, records: pd.DataFrame, client: tn_client.TNClient, wait: bool = True):
     # check if the records are empty
     if len(records) == 0:
         print(f"No records to insert for stream {stream_id}")
@@ -36,10 +36,10 @@ This task fetches all the records from the TSN for a given stream_id and data_pr
 - tsn_provider: the TSN provider to fetch the records from
 """
 @task(tags=["tsn", "tsn-read"])
-def task_get_all_tsn_records(stream_id: str, client: tsn_client.TSNClient, data_provider: Optional[str] = None) -> pd.DataFrame:
+def task_get_all_tsn_records(stream_id: str, client: tn_client.TNClient, data_provider: Optional[str] = None) -> pd.DataFrame:
     return get_all_tsn_records(stream_id, client, data_provider)
 
-def get_all_tsn_records(stream_id: str, client: tsn_client.TSNClient, data_provider: Optional[str] = None) -> pd.DataFrame:
+def get_all_tsn_records(stream_id: str, client: tn_client.TNClient, data_provider: Optional[str] = None) -> pd.DataFrame:
     recs = client.get_records(
         stream_id=stream_id,
         data_provider=data_provider,
@@ -58,17 +58,17 @@ def get_all_tsn_records(stream_id: str, client: tsn_client.TSNClient, data_provi
     return df
 
 @task(tags=["tsn", "tsn-write"])
-def task_deploy_primitive(stream_id: str, client: tsn_client.TSNClient):
+def task_deploy_primitive(stream_id: str, client: tn_client.TNClient):
     return deploy_primitive(stream_id, client)
 
-def deploy_primitive(stream_id: str, client: tsn_client.TSNClient):
+def deploy_primitive(stream_id: str, client: tn_client.TNClient):
     client.deploy_stream(stream_id, stream_type=tsn_bindings.StreamTypePrimitive, wait=True)
 
 
 if __name__ == "__main__":
     @flow(log_prints=True)
     def test_get_all_tsn_records():
-        client = tsn_client.TSNClient(url=os.environ["TSN_PROVIDER"], token=os.environ["TSN_PRIVATE_KEY"])
+        client = tn_client.TNClient(url=os.environ["TSN_PROVIDER"], token=os.environ["TSN_PRIVATE_KEY"])
         recs = get_all_tsn_records("st2393fded6ff3bde0e77209bc41f964", client)
         print(recs)
 

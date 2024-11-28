@@ -6,7 +6,7 @@ from tsn_adapters.tasks.github import task_read_repo_csv_file
 from tsn_adapters.tasks.gsheet import task_read_gsheet
 from tsn_adapters.tasks.tsn import task_insert_tsn_records, task_get_all_tsn_records
 from tsn_adapters.tasks.data_manipulation import task_reconcile_data
-import tsn_sdk.client as tsn_client
+import trufnetwork_sdk_py.client as tn_client
 
 @flow(log_prints=True)
 def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
@@ -51,7 +51,7 @@ def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
     insert_jobs = []
 
     # initialize the TSN client
-    client = tsn_client.TSNClient(destination_tsn_provider, token=os.environ["TSN_PRIVATE_KEY"])
+    client = tn_client.TNClient(destination_tsn_provider, token=os.environ["TSN_PRIVATE_KEY"])
 
     for gsheets_id in gsheets_ids:
 
