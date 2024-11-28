@@ -1,17 +1,17 @@
-import os
-import pandas as pd
-from github import Github, GithubException
-from prefect import task
 import io
+import pandas as pd
+from prefect import task
+from pydantic import SecretStr
+
+from github import Github, GithubException
+
 
 @task
-def task_read_repo_csv_file(repo: str, path: str, branch: str = "main") -> pd.DataFrame:
-    return read_repo_csv_file(repo, path, branch)
+def task_read_repo_csv_file(repo: str, path: str, branch: str = "main", gh_token: SecretStr = None) -> pd.DataFrame:
+    return read_repo_csv_file(repo, path, branch, gh_token)
 
-def read_repo_csv_file(repo: str, path: str, branch: str = "main") -> pd.DataFrame:
-    gh_token = os.getenv("GITHUB_TOKEN")
-
-    g = Github(gh_token) 
+def read_repo_csv_file(repo: str, path: str, branch: str = "main", gh_token: SecretStr = None) -> pd.DataFrame:
+    g = Github(gh_token.get_secret_value())
     try:
         repository_api = g.get_repo(repo)
     except GithubException as e:
