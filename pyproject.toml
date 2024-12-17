@@ -14,5 +14,17 @@ dependencies = [
     "PyGithub",
 ]
 
+[project.optional-dependencies]
+argentina = [
+    "beautifulsoup4",
+    "dateparser"
+]
+
+
 [tool.setuptools]
 packages = {find = {where = ["src"]}}
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')"
+]
