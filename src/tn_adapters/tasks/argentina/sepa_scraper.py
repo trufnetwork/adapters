@@ -41,6 +41,7 @@ class SepaHistoricalDataItem(BaseModel):
     def get_download_link(self) -> str:
         """Returns the direct download link for the ZIP file."""
         lowercase_weekday = date_to_weekday(self.date).lower()
+        # note that links different. we use ``resource`` instead of ``archivo``
         return f"{self._base_url}/{self.dataset_id}/resource/{self.resource_id}/download/sepa_{lowercase_weekday}.zip"
 
     def fetch_into_memory(self) -> bytes:
@@ -101,6 +102,10 @@ class SepaPreciosScraper:
                 items.append(data_item)
             except Exception as e:
                 logger.error(f"Error processing item: {e}, Item HTML: {item}")
+
+        if not items:
+            logger.error("No historical data items found.")
+            raise ValueError("No historical data items found.")
 
         return items
 
