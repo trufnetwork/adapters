@@ -22,11 +22,14 @@ argentina = [
     "dateparser"
 ]
 
-
 [tool.setuptools]
-packages = {find = {where = ["src"]}}
+packages = {find = {where = ["."]}}
+package-dir = {"" = "."}
 
 [tool.pytest.ini_options]
 markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')"
 ]
+pythonpath = ["src"]
+addopts = "--import-mode=importlib"
+testpaths = ["tests"]
