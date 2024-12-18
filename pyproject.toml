@@ -12,6 +12,8 @@ dependencies = [
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
     "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@3787c754326c63e5644a1fa9ab8c8201fa14b95a",
     "PyGithub",
+    "pandera",
+    "pandas",
 ]
 
 [project.optional-dependencies]
@@ -20,11 +22,14 @@ argentina = [
     "dateparser"
 ]
 
-
 [tool.setuptools]
-packages = {find = {where = ["src"]}}
+packages = {find = {where = ["."]}}
+package-dir = {"" = "."}
 
 [tool.pytest.ini_options]
 markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')"
 ]
+pythonpath = ["src"]
+addopts = "--import-mode=importlib"
+testpaths = ["tests"]

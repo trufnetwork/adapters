@@ -1,32 +1,31 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
-from tsn_adapters.tasks.argentina.scrape_zip import DataItem, SepaPreciosWebScraper
-
+from tsn_adapters.tasks.argentina.sepa_scraper import SepaHistoricalDataItem, SepaPreciosScraper
 import requests
 
 
 # Tests for DataItem class
 def test_dataitem_valid_date():
-    item = DataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
+    item = SepaHistoricalDataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
     assert item.date == "2024-12-16"
 
 
 def test_dataitem_invalid_date():
     with pytest.raises(ValueError):
-        DataItem(date="16/12/2024", resource_id="abc123", dataset_id="xyz789")
+        SepaHistoricalDataItem(date="16/12/2024", resource_id="abc123", dataset_id="xyz789")
 
 
 def test_dataitem_resource_link():
-    item = DataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
+    item = SepaHistoricalDataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
     expected = "https://datos.produccion.gob.ar/dataset/xyz789/archivo/abc123"
     assert item.get_resource_link() == expected
 
 
 def test_dataitem_download_link():
     # Monday -> lunes
-    item = DataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
-    expected = f"{item.get_resource_link()}/download/sepa_lunes.zip"
+    item = SepaHistoricalDataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
+    expected = f"https://datos.produccion.gob.ar/dataset/xyz789/resource/abc123/download/sepa_lunes.zip"
     assert item.get_download_link() == expected
 
 
@@ -66,8 +65,8 @@ def test_scraper_parses_items(mock_get):
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
-    scraper = SepaPreciosWebScraper()
-    items = scraper._get_historical_items()
+    scraper = SepaPreciosScraper()
+    items = scraper.scrape_historical_items()
 
     assert len(items) == 2
     assert items[0].date == "2024-12-16"
@@ -86,9 +85,9 @@ def test_scraper_no_main_element(mock_get):
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
-    scraper = SepaPreciosWebScraper()
-    with pytest.raises(ValueError, match="Main element not found in page"):
-        scraper._get_historical_items()
+    scraper = SepaPreciosScraper()
+    with pytest.raises(ValueError, match="Main historical data element not found"):
+        scraper.scrape_historical_items()
 
 
 @patch("requests.Session.get")
@@ -108,9 +107,9 @@ def test_scraper_no_date_element(mock_get):
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
-    scraper = SepaPreciosWebScraper()
-    with pytest.raises(ValueError, match="Date element not found in item"):
-        scraper._get_historical_items()
+    scraper = SepaPreciosScraper()
+    with pytest.raises(ValueError, match="No historical data items found."):
+        scraper.scrape_historical_items()
 
 
 @patch("requests.Session.get")
@@ -136,11 +135,11 @@ def test_scraper_invalid_href(mock_get):
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
-    scraper = SepaPreciosWebScraper()
+    scraper = SepaPreciosScraper()
     with pytest.raises(
-        ValueError, match="Error processing item: Resource anchor not found in item"
+        ValueError, match="No historical data items found."
     ):
-        scraper._get_historical_items()
+        scraper.scrape_historical_items()
 
 
 # Integration Tests
@@ -148,14 +147,14 @@ def test_scraper_invalid_href(mock_get):
 @pytest.fixture(scope="session")
 def scraper_instance():
     """Fixture to create and store the scraper instance and its parsed soup once."""
-    scraper = SepaPreciosWebScraper()
+    scraper = SepaPreciosScraper()
     return scraper
 
 
 @pytest.mark.integration
 def test_real_site_has_items(scraper_instance):
     """Test that the real site returns at least one historical item."""
-    items = scraper_instance._get_historical_items()
+    items = scraper_instance.scrape_historical_items()
     assert len(items) > 0, "Expected at least one historical item from the live site."
 
     # Additional validation of the first item
@@ -173,7 +172,7 @@ def test_real_site_has_items(scraper_instance):
 @pytest.mark.integration
 def test_download_links_valid(scraper_instance):
     """Test that each item's download link exists and doesn't return an invalid response."""
-    items = scraper_instance._get_historical_items()
+    items = scraper_instance.scrape_historical_items()
     session = requests.Session()
 
     try:
@@ -195,7 +194,7 @@ def test_download_links_valid(scraper_instance):
 @pytest.mark.integration
 def test_resource_links_valid(scraper_instance):
     """Test that each item's resource link exists and is accessible."""
-    items = scraper_instance._get_historical_items()
+    items = scraper_instance.scrape_historical_items()
     session = requests.Session()
 
     try:
@@ -216,7 +215,7 @@ def test_resource_links_valid(scraper_instance):
 @pytest.mark.integration
 def test_specific_date_item(scraper_instance):
     """Test that we can get the first date ever."""
-    items = scraper_instance._get_historical_items()
+    items = scraper_instance.scrape_historical_items()
     
     first_date = "2024-11-18"
 
