@@ -79,18 +79,19 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
     Pandera model for product descriptions with average prices.
     """
     productos_precio_lista_avg: Series[float]
-
+    date: Series[str]
     @staticmethod
     def from_sepa_product_data(
         data: DataFrame[SepaProductosDataModel],
     ) -> DataFrame["SepaAvgPriceProductModel"]:
         with_average_price = (
-            data.groupby("id_producto")
+            data.groupby([ "id_producto", "date" ])
             .agg(
                 {
                     "id_producto": "first",
                     "productos_precio_lista": "mean",
                     "productos_descripcion": "first",
+                    "date": "first",
                 }
             )
             .reset_index(drop=True)
