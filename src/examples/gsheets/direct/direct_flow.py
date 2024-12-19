@@ -1,7 +1,7 @@
 import os
 from prefect import flow
 from examples.gsheets.utils import task_deploy_primitive_if_needed, task_filter_by_source_id, task_normalize_source, task_prepare_records_for_tsn
-from tsn_adapters.tasks.tsn import task_insert_tsn_records, task_get_all_tsn_records
+from tsn_adapters.tasks.trufnetwork import task_insert_tsn_records, task_get_all_tsn_records
 from tsn_adapters.tasks.data_manipulation import task_reconcile_data
 from tsn_adapters.tasks.gsheet import task_read_gsheet
 import trufnetwork_sdk_py.client as tn_client
