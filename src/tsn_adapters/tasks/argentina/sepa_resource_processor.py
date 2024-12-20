@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Iterator, List
+import tempfile
+from typing import Iterator, List, Optional
 import pandas as pd
 from io import StringIO
 from pydantic import BaseModel, field_validator
@@ -14,23 +15,12 @@ from .models.sepa_models import (
 from .utils.archives import extract_zip
 
 
-class SepaZipExtractor:
+def extract_sepa_data(zip_path: str, extract_path: str) -> SepaDirectoryProcessor:
     """
-    Handles the extraction and processing of SEPA data from ZIP files.
+    Extracts SEPA data from a ZIP file and returns a SepaDirectoryProcessor.
     """
-    def __init__(self, zip_path: str, extract_path: str):
-        self.zip_path = zip_path
-        self.extract_path = extract_path
-
-    def extract_data(self, overwrite: bool = False) -> "SepaDirectoryProcessor":
-        """
-        Extracts data from a SEPA ZIP file and returns a SepaDirectoryProcessor.
-        """
-        if not overwrite and os.path.exists(self.extract_path):
-            return SepaDirectoryProcessor(self.extract_path)
-
-        extract_zip(self.zip_path, self.extract_path, overwrite)
-        return SepaDirectoryProcessor(self.extract_path)
+    extract_zip(zip_path, extract_path, overwrite=True)
+    return SepaDirectoryProcessor(extract_path)
 
 
 class SepaDirectoryProcessor:
@@ -83,6 +73,15 @@ class SepaDirectoryProcessor:
 
         merged_df = pd.concat(all_data, ignore_index=True)
         return DataFrame[SepaProductosDataModel](merged_df)
+
+    @staticmethod
+    def from_zip_path(zip_path: str, extract_path: Optional[str] = None) -> "SepaDirectoryProcessor":
+        """
+        Creates a SepaDirectoryProcessor instance from a ZIP file path.
+        """
+        if extract_path is None:
+            extract_path = tempfile.mkdtemp()
+        return extract_sepa_data(zip_path, extract_path)
 
 
 class SepaDataDirectory(BaseModel):

@@ -1,5 +1,4 @@
 from .sepa_resource_processor import (
-    SepaZipExtractor,
     SepaDirectoryProcessor,
     SepaDataDirectory,
 )
@@ -12,7 +11,6 @@ from .models.sepa_models import (
 )
 
 __all__ = [
-    'SepaZipExtractor',
     'SepaDirectoryProcessor',
     'SepaDataDirectory',
     'SepaPreciosScraper',

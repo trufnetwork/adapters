@@ -11,6 +11,7 @@ from tsn_adapters.tasks.argentina.models import (
     SepaAggregatedPricesModel,
     SepaAvgPriceProductModel,
 )
+from ..models.sepa_models import SepaProductosDataModel
 
 
 def aggregate_prices_by_category(

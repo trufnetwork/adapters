@@ -10,6 +10,8 @@ from pandera.typing import DataFrame, Series
 from pandera import DataFrameModel
 from pandas._typing import CompressionOptions
 
+from .sepa_models import SepaProductosDataModel
+
 
 class SepaProductCategoryMapModel(DataFrameModel):
     """
@@ -56,6 +58,15 @@ class SepaProductCategoryMapModel(DataFrameModel):
         df = pd.read_csv(url, compression=compression, sep=sep)
         return DataFrame[SepaProductCategoryMapModel](df)
 
+    
     class Config:
         strict = True
         coerce = True 
+
+
+def get_uncategorized_products(data: DataFrame[SepaProductosDataModel], category_map: DataFrame[SepaProductCategoryMapModel]) -> DataFrame[SepaProductosDataModel]:
+    """
+    Get the products without category
+    """
+    diff_df = data[~data["id_producto"].isin(category_map["id_producto"])]
+    return DataFrame[SepaProductosDataModel](diff_df)
