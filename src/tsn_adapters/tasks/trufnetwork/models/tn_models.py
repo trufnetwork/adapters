@@ -11,3 +11,13 @@ class TnRecordModel(pa.DataFrameModel):
     class Config:
         coerce = True
         strict = 'filter'
+
+class TnDataRowModel(TnRecordModel):
+    """
+    Schema for TN data rows, which includes the stream_id
+    """
+    stream_id: Series[str]
+
+    class Config:
+        coerce = True
+        strict = 'filter'
