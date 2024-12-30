@@ -40,7 +40,6 @@ class SepaAggregatedPricesModel(DataFrameModel):
         coerce = True
 
 
-@pa.check_types
 def sepa_aggregated_prices_to_tn_records(
     df: DataFrame[SepaAggregatedPricesModel],
     get_stream_id: Callable[[str], str],

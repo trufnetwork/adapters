@@ -102,7 +102,7 @@ class TNAccessBlock(Block):
 
         with concurrency("tn-write", occupy=1):
             txHash = self.get_client().execute_procedure(
-                stream_id=stream_id, procedure="insert_record", args=args, wait=False, 
+                stream_id=stream_id, procedure="insert_record", args=args, wait=False, data_provider=data_provider
             )
 
         return txHash
