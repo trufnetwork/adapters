@@ -1,3 +1,4 @@
+from prefect import Task, task
 from prefect.blocks.core import Block
 from pydantic import ConfigDict, SecretStr
 import pandas as pd
@@ -11,7 +12,7 @@ class GithubAccess(Block):
     """
 
     github_token: SecretStr
-    model_config = ConfigDict()
+    model_config = ConfigDict(ignored_types=(Task,))
 
     def read_repo_csv_file(self, repo: str, path: str, branch: str = "main") -> pd.DataFrame:
         # can import only here as it's not available in the server
@@ -36,8 +37,14 @@ class GithubAccess(Block):
         file_content = repository_api.get_contents(path, ref=branch)
         if isinstance(file_content, list):
             file_content = file_content[0]
-        df = pd.read_csv(io.StringIO(file_content.decoded_content.decode()))
+        df: pd.DataFrame = pd.read_csv(io.StringIO(file_content.decoded_content.decode()), dtype=str)
         return df
+
+
+# --- Top Level Task Functions ---
+@task
+def read_repo_csv_file(block: GithubAccess, repo: str, path: str, branch: str = "main") -> pd.DataFrame:
+    return block.read_repo_csv_file(repo=repo, path=path, branch=branch)
 
 
 if __name__ == "__main__":
