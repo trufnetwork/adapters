@@ -1,5 +1,11 @@
 import pandera as pa
 from pandera.typing import DataFrame, Series
+from typing import TypeVar, Type
+
+
+# Create type variables for the models
+T = TypeVar('T', bound='ProductDescriptionModel')
+S = TypeVar('S', bound='SepaProductosDataModel')
 
 
 class SepaProductosDataModel(pa.DataFrameModel):
@@ -12,8 +18,11 @@ class SepaProductosDataModel(pa.DataFrameModel):
     date: Series[str]
 
     class Config(pa.DataFrameModel.Config):
+        type_check_mode = "strict"
         coerce = True
         strict = "filter"
+        on_validation_failure = "warn"
+        add_missing_columns = False
 
     @staticmethod
     def from_full_data(
@@ -27,7 +36,7 @@ class SepaProductosDataModel(pa.DataFrameModel):
                 "date",
             ]
         ]
-        return DataFrame[SepaProductosDataModel](df)
+        return DataFrame["SepaProductosDataModel"](df)
 
 
 class FullSepaProductosDataModel(SepaProductosDataModel):
@@ -49,10 +58,12 @@ class FullSepaProductosDataModel(SepaProductosDataModel):
     productos_precio_unitario_promo2: Series[float] = pa.Field(nullable=True)
     productos_leyenda_promo2: Series[str] = pa.Field(nullable=True)
 
-    class Config(pa.DataFrameModel.Config):
-        coerce = True
-        add_missing_columns = False
+    class Config(SepaProductosDataModel.Config):
+        type_check_mode = "strict"
         strict = True
+        coerce = True
+        on_validation_failure = "warn"
+        add_missing_columns = False
 
 
 class ProductDescriptionModel(pa.DataFrameModel):
@@ -62,16 +73,19 @@ class ProductDescriptionModel(pa.DataFrameModel):
     id_producto: Series[str]
     productos_descripcion: Series[str]
 
-    @staticmethod
-    def from_sepa_product_data(
-        data: DataFrame[SepaProductosDataModel],
-    ) -> DataFrame["ProductDescriptionModel"]:
-        unique_data = data.drop_duplicates(subset="id_producto").reset_index(drop=True)
-        return DataFrame[ProductDescriptionModel](unique_data[["id_producto", "productos_descripcion"]])
-
     class Config(pa.DataFrameModel.Config):
-        add_missing_columns = False
+        coerce = True
         strict = "filter"
+        add_missing_columns = False
+        on_validation_failure = "warn"
+
+    @classmethod
+    def from_sepa_product_data(
+        cls: Type[T],
+        data: DataFrame[SepaProductosDataModel],
+    ) -> DataFrame[T]:
+        unique_data = data.drop_duplicates(subset="id_producto").reset_index(drop=True)
+        return DataFrame[cls](unique_data[["id_producto", "productos_descripcion"]])
 
 
 class SepaAvgPriceProductModel(ProductDescriptionModel):
@@ -80,12 +94,14 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
     """
     productos_precio_lista_avg: Series[float]
     date: Series[str]
-    @staticmethod
+
+    @classmethod
     def from_sepa_product_data(
+        cls: Type[T],
         data: DataFrame[SepaProductosDataModel],
-    ) -> DataFrame["SepaAvgPriceProductModel"]:
+    ) -> DataFrame[T]:
         with_average_price = (
-            data.groupby([ "id_producto", "date" ])
+            data.groupby(["id_producto", "date"])
             .agg(
                 {
                     "id_producto": "first",
@@ -104,4 +120,4 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
             inplace=True,
         )
 
-        return DataFrame[SepaAvgPriceProductModel](with_average_price)
+        return DataFrame[cls](with_average_price)

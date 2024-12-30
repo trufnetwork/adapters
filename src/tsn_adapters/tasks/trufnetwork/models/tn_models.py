@@ -1,5 +1,9 @@
 import pandera as pa
 from pandera.typing import Series
+from typing import TypeVar, Type
+# Create type variables for the models
+T = TypeVar('T', bound='TnRecordModel')
+S = TypeVar('S', bound='TnDataRowModel')
 
 class TnRecordModel(pa.DataFrameModel):
     """
@@ -8,7 +12,7 @@ class TnRecordModel(pa.DataFrameModel):
     date: Series[str]
     value: Series[str]  # Can't use decimal.Decimal in series
 
-    class Config:
+    class Config(pa.DataFrameModel.Config):
         coerce = True
         strict = 'filter'
 
@@ -18,6 +22,6 @@ class TnDataRowModel(TnRecordModel):
     """
     stream_id: Series[str]
 
-    class Config:
+    class Config(TnRecordModel.Config):
         coerce = True
         strict = 'filter'
