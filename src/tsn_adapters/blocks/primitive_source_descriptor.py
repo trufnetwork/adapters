@@ -4,7 +4,7 @@ This file can't import any non standard library, as it's executed in a prefect a
 
 from prefect import Task, task
 from prefect.blocks.core import Block
-import io
+import pandera as pa
 from abc import ABC, abstractmethod
 from pandera.typing import DataFrame, Series
 from pandera import DataFrameModel
@@ -19,7 +19,7 @@ class PrimitiveSourceDataModel(DataFrameModel):
     source_id: Series[str]
     source_type: Series[str]
 
-    class Config:
+    class Config(pa.DataFrameModel.Config):
         strict = "filter"
         coerce = True
 
