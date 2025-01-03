@@ -2,6 +2,8 @@ import pandera as pa
 from pandera.typing import DataFrame, Series
 from typing import TypeVar, Type
 
+from ....utils.filter_failures import filter_failures
+
 
 # Create type variables for the models
 T = TypeVar('T', bound='ProductDescriptionModel')
@@ -18,16 +20,14 @@ class SepaProductosDataModel(pa.DataFrameModel):
     date: Series[str]
 
     class Config(pa.DataFrameModel.Config):
-        type_check_mode = "strict"
         coerce = True
         strict = "filter"
-        on_validation_failure = "warn"
-        add_missing_columns = False
 
-    @staticmethod
+    @classmethod
     def from_full_data(
+        cls: Type[S],
         data: DataFrame["FullSepaProductosDataModel"],
-    ) -> DataFrame["SepaProductosDataModel"]:
+    ) -> DataFrame[S]:
         df = data[
             [
                 "id_producto",
@@ -36,7 +36,8 @@ class SepaProductosDataModel(pa.DataFrameModel):
                 "date",
             ]
         ]
-        return DataFrame["SepaProductosDataModel"](df)
+        df = filter_failures(df, cls)
+        return df
 
 
 class FullSepaProductosDataModel(SepaProductosDataModel):
@@ -59,10 +60,8 @@ class FullSepaProductosDataModel(SepaProductosDataModel):
     productos_leyenda_promo2: Series[str] = pa.Field(nullable=True)
 
     class Config(SepaProductosDataModel.Config):
-        type_check_mode = "strict"
         strict = True
         coerce = True
-        on_validation_failure = "warn"
         add_missing_columns = False
 
 
@@ -76,8 +75,6 @@ class ProductDescriptionModel(pa.DataFrameModel):
     class Config(pa.DataFrameModel.Config):
         coerce = True
         strict = "filter"
-        add_missing_columns = False
-        on_validation_failure = "warn"
 
     @classmethod
     def from_sepa_product_data(
@@ -85,7 +82,10 @@ class ProductDescriptionModel(pa.DataFrameModel):
         data: DataFrame[SepaProductosDataModel],
     ) -> DataFrame[T]:
         unique_data = data.drop_duplicates(subset="id_producto").reset_index(drop=True)
-        return DataFrame[cls](unique_data[["id_producto", "productos_descripcion"]])
+        original = unique_data[["id_producto", "productos_descripcion"]]
+        df = filter_failures(original, cls)
+
+        return df
 
 
 class SepaAvgPriceProductModel(ProductDescriptionModel):
@@ -94,6 +94,10 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
     """
     productos_precio_lista_avg: Series[float]
     date: Series[str]
+
+    class Config(ProductDescriptionModel.Config):
+        strict = "filter"
+        coerce = True
 
     @classmethod
     def from_sepa_product_data(
@@ -120,4 +124,9 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
             inplace=True,
         )
 
-        return DataFrame[cls](with_average_price)
+        df = filter_failures(with_average_price, cls)
+
+        return df
+
+
+

@@ -17,12 +17,14 @@ class SepaHistoricalDataItem(BaseModel):
     """
     Represents a historical data item from the dataset.
     """
-    date: str
+    # not necessarily the website date corresponds to the real date inside the zip file
+    # e.g. they may report at the website to have updated on a certain date, but the real date inside the zip file is different
+    website_date: str
     resource_id: str
     dataset_id: str
     _base_url = "https://datos.produccion.gob.ar/dataset"
 
-    @field_validator('date')
+    @field_validator('website_date')
     @classmethod
     def validate_date(cls, v: str) -> str:
         # Strict check for YYYY-MM-DD
@@ -41,7 +43,7 @@ class SepaHistoricalDataItem(BaseModel):
         Returns the direct download link in the 'resource' pattern, including the weekday in Spanish.
         e.g. https://datos.produccion.gob.ar/dataset/<dataset_id>/resource/<resource_id>/download/sepa_<weekday>.zip
         """
-        lowercase_weekday = date_to_weekday(self.date).lower()
+        lowercase_weekday = date_to_weekday(self.website_date).lower()
         return (
             f"{self._base_url}/{self.dataset_id}/resource/{self.resource_id}/download/sepa_{lowercase_weekday}.zip"
         )
@@ -317,7 +319,7 @@ class SepaPreciosScraper:
         resource_id = match.group(3)
 
         return SepaHistoricalDataItem(
-            date=date_str,
+            website_date=date_str,
             resource_id=resource_id,
             dataset_id=dataset_id
         )

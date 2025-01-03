@@ -9,16 +9,16 @@ import requests
 
 def test_dataitem_valid_date():
     item = SepaHistoricalDataItem(
-        date="2024-12-16",
+        website_date="2024-12-16",
         resource_id="abc123",
         dataset_id="xyz789"
     )
-    assert item.date == "2024-12-16"
+    assert item.website_date == "2024-12-16"
 
 def test_dataitem_invalid_date():
     with pytest.raises(ValueError, match="does not match format"):
         SepaHistoricalDataItem(
-            date="16/12/2024",
+            website_date="16/12/2024",
             resource_id="abc123",
             dataset_id="xyz789"
         )
@@ -26,7 +26,7 @@ def test_dataitem_invalid_date():
 def test_dataitem_download_link():
     # Monday -> lunes
     item = SepaHistoricalDataItem(
-        date="2024-12-16",
+        website_date="2024-12-16",
         resource_id="abc123",
         dataset_id="xyz789"
     )
@@ -94,12 +94,12 @@ def test_scraper_parses_pkg_containers(mock_get):
     assert len(items) == 2
 
     # First container: date=2024-12-25, resource_id=abc123, dataset_id=xyz789
-    assert items[0].date == "2024-12-25"
+    assert items[0].website_date == "2024-12-25"
     assert items[0].dataset_id == "xyz789"
     assert items[0].resource_id == "abc123"
 
     # Second container: date=2024-12-26, resource_id=def456, dataset_id=xyz789
-    assert items[1].date == "2024-12-26"
+    assert items[1].website_date == "2024-12-26"
     assert items[1].dataset_id == "xyz789"
     assert items[1].resource_id == "def456"
 

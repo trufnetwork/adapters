@@ -4,7 +4,7 @@ import os
 import tempfile
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple, cast, Union
 from prefect import flow, get_run_logger, task
-from prefect.runtime import flow_run, task_run
+from prefect.runtime import task_run
 from prefect.concurrency.sync import concurrency
 from enum import Enum
 from prefect.artifacts import create_markdown_artifact, create_table_artifact
@@ -52,6 +52,8 @@ from tsn_adapters.tasks.trufnetwork.models.tn_models import TnDataRowModel
 
 PrimitiveSourcesTypeStr = Literal["url", "github"]
 
+StreamIdMap = Dict[str, str]
+
 
 class PrimitiveSourcesType(Enum):
     URL = "url"
@@ -60,10 +62,18 @@ class PrimitiveSourcesType(Enum):
     def load_block(
         self, name: str
     ) -> Union[UrlPrimitiveSourcesDescriptor, GithubPrimitiveSourcesDescriptor]:
+        result = None
         if self == PrimitiveSourcesType.URL:
-            return UrlPrimitiveSourcesDescriptor.load(name)
+            result = UrlPrimitiveSourcesDescriptor.load(name)
         elif self == PrimitiveSourcesType.GITHUB:
-            return GithubPrimitiveSourcesDescriptor.load(name)
+            result = GithubPrimitiveSourcesDescriptor.load(name)
+        else:
+            raise ValueError(f"Invalid primitive sources type: {self}")
+
+        if isinstance(result, UrlPrimitiveSourcesDescriptor):
+            return result
+        elif isinstance(result, GithubPrimitiveSourcesDescriptor):
+            return result
         else:
             raise ValueError(f"Invalid primitive sources type: {self}")
 
@@ -118,18 +128,20 @@ def fetch_source_metadata(
     ).load_block(source_descriptor_block_name)
 
     source_metadata_df = (
-        get_descriptor_from_url(
-            cast(UrlPrimitiveSourcesDescriptor, source_descriptor_block)
-        )
+        get_descriptor_from_url(block=source_descriptor_block)
         if isinstance(source_descriptor_block, UrlPrimitiveSourcesDescriptor)
-        else get_descriptor_from_github(
-            cast(GithubPrimitiveSourcesDescriptor, source_descriptor_block)
-        )
+        else get_descriptor_from_github(block=source_descriptor_block)
     )
 
+    if source_metadata_df is None:
+        raise ValueError("Source metadata is None")
+
+    table: dict[str, list[Any]] = {
+        str(k): list(v) for k, v in source_metadata_df.to_dict(orient="list").items()
+    }
     create_table_artifact(
         key="source-metadata",
-        table=source_metadata_df.to_dict(orient="list"),
+        table=table,
         description="Available data streams",
     )
 
@@ -170,9 +182,13 @@ def get_last_processed_dates(
 
     last_processed_dates_df = pd.DataFrame(last_processed_dates)
 
+    table: dict[str, list[Any]] = {
+        str(k): list(v)
+        for k, v in last_processed_dates_df.to_dict(orient="list").items()
+    }
     create_table_artifact(
         key="last-processed-dates",
-        table=last_processed_dates_df.to_dict(orient="list"),
+        table=table,
         description="Last processed dates by stream",
     )
 
@@ -183,21 +199,35 @@ def generate_single_date_name():
     parameters = task_run.parameters
     historical_data_item: SepaHistoricalDataItem = parameters["historical_data_item"]
 
-    return f"process-single-date-{historical_data_item.date}"
+    return f"process-single-date-{historical_data_item.website_date}"
 
 
 @task(name="Process Single Date", task_run_name=generate_single_date_name)
 def process_single_date(
     historical_data_item: SepaHistoricalDataItem,
     product_category_map_df: PaDataFrame[SepaProductCategoryMapModel],
+    stream_id_map: StreamIdMap,
 ) -> Tuple[PaDataFrame[TnDataRowModel], PaDataFrame[SepaProductosDataModel]]:
     """Process data for a single date."""
     logger = get_run_logger()
 
     # Use concurrency to limit large downloads
     with concurrency(names=["heavy-file-from-web"], create_if_missing=True):
-        logger.info(f"Processing {historical_data_item.date}")
-        sepa_data_for_date = task_get_sepa_data(historical_data_item)
+        logger.info(f"Processing {historical_data_item.website_date}")
+        sepa_data_for_date = task_get_sepa_data(
+            data_item=historical_data_item
+        )
+
+    real_date = sepa_data_for_date["date"].iloc[0]
+
+    # check if the real date is the same as the website date
+    if historical_data_item.website_date != real_date:
+        logger.warning(f"Real date {real_date} does not match website date {historical_data_item.website_date}. Skipping this date.")
+        # we return empty dataframes
+        return (
+            cast(PaDataFrame[TnDataRowModel], pd.DataFrame()),
+            cast(PaDataFrame[SepaProductosDataModel], pd.DataFrame()),
+        )
 
     # Calculate average prices
     avg_price_by_product_df = SepaAvgPriceProductModel.from_sepa_product_data(
@@ -211,7 +241,7 @@ def process_single_date(
 
     # Convert to TN records
     tn_records_for_date = sepa_aggregated_prices_to_tn_records(
-        aggregated_prices_for_date, lambda category_id: category_id
+        aggregated_prices_for_date, lambda category_id: stream_id_map[category_id]
     )
 
     # Get uncategorized products
@@ -223,7 +253,7 @@ def process_single_date(
     total_products = len(sepa_data_for_date)
     uncategorized_count = len(uncategorized_products)
     categories_count = aggregated_prices_for_date["category_id"].nunique()
-    date_str = historical_data_item.date
+    date_str = historical_data_item.website_date
 
     # Create a Markdown artifact with the stats
     summary = [
@@ -254,13 +284,19 @@ def process_historical_data(
     dates_to_process: Set[str],
     historical_data_items_by_date: Dict[str, SepaHistoricalDataItem],
     product_category_map_df: PaDataFrame[SepaProductCategoryMapModel],
+    stream_id_map: StreamIdMap,
 ) -> Tuple[PaDataFrame[TnDataRowModel], Dict[str, PaDataFrame[SepaProductosDataModel]]]:
     """Process historical data for all dates in parallel."""
-    # just first to debug
     aggregated_records = (
         pd.DataFrame()
     )  # Will be converted to PaDataFrame[TnDataRowModel] at return
     uncategorized_by_date: Dict[str, PaDataFrame[SepaProductosDataModel]] = {}
+    # if no dates to process, return empty
+    if not dates_to_process:
+        return (
+            cast(PaDataFrame[TnDataRowModel], aggregated_records),
+            uncategorized_by_date,
+        )
 
     # just first to debug
     sorted_dates_to_process = sorted(dates_to_process)[:1]
@@ -270,7 +306,7 @@ def process_historical_data(
     for date in sorted_dates_to_process:
         historical_data_item = historical_data_items_by_date[date]
         future = process_single_date.submit(
-            historical_data_item, product_category_map_df
+            historical_data_item, product_category_map_df, stream_id_map
         )
         futures.append((date, future))
 
@@ -280,7 +316,13 @@ def process_historical_data(
         aggregated_records = pd.concat([aggregated_records, tn_records])
         uncategorized_by_date[date] = uncategorized
 
-    return PaDataFrame[TnDataRowModel](aggregated_records), uncategorized_by_date
+    return (
+        cast(
+            PaDataFrame[TnDataRowModel],
+            aggregated_records,
+        ),
+        uncategorized_by_date,
+    )
 
 
 @task(name="Get Available Dates")
@@ -288,8 +330,33 @@ def get_available_dates(
     sepa_scraper: SepaPreciosScraper,
 ) -> Dict[str, SepaHistoricalDataItem]:
     """Get all available dates from the SEPA scraper."""
-    all_historical_data_items = task_scrape_historical_items(sepa_scraper)
-    return {data_item.date: data_item for data_item in all_historical_data_items}
+    all_historical_data_items = task_scrape_historical_items(
+        scraper=sepa_scraper
+    )
+    website_dates_by_item = {data_item.website_date: data_item for data_item in all_historical_data_items}
+    
+    # Create a summary report
+    sorted_dates = sorted(website_dates_by_item.keys())
+    if sorted_dates:
+        summary = [
+            "# Available SEPA Historical Dates",
+            "",
+            f"- **Total dates available:** {len(sorted_dates)}",
+            f"- **Date range:** {sorted_dates[0]} to {sorted_dates[-1]}",
+            "",
+            "## Sample of available dates:",
+            "```",
+            "\n".join(sorted_dates[:10] + (["..."] if len(sorted_dates) > 10 else [])),
+            "```"
+        ]
+        
+        create_markdown_artifact(
+            key="available-dates-summary",
+            markdown="\n".join(summary),
+            description="Summary of available SEPA historical dates"
+        )
+    
+    return website_dates_by_item
 
 
 @task(name="Determine Dates To Process")
@@ -351,6 +418,7 @@ def argentina_ingestor_flow(
         data_provider: The data provider address to use for reading and writing to the TN.
     """
     # --- Initialization ---
+    logger = get_run_logger()
     source_descriptor_block_name = "argentina-sepa-source-descriptor"
     trufnetwork_access_block = TNAccessBlock.load(trufnetwork_access_block_name)
     product_category_map_df = SepaProductCategoryMapModel.task_from_url(
@@ -361,41 +429,59 @@ def argentina_ingestor_flow(
 
     # --- Fetch metadata and determine dates to process ---
     source_metadata_df = fetch_source_metadata(
-        source_descriptor_type, source_descriptor_block_name
+        source_descriptor_type=source_descriptor_type,
+        source_descriptor_block_name=source_descriptor_block_name,
     )
     last_processed_dates_df = get_last_processed_dates(
-        source_metadata_df, trufnetwork_access_block, data_provider
+        source_metadata_df=source_metadata_df,
+        trufnetwork_access_block=trufnetwork_access_block,
+        data_provider=data_provider,
     )
 
     # --- Get available dates from source ---
     sepa_scraper = SepaPreciosScraper(show_progress_bar=True)
-    historical_data_items_by_date = get_available_dates(sepa_scraper)
+    historical_data_items_by_date = get_available_dates(
+        sepa_scraper=sepa_scraper
+    )
     sorted_available_dates = sorted(historical_data_items_by_date.keys())
 
     # --- Determine dates to process for each stream ---
-    dates_to_process_by_stream = determine_dates_to_process(
-        last_processed_dates_df, sorted_available_dates
+    dates_to_process_by_stream_iterator = determine_dates_to_process(
+        last_processed_dates_df=last_processed_dates_df,
+        sorted_available_dates=sorted_available_dates,
     )
 
     # --- Get unique dates to process ---
+    all_stream_data = [
+        stream_data for stream_data in dates_to_process_by_stream_iterator
+    ]
     unique_dates_to_process = {
-        date
-        for stream_data in dates_to_process_by_stream
-        for date in stream_data["date_list"]
+        date for stream_data in all_stream_data for date in stream_data["date_list"]
     }
 
+    # --- Get stream id map ---
+    stream_id_map: StreamIdMap = {
+        stream_data["source_id"]: stream_data["stream_id"]
+        for stream_data in all_stream_data
+    }
 
     # --- Process historical data ---
     aggregated_records, uncategorized_by_date = process_historical_data(
-        unique_dates_to_process,
-        historical_data_items_by_date,
-        product_category_map_df,
+        dates_to_process=unique_dates_to_process,
+        historical_data_items_by_date=historical_data_items_by_date,
+        product_category_map_df=product_category_map_df,
+        stream_id_map=stream_id_map,
     )
+
+    # check if there's any data to insert
+    if aggregated_records.empty:
+        logger.info("No data to insert")
+        return
 
     # --- Insert data by stream ---
     insertion_tasks = []
     insertion_summaries = []
-    for stream_data in dates_to_process_by_stream:
+    for stream_data in all_stream_data:
         stream_id = stream_data["stream_id"]
         stream_records = aggregated_records[
             aggregated_records["stream_id"] == stream_id
@@ -426,13 +512,15 @@ def argentina_ingestor_flow(
 
     # --- Create processing summary ---
     create_processing_summary(
-        source_metadata_df, unique_dates_to_process, uncategorized_by_date
+        source_metadata_df=source_metadata_df,
+        dates_to_process=unique_dates_to_process,
+        uncategorized_products=uncategorized_by_date,
     )
 
     # Wait for all insertions to complete and update summaries
     for idx, task in enumerate(insertion_tasks):
         try:
-            task.result()
+            task.wait()
             insertion_summaries[idx]["status"] = "completed"
         except Exception as e:
             insertion_summaries[idx]["status"] = f"failed: {str(e)}"
@@ -464,13 +552,13 @@ def data_item_cache_key(_, args: Dict[str, Any]) -> Optional[str]:
     We're caching the data by date, since we know that the data is not going to change for a given date
     """
     data_item: SepaHistoricalDataItem = args["data_item"]
-    return data_item.date
+    return data_item.website_date
 
 
 def generate_task_get_sepa_data_name():
     parameters = task_run.parameters
     historical_data_item: SepaHistoricalDataItem = parameters["data_item"]
-    return f"task-get-sepa-data-{historical_data_item.date}"
+    return f"task-get-sepa-data-{historical_data_item.website_date}"
 
 
 @task(

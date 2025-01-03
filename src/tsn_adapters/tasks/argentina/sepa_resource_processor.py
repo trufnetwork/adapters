@@ -9,6 +9,8 @@ from io import StringIO
 from pydantic import BaseModel, field_validator
 from pandera.typing import DataFrame
 
+from ...utils.filter_failures import filter_failures
+
 from .models.sepa_models import (
     SepaProductosDataModel,
 )
@@ -137,4 +139,5 @@ class SepaDataDirectory(BaseModel):
 
         df = pd.read_csv(content_io, skip_blank_lines=True, sep="|")
         df["date"] = self.date
-        return DataFrame[SepaProductosDataModel](df)
+        df = filter_failures(df, SepaProductosDataModel)
+        return df

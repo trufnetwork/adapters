@@ -13,11 +13,15 @@ from pandera import DataFrameModel
 from pandas._typing import CompressionOptions
 from prefect import task
 from prefect.tasks import task_input_hash
+
+from tsn_adapters.utils.filter_failures import filter_failures
 from .sepa_models import SepaProductosDataModel
 import tempfile
 import requests
 import os
+from typing import TypeVar, Type
 
+U = TypeVar("U", bound=pa.DataFrameModel)
 
 class SepaProductCategoryMapModel(DataFrameModel):
     """
@@ -42,8 +46,8 @@ class SepaProductCategoryMapModel(DataFrameModel):
     category_id: Series[str]
     category_name: Series[str]
 
-    @staticmethod
-    def from_url(url: str, sep: str = '|', compression: CompressionOptions = None) -> DataFrame["SepaProductCategoryMapModel"]:
+    @classmethod
+    def from_url(cls: Type[U], url: str, sep: str = '|', compression: CompressionOptions = None) -> DataFrame[U]:
         """
         Create a validated DataFrame from a URL source.
 
@@ -114,7 +118,9 @@ class SepaProductCategoryMapModel(DataFrameModel):
             if unique_categories == 0:
                 raise ValueError("Category map contains no valid categories")
                 
-            return DataFrame[SepaProductCategoryMapModel](df)
+            df = filter_failures(df, cls)
+                
+            return df
 
     # --- TASKIFIED METHODS ---
     @staticmethod
@@ -132,4 +138,8 @@ def get_uncategorized_products(data: DataFrame[SepaProductosDataModel], category
     Get the products without category
     """
     diff_df = data[~data["id_producto"].isin(category_map["id_producto"])]
+
+    # get data without id_producto (=null)
+    null_df = data[data["id_producto"].isnull()]
+    
     return DataFrame[SepaProductosDataModel](diff_df)
