@@ -1,7 +1,7 @@
-from typing import Dict, Any
+from typing import Any
 
 
-def as_json_object(template: str) -> Dict[str, Any]:
+def as_json_object(template: str) -> dict[str, Any]:
     """
     Prefect block to convert a Jinja template to a JSON object. See https://github.com/PrefectHQ/prefect/pull/15132
     """

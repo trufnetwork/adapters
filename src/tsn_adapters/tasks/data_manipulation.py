@@ -1,10 +1,13 @@
+from datetime import datetime
+
 import pandas as pd
 from prefect import task
-from datetime import datetime
+
 
 @task
 def task_reconcile_data(df_base: pd.DataFrame, df_target: pd.DataFrame) -> pd.DataFrame:
     return reconcile_data(df_base, df_target)
+
 
 def reconcile_data(df_base: pd.DataFrame, df_target: pd.DataFrame) -> pd.DataFrame:
     """
@@ -36,15 +39,15 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     - value: float
     """
     df = df.copy()
-    
+
     # check columns presence
     if "date" not in df.columns:
         raise ValueError("Date column is missing")
     if "value" not in df.columns:
         raise ValueError("Value column is missing")
-    
+
     # normalize the types
     df["date"] = df["date"].apply(lambda x: x.strftime("%Y-%m-%d") if isinstance(x, datetime) else x)
     df["value"] = df["value"].apply(lambda x: float(x) if not isinstance(x, float) else x)
-    
+
     return df

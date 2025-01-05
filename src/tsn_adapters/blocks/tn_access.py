@@ -1,19 +1,18 @@
-from prefect.blocks.core import Block
-from pydantic import ConfigDict, SecretStr
-import decimal
 from datetime import datetime, timezone
+import decimal
 from typing import Optional
 
 import pandas as pd
 import pandera as pa
 from pandera.typing import DataFrame
-from prefect import get_run_logger, task, Task
+from prefect import Task, get_run_logger, task
+from prefect.blocks.core import Block
 from prefect.concurrency.sync import concurrency
 from prefect.states import Completed
-
-from tsn_adapters.tasks.trufnetwork.models.tn_models import TnRecordModel
+from pydantic import ConfigDict, SecretStr
 import trufnetwork_sdk_py.client as tn_client
 
+from tsn_adapters.tasks.trufnetwork.models.tn_models import TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
 
 
@@ -34,9 +33,9 @@ class TNAccessBlock(Block):
             token=self.tn_private_key.get_secret_value(),
         )
 
-    def read_all_records(self, stream_id: str) -> pd.DataFrame:
+    def read_all_records(self, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
         """Read all records from TSN"""
-        return self.read_records(stream_id, date_from="1000-01-01")
+        return self.read_records(stream_id, data_provider, date_from="1000-01-01")
 
     @pa.check_types
     def read_records(
@@ -91,17 +90,12 @@ class TNAccessBlock(Block):
         current_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         logging.info(f"Inserting {len(records)} records into stream {stream_id}")
-        args = [
-            [record["date"], str(record["value"]), current_date]
-            for record in records.to_dict(orient="records")
-        ]
+        args = [[record["date"], str(record["value"]), current_date] for record in records.to_dict(orient="records")]
 
         for col in ["date", "value"]:
             if col not in records.columns:
                 logging.error(f"Missing required column '{col}' in records DataFrame.")
-                raise ValueError(
-                    f"Missing required column '{col}' in records DataFrame."
-                )
+                raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
             txHash = self.get_client().execute_procedure(
@@ -120,11 +114,13 @@ class TNAccessBlock(Block):
 
 
 # --- Top Level Task Functions ---
-def read_all_records(block: TNAccessBlock, stream_id: str) -> pd.DataFrame:
-    return block.read_all_records(stream_id)
+@task()
+def task_read_all_records(block: TNAccessBlock, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
+    return block.read_all_records(stream_id, data_provider)
 
 
-def read_records(
+@task()
+def task_read_records(
     block: TNAccessBlock,
     stream_id: str,
     data_provider: Optional[str] = None,
@@ -134,7 +130,8 @@ def read_records(
     return block.read_records(stream_id, data_provider, date_from, date_to)
 
 
-def insert_tn_records(
+@task()
+def task_insert_tn_records(
     block: TNAccessBlock,
     stream_id: str,
     records: DataFrame[TnRecordModel],
@@ -143,12 +140,13 @@ def insert_tn_records(
     return block.insert_tn_records(stream_id, records, data_provider)
 
 
-def wait_for_tx(block: TNAccessBlock, tx_hash: str) -> None:
+@task(retries=3, retry_delay_seconds=2)
+def task_wait_for_tx(block: TNAccessBlock, tx_hash: str) -> None:
     return block.wait_for_tx(tx_hash)
 
 
 @task(retries=5, retry_delay_seconds=10)
-def insert_and_wait_for_tx(
+def task_insert_and_wait_for_tx(
     block: TNAccessBlock,
     stream_id: str,
     records: DataFrame[TnRecordModel],
@@ -158,15 +156,13 @@ def insert_and_wait_for_tx(
     logging = get_run_logger()
 
     logging.info(f"waitInserting {len(records)} records into stream {stream_id}")
-    insertion = insert_tn_records(
-        block, stream_id=stream_id, records=records, data_provider=data_provider
-    )
+    insertion = task_insert_tn_records(block=block, stream_id=stream_id, records=records, data_provider=data_provider)
 
     if insertion is None:
         return Completed(message="No records to insert")
 
     try:
-        wait_for_tx(block, tx_hash=insertion)
+        task_wait_for_tx(block=block, tx_hash=insertion)
     except Exception as e:
         if "duplicate key value violates unique constraint" in str(e):
             logging.warning(f"Continuing after duplicate key value violation: {e}")

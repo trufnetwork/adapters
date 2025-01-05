@@ -2,13 +2,14 @@
 This file can't import any non standard library, as it's executed in a prefect agent.
 """
 
+from abc import ABC, abstractmethod
+
+import pandas as pd
+import pandera as pa
+from pandera import DataFrameModel
+from pandera.typing import DataFrame, Series
 from prefect import Task, task
 from prefect.blocks.core import Block
-import pandera as pa
-from abc import ABC, abstractmethod
-from pandera.typing import DataFrame, Series
-from pandera import DataFrameModel
-import pandas as pd
 from pydantic import ConfigDict
 
 from tsn_adapters.blocks.github_access import GithubAccess
@@ -53,19 +54,22 @@ class GithubPrimitiveSourcesDescriptor(Block, PrimitiveSourcesDescriptor):
     branch: str
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
-        file_content: pd.DataFrame = self.github_access.read_repo_csv_file(
-            self.repo, self.path, self.branch
-        )
+        file_content: pd.DataFrame = self.github_access.read_repo_csv_file(self.repo, self.path, self.branch)
         return DataFrame[PrimitiveSourceDataModel](file_content)
 
 
 # --- Top Level Task Functions ---
 @task(retries=3, retry_delay_seconds=10)
-def get_descriptor_from_url(block: UrlPrimitiveSourcesDescriptor) -> DataFrame[PrimitiveSourceDataModel]:
+def get_descriptor_from_url(
+    block: UrlPrimitiveSourcesDescriptor,
+) -> DataFrame[PrimitiveSourceDataModel]:
     return block.get_descriptor()
 
+
 @task(retries=3, retry_delay_seconds=10)
-def get_descriptor_from_github(block: GithubPrimitiveSourcesDescriptor) -> DataFrame[PrimitiveSourceDataModel]:
+def get_descriptor_from_github(
+    block: GithubPrimitiveSourcesDescriptor,
+) -> DataFrame[PrimitiveSourceDataModel]:
     return block.get_descriptor()
 
 

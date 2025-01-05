@@ -1,39 +1,24 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from datetime import datetime
-from tsn_adapters.tasks.argentina.sepa_scraper import (
-    SepaHistoricalDataItem,
-    SepaPreciosScraper
-)
-import requests
+
+from tsn_adapters.tasks.argentina.scrapers.sepa_scraper import SepaHistoricalDataItem, SepaPreciosScraper
+
 
 def test_dataitem_valid_date():
-    item = SepaHistoricalDataItem(
-        website_date="2024-12-16",
-        resource_id="abc123",
-        dataset_id="xyz789"
-    )
+    item = SepaHistoricalDataItem(website_date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
     assert item.website_date == "2024-12-16"
+
 
 def test_dataitem_invalid_date():
     with pytest.raises(ValueError, match="does not match format"):
-        SepaHistoricalDataItem(
-            website_date="16/12/2024",
-            resource_id="abc123",
-            dataset_id="xyz789"
-        )
+        SepaHistoricalDataItem(website_date="16/12/2024", resource_id="abc123", dataset_id="xyz789")
+
 
 def test_dataitem_download_link():
     # Monday -> lunes
-    item = SepaHistoricalDataItem(
-        website_date="2024-12-16",
-        resource_id="abc123",
-        dataset_id="xyz789"
-    )
-    expected = (
-        "https://datos.produccion.gob.ar/dataset/xyz789/resource/"
-        "abc123/download/sepa_lunes.zip"
-    )
+    item = SepaHistoricalDataItem(website_date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
+    expected = "https://datos.produccion.gob.ar/dataset/xyz789/resource/" "abc123/download/sepa_lunes.zip"
     assert item.get_download_link() == expected
 
 
@@ -80,6 +65,7 @@ MOCK_HTML = """
   </body>
 </html>
 """
+
 
 @patch("requests.Session.get")
 def test_scraper_parses_pkg_containers(mock_get):

@@ -1,14 +1,14 @@
-from typing import TypeVar, Type, cast
+from typing import TypeVar, cast
 
 import pandas as pd
 import pandera as pa
-from pandera.typing import DataFrame
 from pandera.errors import SchemaErrors
+from pandera.typing import DataFrame
 
 U = TypeVar("U", bound=pa.DataFrameModel)
 
 
-def filter_failures(original: pd.DataFrame, model: Type[U]) -> DataFrame[U]:
+def filter_failures(original: pd.DataFrame, model: type[U]) -> DataFrame[U]:
     """
     Filters out rows from the original DataFrame that fail validation against the provided Pandera model.
 

@@ -1,8 +1,10 @@
+import io
+
+import pandas as pd
 from prefect import Task, task
 from prefect.blocks.core import Block
 from pydantic import ConfigDict, SecretStr
-import pandas as pd
-import io
+
 
 class GithubAccess(Block):
     """Prefect Block for managing GitHub access credentials.
@@ -26,11 +28,11 @@ class GithubAccess(Block):
                 if not self.github_token:
                     raise Exception(
                         "Repository not found (404). It might be private or a GitHub token is missing."
-                    )
+                    ) from e
                 else:
                     raise Exception(
                         "Repository not found (404). Please ensure your GitHub token has read access to the repository."
-                    )
+                    ) from e
             else:
                 raise e
 
