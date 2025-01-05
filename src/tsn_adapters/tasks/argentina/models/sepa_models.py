@@ -1,19 +1,20 @@
+from typing import TypeVar
+
 import pandera as pa
 from pandera.typing import DataFrame, Series
-from typing import TypeVar, Type
 
-from ....utils.filter_failures import filter_failures
-
+from tsn_adapters.utils.filter_failures import filter_failures
 
 # Create type variables for the models
-T = TypeVar('T', bound='ProductDescriptionModel')
-S = TypeVar('S', bound='SepaProductosDataModel')
+T = TypeVar("T", bound="ProductDescriptionModel")
+S = TypeVar("S", bound="SepaProductosDataModel")
 
 
 class SepaProductosDataModel(pa.DataFrameModel):
     """
     Pandera model for core SEPA productos data.
     """
+
     id_producto: Series[str]
     productos_descripcion: Series[str]
     productos_precio_lista: Series[float]
@@ -25,7 +26,7 @@ class SepaProductosDataModel(pa.DataFrameModel):
 
     @classmethod
     def from_full_data(
-        cls: Type[S],
+        cls: type[S],
         data: DataFrame["FullSepaProductosDataModel"],
     ) -> DataFrame[S]:
         df = data[
@@ -44,6 +45,7 @@ class FullSepaProductosDataModel(SepaProductosDataModel):
     """
     Pandera model for the full SEPA productos data, including additional details.
     """
+
     id_comercio: Series[str]
     id_bandera: Series[str]
     id_sucursal: Series[str]
@@ -69,6 +71,7 @@ class ProductDescriptionModel(pa.DataFrameModel):
     """
     Pandera model for unique product descriptions.
     """
+
     id_producto: Series[str]
     productos_descripcion: Series[str]
 
@@ -78,7 +81,7 @@ class ProductDescriptionModel(pa.DataFrameModel):
 
     @classmethod
     def from_sepa_product_data(
-        cls: Type[T],
+        cls: type[T],
         data: DataFrame[SepaProductosDataModel],
     ) -> DataFrame[T]:
         unique_data = data.drop_duplicates(subset="id_producto").reset_index(drop=True)
@@ -92,6 +95,7 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
     """
     Pandera model for product descriptions with average prices.
     """
+
     productos_precio_lista_avg: Series[float]
     date: Series[str]
 
@@ -101,7 +105,7 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
 
     @classmethod
     def from_sepa_product_data(
-        cls: Type[T],
+        cls: type[T],
         data: DataFrame[SepaProductosDataModel],
     ) -> DataFrame[T]:
         with_average_price = (
@@ -127,6 +131,3 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
         df = filter_failures(with_average_price, cls)
 
         return df
-
-
-

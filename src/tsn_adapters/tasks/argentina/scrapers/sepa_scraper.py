@@ -1,30 +1,32 @@
+from datetime import datetime
 import logging
 import re
-from datetime import datetime
-from typing import List, Optional
-import requests
-from bs4 import BeautifulSoup
-from prefect import task, get_run_logger
-from prefect.context import get_run_context, TaskRunContext
-from tqdm import tqdm
 import time
+from typing import Optional
 
-from .utils.dates import date_to_weekday
+from bs4 import BeautifulSoup
+from prefect import get_run_logger, task
+from prefect.context import TaskRunContext, get_run_context
 from pydantic import BaseModel, field_validator
+import requests
+from tqdm import tqdm
+
+from tsn_adapters.tasks.argentina.utils.dates import date_to_weekday
 
 
 class SepaHistoricalDataItem(BaseModel):
     """
     Represents a historical data item from the dataset.
     """
+
     # not necessarily the website date corresponds to the real date inside the zip file
-    # e.g. they may report at the website to have updated on a certain date, but the real date inside the zip file is different
+    # e.g. they may report at the website to have updated on a certain date, but the real date inside the zip file is different  # noqa: E501
     website_date: str
     resource_id: str
     dataset_id: str
     _base_url = "https://datos.produccion.gob.ar/dataset"
 
-    @field_validator('website_date')
+    @field_validator("website_date")
     @classmethod
     def validate_date(cls, v: str) -> str:
         # Strict check for YYYY-MM-DD
@@ -44,35 +46,33 @@ class SepaHistoricalDataItem(BaseModel):
         e.g. https://datos.produccion.gob.ar/dataset/<dataset_id>/resource/<resource_id>/download/sepa_<weekday>.zip
         """
         lowercase_weekday = date_to_weekday(self.website_date).lower()
-        return (
-            f"{self._base_url}/{self.dataset_id}/resource/{self.resource_id}/download/sepa_{lowercase_weekday}.zip"
-        )
+        return f"{self._base_url}/{self.dataset_id}/resource/{self.resource_id}/download/sepa_{lowercase_weekday}.zip"
 
-    def fetch_into_memory(self, show_progress_bar: bool = False) -> bytes:
+    def fetch_into_memory(self, show_progress_bar: bool = True) -> bytes:
         """
         Fetch the data into memory, optionally showing a progress bar,
         and gracefully handle cancellation.
-        
+
         Returns:
             bytes: The complete file content, or raises an exception if download failed/cancelled
         """
         download_link = self.get_download_link()
         logger = self._get_logger()
         logger.info(f"Starting download from {download_link}")
-        
+
         # Try HEAD request first, but don't fail if it doesn't work
         total_size: Optional[int] = None
         try:
             head_response = requests.head(download_link, allow_redirects=True, timeout=5)
             if head_response.ok:
-                total_size = int(head_response.headers.get('content-length', 0))
+                total_size = int(head_response.headers.get("content-length", 0))
                 if total_size:
                     logger.info(f"HEAD request successful. Expected file size: {total_size/1024/1024:.2f} MB")
         except Exception as e:
             logger.debug(f"HEAD request failed (this is ok, will proceed with GET): {e}")
-        
+
         # Prepare for streaming download
-        chunks: List[bytes] = []
+        chunks: list[bytes] = []
         downloaded_size = 0
         progress_bar = None
         response = None
@@ -83,14 +83,14 @@ class SepaHistoricalDataItem(BaseModel):
 
         try:
             response = requests.get(
-                download_link, 
-                stream=True, 
-                timeout=(10, 5),  
+                download_link,
+                stream=True,
+                timeout=(10, 5),
                 allow_redirects=True,
-                headers={'Accept-Encoding': 'identity'}
+                headers={"Accept-Encoding": "identity"},
             )
             response.raise_for_status()
-            
+
             # Check for Content-Range + 200 OK mismatch
             content_range = response.headers.get("content-range")
             if response.status_code == 200 and content_range:
@@ -98,7 +98,7 @@ class SepaHistoricalDataItem(BaseModel):
                 range_match = re.match(r"bytes (\d+)-(\d+)/(\d+)", content_range)
                 if range_match:
                     start, end, full_size = map(int, range_match.groups())
-                    logger.warning(
+                    logger.info(
                         f"Server responded with 200 OK but included Content-Range header. "
                         f"Range: {start}-{end}, Full size: {full_size/1024/1024:.2f}MB. "
                         "This may indicate a server misconfiguration."
@@ -108,13 +108,11 @@ class SepaHistoricalDataItem(BaseModel):
                         total_size = full_size
                         logger.info(f"Using size from Content-Range: {total_size/1024/1024:.2f} MB")
                 else:
-                    logger.warning(
-                        f"Server sent invalid Content-Range header with 200 OK: {content_range}"
-                    )
-            
+                    logger.warning(f"Server sent invalid Content-Range header with 200 OK: {content_range}")
+
             # If HEAD failed, try to get size from GET response
             if not total_size:
-                total_size = int(response.headers.get('content-length', 0))
+                total_size = int(response.headers.get("content-length", 0))
                 if total_size:
                     logger.info(f"GET request successful. File size: {total_size/1024/1024:.2f} MB")
                 else:
@@ -124,9 +122,9 @@ class SepaHistoricalDataItem(BaseModel):
             if show_progress_bar and total_size:
                 progress_bar = tqdm(
                     total=total_size,
-                    unit='iB',
+                    unit="iB",
                     unit_scale=True,
-                    desc=f"Downloading {download_link}"
+                    desc=f"Downloading {download_link}",
                 )
 
             logger.debug("Waiting for first data chunk...")
@@ -135,13 +133,11 @@ class SepaHistoricalDataItem(BaseModel):
             for chunk in response.iter_content(chunk_size=8192):
                 current_time = time.time()
                 time_since_last_chunk = current_time - last_chunk_time
-                
+
                 # Check for stalled download
                 if time_since_last_chunk > chunk_timeout:
-                    raise requests.exceptions.ReadTimeout(
-                        f"No data received for {time_since_last_chunk:.1f} seconds"
-                    )
-                
+                    raise requests.exceptions.ReadTimeout(f"No data received for {time_since_last_chunk:.1f} seconds")
+
                 # Check for cancellation
                 run_context = get_run_context()
                 task_run = run_context.task_run if isinstance(run_context, TaskRunContext) else None
@@ -173,20 +169,18 @@ class SepaHistoricalDataItem(BaseModel):
                     progress_bar.update(len(chunk))
                 elif downloaded_size >= next_log_threshold:
                     logger.info(
-                        f"Downloaded: {downloaded_size/1024/1024:.1f} MB" + 
-                        (f" of {total_size/1024/1024:.1f} MB" if total_size else " (unknown total)")
+                        f"Downloaded: {downloaded_size/1024/1024:.1f} MB"
+                        + (f" of {total_size/1024/1024:.1f} MB" if total_size else " (unknown total)")
                     )
                     next_log_threshold = downloaded_size + chunk_log_interval
 
             # Verify download completion
             if total_size and downloaded_size < total_size:
-                raise ValueError(
-                    f"Incomplete download: got {downloaded_size} bytes, expected {total_size} bytes"
-                )
+                raise ValueError(f"Incomplete download: got {downloaded_size} bytes, expected {total_size} bytes")
 
             # Join all chunks into final result
             logger.info(f"Download complete. Total size: {downloaded_size/1024/1024:.1f} MB")
-            return b''.join(chunks)
+            return b"".join(chunks)
 
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             logger.error(f"Network error while downloading {download_link}: {e}")
@@ -238,6 +232,7 @@ class SepaPreciosScraper:
        </a>
     </div>
     """
+
     main_url = "https://datos.produccion.gob.ar/dataset/sepa-precios"
 
     def __init__(self, delay_seconds: float = 0.1, show_progress_bar: bool = False):
@@ -271,7 +266,7 @@ class SepaPreciosScraper:
         """
         Look for a pattern like: '..., 2024-12-25' and return '2024-12-25'
         """
-        match = re.search(r'\b\d{4}-\d{2}-\d{2}\b', text)
+        match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text)
         if not match:
             raise ValueError(f"No valid YYYY-MM-DD date found in text: {text}")
         return match.group(0)
@@ -310,7 +305,7 @@ class SepaPreciosScraper:
         # or "https://datos.produccion.gob.ar/dataset/xyz789/resource/abc123/download/sepa_miercoles.zip"
         # We'll parse out "xyz789" and "abc123" from that.
 
-        pattern = r'/dataset/(.+?)/(archivo|resource)/([^/]+)'
+        pattern = r"/dataset/(.+?)/(archivo|resource)/([^/]+)"
         match = re.search(pattern, href)
         if not match:
             raise ValueError(f"DESCARGAR link does not match expected pattern: {href}")
@@ -318,13 +313,9 @@ class SepaPreciosScraper:
         dataset_id = match.group(1)
         resource_id = match.group(3)
 
-        return SepaHistoricalDataItem(
-            website_date=date_str,
-            resource_id=resource_id,
-            dataset_id=dataset_id
-        )
+        return SepaHistoricalDataItem(website_date=date_str, resource_id=resource_id, dataset_id=dataset_id)
 
-    def scrape_historical_items(self) -> List[SepaHistoricalDataItem]:
+    def scrape_historical_items(self) -> list[SepaHistoricalDataItem]:
         soup = self._get_soup()
 
         # Each resource is in a .pkg-container
@@ -347,5 +338,7 @@ class SepaPreciosScraper:
 
 
 @task(retries=3, retry_delay_seconds=10)
-def task_scrape_historical_items(scraper: SepaPreciosScraper) -> List[SepaHistoricalDataItem]:
+def task_scrape_historical_items(
+    scraper: SepaPreciosScraper,
+) -> list[SepaHistoricalDataItem]:
     return scraper.scrape_historical_items()

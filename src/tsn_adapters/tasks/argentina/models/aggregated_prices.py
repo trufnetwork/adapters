@@ -6,12 +6,15 @@ price data from the SEPA dataset.
 """
 
 from typing import Callable
-from pandera.typing import Series, DataFrame
-from pandera import DataFrameModel
-from tsn_adapters.tasks.trufnetwork.models import TnRecordModel
-import pandera as pa
 
-from ...trufnetwork.models.tn_models import TnDataRowModel
+from pandera import DataFrameModel
+import pandera
+import pandera.config
+from pandera.typing import DataFrame, Series
+import pandera.typing
+import pandera.utils
+
+from tsn_adapters.tasks.trufnetwork.models.tn_models import TnDataRowModel
 
 
 class SepaAggregatedPricesModel(DataFrameModel):
@@ -35,7 +38,7 @@ class SepaAggregatedPricesModel(DataFrameModel):
     avg_price: Series[float]
     date: Series[str]
 
-    class Config:
+    class Config(DataFrameModel.Config):
         strict = "filter"
         coerce = True
 

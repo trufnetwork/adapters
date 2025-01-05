@@ -1,7 +1,6 @@
 import os
 import shutil
 import zipfile
-from typing import Optional
 
 
 def extract_zip(zip_path: str, dest_path: str, overwrite: bool = False) -> None:
@@ -36,4 +35,4 @@ def extract_zip(zip_path: str, dest_path: str, overwrite: bool = False) -> None:
             inner_zip_path = os.path.join(dest_path, file)
             inner_dest_path = os.path.join(dest_path, file.replace(".zip", ""))
             with zipfile.ZipFile(inner_zip_path, "r") as inner_zip_ref:
-                inner_zip_ref.extractall(inner_dest_path) 
+                inner_zip_ref.extractall(inner_dest_path)

@@ -6,12 +6,12 @@ SEPA dataset.
 """
 
 from pandera.typing import DataFrame as paDataFrame
+
 from tsn_adapters.tasks.argentina.models import (
-    SepaProductCategoryMapModel,
     SepaAggregatedPricesModel,
     SepaAvgPriceProductModel,
+    SepaProductCategoryMapModel,
 )
-from ..models.sepa_models import SepaProductosDataModel
 
 
 def aggregate_prices_by_category(
@@ -59,4 +59,4 @@ def aggregate_prices_by_category(
     # Reset index to convert groupby result to regular columns
     aggregated_df = aggregated_df.reset_index()
 
-    return paDataFrame[SepaAggregatedPricesModel](aggregated_df) 
+    return paDataFrame[SepaAggregatedPricesModel](aggregated_df)
