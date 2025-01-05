@@ -26,8 +26,8 @@ from tsn_adapters.tasks.argentina.types import DateStr, SepaDF, SourceId, Stream
 from tsn_adapters.utils.cast_future import cast_future
 
 
-@flow(name="Argentina SEPA Ingestor V3")
-def argentina_ingestor_flow_v3(
+@flow(name="Argentina SEPA Ingestor")
+def argentina_ingestor_flow(
     source_descriptor_type: str,
     source_descriptor_block_name: str,
     trufnetwork_access_block_name: str,
@@ -190,7 +190,7 @@ def create_processing_summary(
 
 if __name__ == "__main__":
     # test run
-    argentina_ingestor_flow_v3(
+    argentina_ingestor_flow(
         source_descriptor_type="github",
         source_descriptor_block_name="argentina-sepa-source-descriptor",
         trufnetwork_access_block_name="default",
