@@ -22,6 +22,12 @@ argentina = [
     "dateparser",
     "tqdm"
 ]
+dev = [
+    "black",
+    "isort",
+    "ruff",
+    "mypy",
+]
 
 [tool.setuptools]
 packages = {find = {where = ["src"]}}
@@ -34,3 +40,32 @@ markers = [
 pythonpath = ["src"]
 addopts = "--import-mode=importlib"
 testpaths = ["tests"]
+
+[tool.ruff]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "RUF",  # ruff-specific rules
+    "TID",  # flake8-tidy-imports
+]
+line-length = 120
+target-version = "py39"
+src = ["src"]
+
+# Ignore `__init__.py` files
+exclude = ["__init__.py"]
+
+[tool.ruff.isort]
+known-first-party = ["tsn_adapters"]
+force-sort-within-sections = true
+combine-as-imports = true
+
+[tool.ruff.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.black]
+line-length = 120
+target-version = ['py39']
+include = '\.pyi?$'
