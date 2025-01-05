@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import cast
+from typing import cast, ClassVar
+import logging
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -15,6 +16,7 @@ from pydantic import BaseModel, field_validator
 from tsn_adapters.tasks.argentina.models.sepa_models import SepaProductosDataModel
 from tsn_adapters.tasks.argentina.utils.archives import extract_zip
 from tsn_adapters.utils.filter_failures import filter_failures
+from tsn_adapters.utils.logging import get_logger_safe
 
 
 def extract_sepa_data(zip_path: str, extract_path: str) -> SepaDirectoryProcessor:
@@ -32,6 +34,7 @@ class SepaDirectoryProcessor:
 
     def __init__(self, dir_path: str):
         self.dir_path = dir_path
+        self.logger = get_logger_safe(__name__)
 
     def get_data_dirs(self) -> Iterator[SepaDataDirectory]:
         """
@@ -45,7 +48,7 @@ class SepaDirectoryProcessor:
                 try:
                     yield SepaDataDirectory.from_dir_path(str(sepa_dir))
                 except ValueError as e:
-                    print(f"Skipping invalid directory {sepa_dir}: {e}")
+                    self.logger.warning(f"Skipping invalid directory {sepa_dir}: {e}")
 
         sepa_zips = root_path.glob("**/sepa_*_comercio-sepa-*_????-??-??_??-??-??.zip")
 
@@ -54,11 +57,14 @@ class SepaDirectoryProcessor:
                 try:
                     yield SepaDataDirectory.from_zip_path(str(sepa_zip))
                 except ValueError as e:
-                    print(f"Skipping invalid zip file {sepa_zip}: {e}")
+                    self.logger.warning(f"Skipping invalid zip file {sepa_zip}: {e}")
 
     def get_all_data_dirs(self) -> list[SepaDataDirectory]:
         """Returns a list of all valid data directories."""
-        return list(self.get_data_dirs())
+        dirs = list(self.get_data_dirs())
+        if not dirs:
+            self.logger.warning("No valid data directories found in the workspace")
+        return dirs
 
     def get_date(self) -> str:
         """Returns the date associated with the data."""
@@ -75,7 +81,7 @@ class SepaDirectoryProcessor:
             try:
                 yield data_dir.load_products_data()
             except Exception as e:
-                print(f"Error loading products data from {data_dir.dir_path}: {e}")
+                self.logger.error(f"Error loading products data from {data_dir.dir_path}: {e}")
 
     def get_all_products_data_merged(self) -> DataFrame[SepaProductosDataModel]:
         """
@@ -83,9 +89,11 @@ class SepaDirectoryProcessor:
         """
         all_data = list(self.get_products_data())
         if not all_data:
+            self.logger.warning("No product data found in any directory")
             return cast(DataFrame[SepaProductosDataModel], pd.DataFrame())  # Return empty DataFrame if no data
 
         merged_df = pd.concat(all_data, ignore_index=True)
+        self.logger.info(f"Successfully merged {len(all_data)} product data frames with {len(merged_df)} total rows")
         return DataFrame[SepaProductosDataModel](merged_df)
 
     @staticmethod
@@ -108,6 +116,7 @@ class SepaDataDirectory(BaseModel):
     id_comercio: str
     date: str
     dir_path: str
+    logger: ClassVar[logging.Logger] = get_logger_safe(__name__)
 
     @field_validator("date")
     @classmethod
@@ -168,6 +177,7 @@ class SepaDataDirectory(BaseModel):
                 file_path = os.path.join(self.dir_path, file)
                 break
         else:
+            self.logger.error(f"No valid product file found in {self.dir_path}")
             raise ValueError(f"No valid product file found in {self.dir_path}")
 
         def read_file_iterator():
@@ -177,10 +187,17 @@ class SepaDataDirectory(BaseModel):
                         yield line.strip()
 
         text_lines = list(read_file_iterator())
+        if not text_lines:
+            self.logger.warning(f"Empty product file found in {self.dir_path}")
+            return cast(DataFrame[SepaProductosDataModel], pd.DataFrame())
+
         text_content = "\n".join(text_lines)
         content_io = StringIO(text_content)
 
         df = pd.read_csv(content_io, skip_blank_lines=True, sep="|")
         df["date"] = self.date
+        original_len = len(df)
         df = filter_failures(df, SepaProductosDataModel)
+        if len(df) < original_len:
+            self.logger.warning(f"Filtered out {original_len - len(df)} invalid rows from {self.dir_path}")
         return df
