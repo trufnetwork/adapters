@@ -13,7 +13,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
   prefect:
     restart: always
-    image: prefecthq/prefect:3.0.4-python3.10-conda # WORKED
+    image: prefecthq/prefect:3.1.11-python3.10-conda # WORKED
     # image: prefecthq/prefect:3.0.5-python3.10-conda DIDN'T WORK, and after it either
     environment:
       PREFECT_HOME: /data
@@ -30,7 +30,7 @@ services:
 
   prefect-worker:
     restart: always
-    image: prefecthq/prefect:3.0.4-python3.10-conda
+    image: prefecthq/prefect:3.1.11-python3.10-conda
     command: prefect worker start -p default-workers
     environment:
       PREFECT_API_URL: http://prefect:4200/api

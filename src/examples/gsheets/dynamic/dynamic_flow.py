@@ -1,12 +1,20 @@
 import os
+
 from prefect import flow
 from prefect.futures import wait
-from examples.gsheets.utils import task_deploy_primitive_if_needed, task_filter_by_source_id, task_normalize_source, task_prepare_records_for_tsn
+import trufnetwork_sdk_py.client as tn_client
+
+from examples.gsheets.utils import (
+    task_deploy_primitive_if_needed,
+    task_filter_by_source_id,
+    task_normalize_source,
+    task_prepare_records_for_tsn,
+)
+from tsn_adapters.tasks.data_manipulation import task_reconcile_data
 from tsn_adapters.tasks.github import task_read_repo_csv_file
 from tsn_adapters.tasks.gsheet import task_read_gsheet
-from tsn_adapters.tasks.trufnetwork import task_insert_tsn_records, task_get_all_tsn_records
-from tsn_adapters.tasks.data_manipulation import task_reconcile_data
-import trufnetwork_sdk_py.client as tn_client
+from tsn_adapters.tasks.trufnetwork import task_get_all_tsn_records, task_insert_tsn_records
+
 
 @flow(log_prints=True)
 def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
@@ -26,7 +34,7 @@ def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
     - Month: MM
     - ID: the identification to filter the records by on the source
     - Value: the value to insert into TSN
-    
+
     It will fetch records from all the sources and insert them into TSN, creating the stream if needed.
     """
 
@@ -40,11 +48,7 @@ def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
     print(f"Found {len(source_types)} source types: {source_types}")
 
     # extract the gsheets_id from the source_type, ensuring it starts with 'gsheets'
-    gsheets_ids = [
-        source_type.split(":")[1]
-        for source_type in source_types
-        if source_type.startswith("gsheets:")
-    ]
+    gsheets_ids = [source_type.split(":")[1] for source_type in source_types if source_type.startswith("gsheets:")]
     print(f"Found {len(gsheets_ids)} gsheets ids: {gsheets_ids}")
 
     # store insertion tasks
@@ -54,7 +58,6 @@ def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
     client = tn_client.TNClient(destination_tsn_provider, token=os.environ["TSN_PRIVATE_KEY"])
 
     for gsheets_id in gsheets_ids:
-
         # Fetch the records from the sheet
         print(f"Fetching records from sheet {gsheets_id}")
         # see read_gsheet for more details about the second_column_name parameter
@@ -88,6 +91,7 @@ def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
 
     # Wait for all the insertions to complete
     wait(insert_jobs)
+
 
 if __name__ == "__main__":
     """

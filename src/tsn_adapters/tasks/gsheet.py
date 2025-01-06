@@ -1,9 +1,10 @@
+from datetime import timedelta
 from typing import Optional
-from prefect import task, flow
-from datetime import datetime, timedelta
-from truflation.data.connector.gsheet import ConnectorGoogleSheets
-import pandas as pd
+
+from prefect import task
 from prefect.tasks import task_input_hash
+from truflation.data.connector.gsheet import ConnectorGoogleSheets
+
 
 # minute cache = it's shared between multiple runs
 @task(cache_expiration=timedelta(minutes=1), cache_key_fn=task_input_hash)

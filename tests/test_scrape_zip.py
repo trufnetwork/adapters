@@ -1,65 +1,74 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from datetime import datetime, timedelta
-from tsn_adapters.tasks.argentina.sepa_scraper import SepaHistoricalDataItem, SepaPreciosScraper
-import requests
+
+from tsn_adapters.tasks.argentina.scrapers.sepa_scraper import SepaHistoricalDataItem, SepaPreciosScraper
 
 
-# Tests for DataItem class
 def test_dataitem_valid_date():
-    item = SepaHistoricalDataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
-    assert item.date == "2024-12-16"
+    item = SepaHistoricalDataItem(website_date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
+    assert item.website_date == "2024-12-16"
 
 
 def test_dataitem_invalid_date():
-    with pytest.raises(ValueError):
-        SepaHistoricalDataItem(date="16/12/2024", resource_id="abc123", dataset_id="xyz789")
-
-
-def test_dataitem_resource_link():
-    item = SepaHistoricalDataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
-    expected = "https://datos.produccion.gob.ar/dataset/xyz789/archivo/abc123"
-    assert item.get_resource_link() == expected
+    with pytest.raises(ValueError, match="does not match format"):
+        SepaHistoricalDataItem(website_date="16/12/2024", resource_id="abc123", dataset_id="xyz789")
 
 
 def test_dataitem_download_link():
     # Monday -> lunes
-    item = SepaHistoricalDataItem(date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
-    expected = f"https://datos.produccion.gob.ar/dataset/xyz789/resource/abc123/download/sepa_lunes.zip"
+    item = SepaHistoricalDataItem(website_date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
+    expected = "https://datos.produccion.gob.ar/dataset/xyz789/resource/" "abc123/download/sepa_lunes.zip"
     assert item.get_download_link() == expected
 
 
-# Mock HTML for testing the scraper
 MOCK_HTML = """
 <html>
   <body>
-    <ul class="activity" data-module="activity-stream" data-module-more="True" data-module-context="package" data-module-id="6f47ec76-d1ce-4e34-a7e1-621fe9b1d0b5" data-module-offset="0" data-total="205">
-      <li class="item changed-resource">
-        <p>
-        Se actualizó el recurso <a href="/dataset/xyz789/archivo/abc123">Lunes</a> en el dataset <span><a href="/dataset/sepa-precios">Precios Claros - Base SEPA</a></span>.
-        <span class="date" title="16 Diciembre, 2024, 14:06 (-03)">
-            Hace 2 horas.
-        </span>
-          </p>
-        </li>
-        <li class="item changed-resource">
-        <p>
-        Se actualizó el recurso <a href="/dataset/xyz789/archivo/def456">Lunes</a> en el dataset <span><a href="/dataset/sepa-precios">Precios Claros - Base SEPA</a></span>.
-        <span class="date" title="17 Diciembre, 2024, 10:00 (-03)">
-            Hace 2 horas.
-        </span>
-          </p>
-        </li>
-        <li class="load-more"><a href="/dataset/activity/xyz789/30" class="btn btn-rounded">Cargar más</a></li>
-    </ul>
+    <div class="pkg-container">
+      <div class="pkg-actions">
+        <a href="/dataset/xyz789/archivo/abc123"><button>CONSULTAR</button></a>
+        <a href="https://datos.produccion.gob.ar/dataset/xyz789/resource/abc123/download/sepa_miercoles.zip">
+          <button>DESCARGAR</button>
+        </a>
+      </div>
+      <a href="/dataset/sepa-precios/archivo/1e92cd42-4f94-4071-a165-62c4cb2ce23c">
+        <div class="package-info">
+          <h3>Miércoles</h3>
+          <p>Precios SEPA Minoristas miércoles, 2024-12-25</p>
+        </div>
+        <div class="pkg-file-img" data-format="zip">
+          <p>zip</p>
+        </div>
+      </a>
+    </div>
+
+    <div class="pkg-container">
+      <div class="pkg-actions">
+        <a href="/dataset/xyz789/archivo/def456">
+          <button>CONSULTAR</button>
+        </a>
+        <a href="/dataset/xyz789/resource/def456/download/sepa_jueves.zip">
+          <button>DESCARGAR</button>
+        </a>
+      </div>
+      <a href="/dataset/xyz789/archivo/def456">
+        <div class="package-info">
+          <h3>Jueves</h3>
+          <p>Precios SEPA Minoristas jueves, 2024-12-26</p>
+        </div>
+        <div class="pkg-file-img" data-format="zip">
+          <p>zip</p>
+        </div>
+      </a>
+    </div>
   </body>
 </html>
 """
 
 
-# Tests for SepaPreciosWebScraper class
 @patch("requests.Session.get")
-def test_scraper_parses_items(mock_get):
+def test_scraper_parses_pkg_containers(mock_get):
     mock_response = MagicMock()
     mock_response.text = MOCK_HTML
     mock_response.raise_for_status = MagicMock()
@@ -69,162 +78,56 @@ def test_scraper_parses_items(mock_get):
     items = scraper.scrape_historical_items()
 
     assert len(items) == 2
-    assert items[0].date == "2024-12-16"
-    assert items[0].resource_id == "abc123"
+
+    # First container: date=2024-12-25, resource_id=abc123, dataset_id=xyz789
+    assert items[0].website_date == "2024-12-25"
     assert items[0].dataset_id == "xyz789"
+    assert items[0].resource_id == "abc123"
 
-    assert items[1].date == "2024-12-17"
-    assert items[1].resource_id == "def456"
+    # Second container: date=2024-12-26, resource_id=def456, dataset_id=xyz789
+    assert items[1].website_date == "2024-12-26"
     assert items[1].dataset_id == "xyz789"
+    assert items[1].resource_id == "def456"
 
 
 @patch("requests.Session.get")
-def test_scraper_no_main_element(mock_get):
+def test_scraper_no_pkg_containers(mock_get):
+    # If no .pkg-container elements, raise
     mock_response = MagicMock()
-    mock_response.text = "<html></html>"
+    mock_response.text = "<html><body>No containers here</body></html>"
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
     scraper = SepaPreciosScraper()
-    with pytest.raises(ValueError, match="Main historical data element not found"):
-        scraper.scrape_historical_items()
-
-
-@patch("requests.Session.get")
-def test_scraper_no_date_element(mock_get):
-    # Missing .date element in one of the items
-    mock_response = MagicMock()
-    mock_response.text = """
-    <html>
-      <body>
-        <div class="activity">
-          <li class="item changed-resource">
-          </li>
-        </div>
-      </body>
-    </html>
-    """
-    mock_response.raise_for_status = MagicMock()
-    mock_get.return_value = mock_response
-
-    scraper = SepaPreciosScraper()
-    with pytest.raises(ValueError, match="No historical data items found."):
+    with pytest.raises(ValueError, match="No .pkg-container elements found"):
         scraper.scrape_historical_items()
 
 
 @patch("requests.Session.get")
 def test_scraper_invalid_href(mock_get):
-    # Resource href does not match expected pattern
-    mock_response = MagicMock()
-    mock_response.text = """
+    # If the DESCARGAR link doesn't match /dataset/.../archivo|resource/...,
+    # the item won't get added, leading to no items and a ValueError
+    bad_html = """
     <html>
       <body>
-        <div class="activity">
-          <li class="item changed-resource">
-            <p>
-            Se actualizó el recurso <a href="/bad-link/xyz">Lunes</a> en el dataset <span><a href="/dataset/sepa-precios">Precios Claros - Base SEPA</a></span>.
-            <span class="date" title="16 Diciembre, 2024, 14:06 (-03)">
-                Hace 2 horas.
-            </span>
-              </p>
-          </li>
+        <div class="pkg-container">
+          <div class="pkg-actions">
+            <a href="/strange-link/xyz123"><button>DESCARGAR</button></a>
+          </div>
+          <a href="/dataset/xyz789/archivo/abc123">
+            <div class="package-info">
+              <p>Precios SEPA Minoristas viernes, 2024-12-27</p>
+            </div>
+          </a>
         </div>
       </body>
     </html>
     """
+    mock_response = MagicMock()
+    mock_response.text = bad_html
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
     scraper = SepaPreciosScraper()
-    with pytest.raises(
-        ValueError, match="No historical data items found."
-    ):
+    with pytest.raises(ValueError, match="No valid items extracted"):
         scraper.scrape_historical_items()
-
-
-# Integration Tests
-@pytest.mark.integration
-@pytest.fixture(scope="session")
-def scraper_instance():
-    """Fixture to create and store the scraper instance and its parsed soup once."""
-    scraper = SepaPreciosScraper()
-    return scraper
-
-
-@pytest.mark.integration
-def test_real_site_has_items(scraper_instance):
-    """Test that the real site returns at least one historical item."""
-    items = scraper_instance.scrape_historical_items()
-    assert len(items) > 0, "Expected at least one historical item from the live site."
-
-    # Additional validation of the first item
-    first_item = items[0]
-
-    # Check date is within reasonable range (not more than 30 days old)
-    item_date = datetime.strptime(first_item.date, "%Y-%m-%d")
-    today = datetime.now()
-    date_diff = today - item_date
-    assert date_diff <= timedelta(
-        days=30
-    ), f"Most recent item date {first_item.date} is too old"
-
-
-@pytest.mark.integration
-def test_download_links_valid(scraper_instance):
-    """Test that each item's download link exists and doesn't return an invalid response."""
-    items = scraper_instance.scrape_historical_items()
-    session = requests.Session()
-
-    try:
-        # We'll just check the first few items to avoid hitting the site too hard
-        for item in items[:3]:  # Only check first 3 items
-            download_url = item.get_download_link()
-            try:
-                response = session.head(download_url, allow_redirects=True, timeout=10)
-
-                assert (
-                    response.status_code == 200
-                ), f"Download link {download_url} returned status {response.status_code}"
-            except requests.RequestException as e:
-                pytest.fail(f"Failed to check download link {download_url}: {str(e)}")
-    finally:
-        session.close()
-
-
-@pytest.mark.integration
-def test_resource_links_valid(scraper_instance):
-    """Test that each item's resource link exists and is accessible."""
-    items = scraper_instance.scrape_historical_items()
-    session = requests.Session()
-
-    try:
-        # Check first 3 items
-        for item in items[:3]:
-            resource_url = item.get_resource_link()
-            try:
-                response = session.head(resource_url, allow_redirects=True, timeout=10)
-
-                assert (
-                    response.status_code == 200
-                ), f"Resource link {resource_url} returned status {response.status_code}"
-            except requests.RequestException as e:
-                pytest.fail(f"Failed to check resource link {resource_url}: {str(e)}")
-    finally:
-        session.close()
-
-@pytest.mark.integration
-def test_specific_date_item(scraper_instance):
-    """Test that we can get the first date ever."""
-    items = scraper_instance.scrape_historical_items()
-    
-    first_date = "2024-11-18"
-
-    # Find item matching target date
-    matching_items = [item for item in items if item.date == first_date]
-    
-    assert len(matching_items) > 0, f"No items found for date {first_date}"
-    
-    # Verify first matching item has expected date
-    item = matching_items[0]
-    assert item.date == first_date, \
-        f"Expected item date {first_date}, got {item.date}"

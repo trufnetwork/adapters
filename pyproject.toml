@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "A collection of prefect tasks and examples ingesting data into TSN"
 readme = "README.md"
 dependencies = [
-    "prefect-client",
+    "prefect-client==3.1.11",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
-    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@3787c754326c63e5644a1fa9ab8c8201fa14b95a",
+    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@fa51592c87469078686df4d6df413ea24f4d475f",
     "PyGithub",
     "pandera",
     "pandas",
@@ -19,11 +19,18 @@ dependencies = [
 [project.optional-dependencies]
 argentina = [
     "beautifulsoup4",
-    "dateparser"
+    "dateparser",
+    "tqdm"
+]
+dev = [
+    "black",
+    "isort",
+    "ruff",
+    "mypy",
 ]
 
 [tool.setuptools]
-packages = {find = {where = ["."]}}
+packages = {find = {where = ["src"]}}
 package-dir = {"" = "."}
 
 [tool.pytest.ini_options]
@@ -33,3 +40,32 @@ markers = [
 pythonpath = ["src"]
 addopts = "--import-mode=importlib"
 testpaths = ["tests"]
+
+[tool.ruff]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "RUF",  # ruff-specific rules
+    "TID",  # flake8-tidy-imports
+]
+line-length = 120
+target-version = "py39"
+src = ["src"]
+
+# Ignore `__init__.py` files
+exclude = ["__init__.py"]
+
+[tool.ruff.isort]
+known-first-party = ["tsn_adapters"]
+force-sort-within-sections = true
+combine-as-imports = true
+
+[tool.ruff.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.black]
+line-length = 120
+target-version = ['py39']
+include = '\.pyi?$'
