@@ -7,6 +7,7 @@ from typing import cast
 import pandas as pd
 from prefect import task
 from prefect.artifacts import create_markdown_artifact
+
 from tsn_adapters.tasks.argentina.interfaces.base import IReconciliationStrategy, ITargetGetter
 from tsn_adapters.tasks.argentina.types import DateStr, NeededKeysMap, StreamId
 
@@ -67,7 +68,7 @@ class ByLastInsertedStrategy(IReconciliationStrategy):
         create_markdown_artifact(
             key="needed-keys-summary",
             markdown="".join(summary),
-            description=f"Summary of data requirements using {self.__class__.__name__}"
+            description=f"Summary of data requirements using {self.__class__.__name__}",
         )
 
         return results

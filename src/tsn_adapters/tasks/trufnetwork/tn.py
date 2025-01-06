@@ -32,10 +32,7 @@ def insert_tsn_records(
 
     print(f"Inserting {len(records)} records into stream {stream_id}")
     # generate tuples, [("2024-01-01", "100", inserted_date), ...]
-    args = [
-        [record["date"], str(record["value"])]
-        for record in records.to_dict(orient="records")
-    ]
+    args = [[record["date"], str(record["value"])] for record in records.to_dict(orient="records")]
 
     # args is a list of tuples with the keys: date str, value float
     client.execute_procedure(

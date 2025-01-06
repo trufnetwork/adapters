@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from io import StringIO
+import logging
 import os
 from pathlib import Path
 import re
 import tempfile
-from typing import cast, ClassVar
-import logging
+from typing import ClassVar, cast
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -103,7 +103,7 @@ class SepaDirectoryProcessor:
         """
         if extract_path is None:
             extract_path = tempfile.mkdtemp()
-        
+
         return extract_sepa_data(zip_path, extract_path)
 
 

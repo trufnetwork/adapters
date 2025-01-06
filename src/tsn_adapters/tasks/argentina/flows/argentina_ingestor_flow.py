@@ -60,9 +60,7 @@ def argentina_ingestor_flow(
     provider = task_create_sepa_provider()
 
     # Create TrufNetwork components
-    target_getter, target_setter = create_trufnetwork_components(
-        block_name=trufnetwork_access_block_name
-    )
+    target_getter, target_setter = create_trufnetwork_components(block_name=trufnetwork_access_block_name)
 
     # Create reconciliation strategy
     recon_strategy = task_create_reconciliation_strategy()
@@ -77,18 +75,12 @@ def argentina_ingestor_flow(
     }
 
     # Create transformer
-    transformer = task_create_transformer(
-        product_category_map_df=product_category_map_df,
-        stream_id_map=stream_id_map
-    )
+    transformer = task_create_transformer(product_category_map_df=product_category_map_df, stream_id_map=stream_id_map)
 
     # Step 2: Determine what data to fetch
     logger.info("Determining what data to fetch...")
     needed_keys = task_determine_needed_keys(
-        strategy=recon_strategy,
-        streams_df=streams_df,
-        target_getter=target_getter,
-        data_provider=data_provider
+        strategy=recon_strategy, streams_df=streams_df, target_getter=target_getter, data_provider=data_provider
     )
 
     # Step 3: Process each date
@@ -102,7 +94,6 @@ def argentina_ingestor_flow(
 
     logger.info(f"Processing {len(all_needed_dates)} unique dates...")
 
-    
     tn_records_tasks = []
     records_to_insert = pd.DataFrame()
     # Process each date in parallel
@@ -110,7 +101,7 @@ def argentina_ingestor_flow(
         # Fetch data
         data = task_get_data_for_date.submit(provider, date)
 
-        # check if data is empty 
+        # check if data is empty
         if data.result().empty:
             logger.warning(f"No data found for date {date}")
             continue
@@ -142,12 +133,11 @@ def argentina_ingestor_flow(
             continue
 
         # Insert into target
-        insert_tasks.append(task_insert_data.submit(
-            setter=target_setter,
-            stream_id=stream_id,
-            data=stream_records,
-            data_provider=data_provider
-        ))
+        insert_tasks.append(
+            task_insert_data.submit(
+                setter=target_setter, stream_id=stream_id, data=stream_records, data_provider=data_provider
+            )
+        )
 
     # Wait for all insert tasks to complete
     for insert_task in insert_tasks:
@@ -197,4 +187,4 @@ if __name__ == "__main__":
         product_category_map_url="https://drive.usercontent.google.com/u/2/uc?id=1nfcAjCF-BYU5-rrWJW9eFqCw2AjNpc1x&export=download",
         # 000...001
         data_provider="7e5f4552091a69125d5dfcb7b8c2659029395bdf",
-    ) 
+    )

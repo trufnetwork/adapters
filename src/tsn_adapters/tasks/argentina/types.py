@@ -2,7 +2,6 @@
 Type aliases for the Argentina SEPA data ingestion pipeline.
 """
 
-
 from pandera.typing import DataFrame as PaDataFrame
 
 from tsn_adapters.tasks.argentina.base_types import DateStr, SourceId, StreamId

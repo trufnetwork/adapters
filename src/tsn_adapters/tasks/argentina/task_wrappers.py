@@ -50,7 +50,7 @@ def task_get_streams(fetcher) -> StreamMetadataDF:
     """Get stream metadata using the fetcher."""
     logger = get_run_logger()
     logger.info("Fetching stream metadata")
-    
+
     try:
         streams_df = fetcher.get_streams()
     except Exception as e:
@@ -67,7 +67,7 @@ def task_get_streams(fetcher) -> StreamMetadataDF:
     # Basic statistics
     total_streams = len(streams_df)
     logger.info(f"Successfully fetched {total_streams} streams")
-    
+
     summary.extend(
         [
             "## Overview\n",
@@ -97,7 +97,7 @@ def task_create_sepa_provider():
     """Create and return a SEPA provider."""
     logger = get_run_logger()
     logger.info("Creating SEPA provider")
-    
+
     try:
         scraper = SepaPreciosScraper()
         provider = create_sepa_provider(scraper=scraper)
@@ -132,7 +132,7 @@ def task_create_sepa_provider():
         dates = sorted(items.keys())
         date_span = (pd.to_datetime(dates[-1]) - pd.to_datetime(dates[0])).days
         logger.info(f"Date range: {dates[0]} to {dates[-1]} ({date_span} days)")
-        
+
         summary.extend(
             [
                 "## Date Range\n",
@@ -223,7 +223,7 @@ def task_insert_data(setter, stream_id: StreamId, data: pd.DataFrame, data_provi
     if data.empty:
         logger.warning(f"Skipping insertion for stream {stream_id}: No data to insert")
         return
-        
+
     logger.info(f"Inserting {len(data)} records into stream {stream_id}")
     try:
         setter.insert_data(stream_id, data, data_provider)
@@ -275,10 +275,12 @@ def task_create_transformer(product_category_map_df: pd.DataFrame, stream_id_map
     if product_category_map_df.empty:
         logger.error("Cannot create transformer: Product category map is empty")
         raise ValueError("Product category map is empty")
-        
+
     logger.info("Creating SEPA transformer")
     try:
-        transformer = create_sepa_transformer(product_category_map_df=product_category_map_df, stream_id_map=stream_id_map)
+        transformer = create_sepa_transformer(
+            product_category_map_df=product_category_map_df, stream_id_map=stream_id_map
+        )
         logger.info("Successfully created SEPA transformer")
         return transformer
     except Exception as e:
@@ -295,7 +297,7 @@ def task_transform_data(transformer: IDataTransformer, data: SepaDF) -> pd.DataF
         return data
 
     logger.info(f"Transforming {len(data)} records")
-    
+
     # Check for uncategorized products before transformation
     sepa_transformer = cast(SepaDataTransformer, transformer)
     try:

@@ -14,7 +14,6 @@ from tsn_adapters.tasks.argentina.models import (
 )
 from tsn_adapters.utils.logging import get_logger_safe
 
-
 logger = get_logger_safe(__name__)
 
 
@@ -65,7 +64,7 @@ def aggregate_prices_by_category(
     # Check for products without categories before merge
     unique_products_with_prices = set(avg_price_product_df["id_producto"].unique())
     unique_products_with_categories = set(product_category_map_df["id_producto"].unique())
-    
+
     products_without_categories = unique_products_with_prices - unique_products_with_categories
     if products_without_categories:
         logger.warning(
@@ -84,8 +83,7 @@ def aggregate_prices_by_category(
     # Log merge results
     if len(merged_df) < len(avg_price_product_df):
         logger.warning(
-            f"Dropped {len(avg_price_product_df) - len(merged_df)} price records "
-            "due to missing category mappings"
+            f"Dropped {len(avg_price_product_df) - len(merged_df)} price records " "due to missing category mappings"
         )
 
     # Group by category_id and date, and aggregate the avg price
@@ -97,8 +95,6 @@ def aggregate_prices_by_category(
     aggregated_df = aggregated_df.reset_index()
 
     # Log final results
-    logger.info(
-        f"Successfully aggregated prices into {len(aggregated_df)} category-date combinations"
-    )
+    logger.info(f"Successfully aggregated prices into {len(aggregated_df)} category-date combinations")
 
     return paDataFrame[SepaAggregatedPricesModel](aggregated_df)

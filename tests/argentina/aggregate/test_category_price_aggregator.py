@@ -14,7 +14,6 @@ from tsn_adapters.tasks.argentina.aggregate.category_price_aggregator import (
     aggregate_prices_by_category,
 )
 from tsn_adapters.tasks.argentina.models import (
-    SepaAggregatedPricesModel,
     SepaAvgPriceProductModel,
     SepaProductCategoryMapModel,
 )
@@ -43,13 +42,9 @@ def avg_price_product_df() -> PaDataFrame[SepaAvgPriceProductModel]:
     """
     data = {
         "id_producto": ["P01", "P02", "P03", "P04", "P01", "P03"],
-        "date": ["2025-01-01", "2025-01-01", "2025-01-01", "2025-01-01", 
-                 "2025-01-02", "2025-01-02"],  # 2 dates
+        "date": ["2025-01-01", "2025-01-01", "2025-01-01", "2025-01-01", "2025-01-02", "2025-01-02"],  # 2 dates
         "productos_precio_lista_avg": [100.0, 120.0, 50.0, 55.0, 110.0, 60.0],
-        "productos_descripcion": [
-            "Milk 1L", "Milk 2L", "Bread White", "Bread Wheat", 
-            "Milk 1L", "Bread White"
-        ],
+        "productos_descripcion": ["Milk 1L", "Milk 2L", "Bread White", "Bread Wheat", "Milk 1L", "Bread White"],
     }
     df = pd.DataFrame(data)
     # Pandera coerces & validates it against SepaAvgPriceProductModel schema
@@ -137,7 +132,7 @@ def test_aggregate_prices_single_category_single_date():
 
 def test_aggregate_prices_multiple_dates_across_multiple_categories():
     """
-    Checks that grouping works when some categories appear on certain dates 
+    Checks that grouping works when some categories appear on certain dates
     and skip others. Still a happy path: all products exist in the category map.
     """
     # Setup: Two categories (C-FRUIT, C-VEG) on multiple dates, not every category has data on all dates
@@ -162,7 +157,7 @@ def test_aggregate_prices_multiple_dates_across_multiple_categories():
     results = aggregated_df.to_dict(orient="records")
 
     # THEN
-    # 2025-03-01 => 
+    # 2025-03-01 =>
     #   C-FRUIT => average(5.0 [Apple], 6.0 [Banana]) = 5.5
     #   C-VEG   => average(3.0 [Carrot]) = 3.0
     #
@@ -171,13 +166,13 @@ def test_aggregate_prices_multiple_dates_across_multiple_categories():
     #   C-VEG   => average(4.0 [Tomato]) = 4.0
     expected = [
         {"category_id": "C-FRUIT", "date": "2025-03-01", "avg_price": 5.5},
-        {"category_id": "C-VEG",   "date": "2025-03-01", "avg_price": 3.0},
+        {"category_id": "C-VEG", "date": "2025-03-01", "avg_price": 3.0},
         {"category_id": "C-FRUIT", "date": "2025-03-02", "avg_price": 7.0},
-        {"category_id": "C-VEG",   "date": "2025-03-02", "avg_price": 4.0},
+        {"category_id": "C-VEG", "date": "2025-03-02", "avg_price": 4.0},
     ]
 
     # Sort them for easy comparison
     results_sorted = sorted(results, key=lambda x: (x["category_id"], x["date"]))
     expected_sorted = sorted(expected, key=lambda x: (x["category_id"], x["date"]))
 
-    assert results_sorted == expected_sorted, f"Expected {expected_sorted}, got {results_sorted}" 
+    assert results_sorted == expected_sorted, f"Expected {expected_sorted}, got {results_sorted}"

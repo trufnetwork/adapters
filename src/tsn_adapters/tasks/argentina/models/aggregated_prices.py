@@ -8,11 +8,7 @@ price data from the SEPA dataset.
 from typing import Callable
 
 from pandera import DataFrameModel
-import pandera
-import pandera.config
 from pandera.typing import DataFrame, Series
-import pandera.typing
-import pandera.utils
 
 from tsn_adapters.tasks.trufnetwork.models.tn_models import TnDataRowModel
 

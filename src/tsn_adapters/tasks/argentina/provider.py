@@ -3,9 +3,9 @@ SEPA data provider implementation.
 """
 
 from datetime import timedelta
+import os
 import tempfile
 from typing import cast
-import os
 
 import pandas as pd
 from prefect import get_run_logger, task

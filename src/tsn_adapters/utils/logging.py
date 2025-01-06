@@ -13,16 +13,16 @@ from prefect import get_run_logger
 def get_logger_safe(name: str = __name__) -> Any:
     """
     Get a logger that works both in Prefect flows/tasks and in test environments.
-    
+
     This function attempts to get a Prefect logger first, and falls back to standard
     Python logging if no Prefect context is available.
-    
+
     Parameters
     ----------
     name : str
         The name to use for the logger if falling back to standard logging.
         Defaults to the module name.
-    
+
     Returns
     -------
     Logger
@@ -31,4 +31,4 @@ def get_logger_safe(name: str = __name__) -> Any:
     try:
         return get_run_logger()
     except Exception:
-        return logging.getLogger(name) 
+        return logging.getLogger(name)

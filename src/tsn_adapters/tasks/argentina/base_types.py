@@ -10,4 +10,4 @@ SourceId = NewType("SourceId", str)
 DateStr = NewType("DateStr", str)  # YYYY-MM-DD format
 
 # Source descriptor types
-PrimitiveSourcesTypeStr = Literal["url", "github"] 
+PrimitiveSourcesTypeStr = Literal["url", "github"]

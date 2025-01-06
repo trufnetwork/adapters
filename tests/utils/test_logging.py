@@ -3,8 +3,7 @@
 import logging
 from unittest.mock import patch
 
-import pytest
-from prefect import flow, task
+from prefect import flow
 
 from tsn_adapters.utils.logging import get_logger_safe
 
@@ -43,4 +42,4 @@ def test_get_logger_safe_handles_errors():
     with patch("tsn_adapters.utils.logging.get_run_logger", side_effect=Exception("Test error")):
         logger = get_logger_safe("test_error_logger")
         assert isinstance(logger, logging.Logger)
-        assert logger.name == "test_error_logger" 
+        assert logger.name == "test_error_logger"
