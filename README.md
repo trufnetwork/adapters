@@ -1,5 +1,5 @@
 # TSN Adapters
-
+ 
 This repository contains examples of using the TSN SDK to ingest data from various sources into TSN. It leverages [truflation/truflation](https://github.com/truflation/truflation) connectors to get data from sources, powered by [Prefect](https://www.prefect.io/) features such as resiliency, concurrency, caching, observability, UI controls and more.
 
 ## Reusable Tasks
