@@ -1,0 +1,20 @@
+version: "3"
+
+tasks:
+  default:
+    cmds:
+      - task -l
+
+  build:
+    desc: Build all binaries
+    cmds:
+      - task build:coin_list
+
+  build:coin_list:
+    cmds:
+      - go build -o ./.build/coin_list ./cmd/coin_list/main.go
+
+  coin_list:
+    desc: Generate coin list into CSV
+    cmds:
+      - go run ./cmd/coin_list/main.go
