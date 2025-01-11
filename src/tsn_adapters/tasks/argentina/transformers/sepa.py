@@ -8,10 +8,10 @@ import pandas as pd
 from prefect import task
 
 from tsn_adapters.tasks.argentina.aggregate.category_price_aggregator import aggregate_prices_by_category
-from tsn_adapters.tasks.argentina.interfaces.base import IDataTransformer
 from tsn_adapters.tasks.argentina.models.aggregated_prices import sepa_aggregated_prices_to_tn_records
 from tsn_adapters.tasks.argentina.models.category_map import get_uncategorized_products
-from tsn_adapters.tasks.argentina.models.sepa_models import SepaAvgPriceProductModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
+from tsn_adapters.tasks.argentina.transformers.interfaces import IDataTransformer
 from tsn_adapters.tasks.argentina.types import (
     AggregatedPricesDF,
     AvgPriceDF,

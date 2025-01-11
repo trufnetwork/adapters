@@ -14,6 +14,7 @@ from tsn_adapters.tasks.argentina.task_wrappers import (
     task_create_sepa_provider,
     task_create_stream_fetcher,
     task_create_transformer,
+    task_dates_already_processed,
     task_determine_needed_keys,
     task_get_data_for_date,
     task_get_streams,
@@ -57,7 +58,12 @@ def argentina_ingestor_flow(
     streams_df = task_get_streams(fetcher=fetcher)
 
     # Create SEPA provider
-    provider = task_create_sepa_provider()
+    provider = task_create_sepa_provider(
+        provider_type="s3",
+        s3_block_name="argentina-sepa",
+        s3_prefix="source_data/",
+
+    )
 
     # Create TrufNetwork components
     target_getter, target_setter = create_trufnetwork_components(block_name=trufnetwork_access_block_name)
@@ -80,7 +86,11 @@ def argentina_ingestor_flow(
     # Step 2: Determine what data to fetch
     logger.info("Determining what data to fetch...")
     needed_keys = task_determine_needed_keys(
-        strategy=recon_strategy, streams_df=streams_df, target_getter=target_getter, data_provider=data_provider
+        strategy=recon_strategy,
+        streams_df=streams_df,
+        provider_getter=provider,
+        target_getter=target_getter,
+        data_provider=data_provider,
     )
 
     # Step 3: Process each date
@@ -91,13 +101,23 @@ def argentina_ingestor_flow(
     all_needed_dates = set()
     for dates in needed_keys.values():
         all_needed_dates.update(dates)
+    sorted_needed_dates = sorted(all_needed_dates)
 
     logger.info(f"Processing {len(all_needed_dates)} unique dates...")
+
+    # this is an optimization to avoid processing if we have no new dates to process
+    # some dates gets processed over multiple runs because not all streams have data for all dates
+    # then it might understand that it's pending when it's not
+    # if task_dates_already_processed(needed_dates=sorted_needed_dates):
+    #     logger.info("Dates have already been processed in the last day, skipping...")
+    #     return
+
+    logger.info("Dates have not been processed in the last day, processing...")
 
     tn_records_tasks = []
     records_to_insert = pd.DataFrame()
     # Process each date in parallel
-    for date in list(all_needed_dates):
+    for date in sorted_needed_dates:
         # Fetch data
         data = task_get_data_for_date.submit(provider, date)
 

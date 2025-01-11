@@ -8,7 +8,9 @@ import pandas as pd
 from prefect import task
 from prefect.artifacts import create_markdown_artifact
 
-from tsn_adapters.tasks.argentina.interfaces.base import IReconciliationStrategy, ITargetGetter
+from tsn_adapters.tasks.argentina.provider.interfaces.base import IProviderGetter
+from tsn_adapters.tasks.argentina.reconciliation.interfaces import IReconciliationStrategy
+from tsn_adapters.tasks.argentina.target import ITargetGetter
 from tsn_adapters.tasks.argentina.types import DateStr, NeededKeysMap, StreamId
 
 
@@ -16,7 +18,11 @@ class ByLastInsertedStrategy(IReconciliationStrategy):
     """Strategy that determines needed data based on the last inserted date."""
 
     def determine_needed_keys(
-        self, streams_df: pd.DataFrame, target_getter: ITargetGetter, data_provider: str
+        self,
+        streams_df: pd.DataFrame,
+        provider_getter: IProviderGetter,
+        target_getter: ITargetGetter,
+        data_provider: str,
     ) -> NeededKeysMap:
         """
         Determine which dates need to be fetched for each stream.
@@ -35,6 +41,7 @@ class ByLastInsertedStrategy(IReconciliationStrategy):
         results: NeededKeysMap = {}
         summary: list[str] = []
         summary.append(f"Strategy: {self.__class__.__name__}\n\n")
+        available_keys = provider_getter.list_available_keys()
         for _, row in streams_df.iterrows():
             stream_id = cast(StreamId, row["stream_id"])
 
@@ -48,7 +55,7 @@ class ByLastInsertedStrategy(IReconciliationStrategy):
                 last_inserted = cast(DateStr, "0000-00-00")
 
             # Get all available dates for this stream
-            available_dates = [cast(DateStr, d) for d in row["available_dates"]]
+            available_dates = [cast(DateStr, d) for d in available_keys]
 
             # Find dates that are newer than the last inserted date
             needed_dates = [d for d in available_dates if d > last_inserted]

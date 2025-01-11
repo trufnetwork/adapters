@@ -13,7 +13,7 @@ import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import BaseModel, field_validator
 
-from tsn_adapters.tasks.argentina.models.sepa_models import SepaProductosDataModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaProductosDataModel
 from tsn_adapters.tasks.argentina.utils.archives import extract_zip
 from tsn_adapters.utils.filter_failures import filter_failures
 from tsn_adapters.utils.logging import get_logger_safe
@@ -194,7 +194,24 @@ class SepaDataDirectory(BaseModel):
         text_content = "\n".join(text_lines)
         content_io = StringIO(text_content)
 
-        df = pd.read_csv(content_io, skip_blank_lines=True, sep="|")
+        try:
+            df = pd.read_csv(
+                content_io,
+                skip_blank_lines=True,
+                sep="|",
+                usecols=["id_producto", "productos_descripcion", "productos_precio_lista"],
+            )
+        except Exception as e:
+            # if the error is about missing columns, print first 2 lines
+            if "Usecols do not match columns, columns expected but not found" in str(e):
+                lines = []
+                with open(file_path) as file:
+                    for _ in range(2):
+                        lines.append(file.readline().strip())
+                self.logger.error(f"First 2 lines of {file_path}:\n{lines}")
+
+            raise e
+
         df["date"] = self.date
         original_len = len(df)
         df = filter_failures(df, SepaProductosDataModel)

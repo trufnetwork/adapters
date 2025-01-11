@@ -7,7 +7,7 @@ from prefect import task
 from prefect.utilities.asyncutils import sync_compatible
 
 from tsn_adapters.blocks.tn_access import TNAccessBlock, task_insert_and_wait_for_tx, task_read_records
-from tsn_adapters.tasks.argentina.interfaces.base import ITargetGetter, ITargetSetter
+from tsn_adapters.tasks.argentina.target.interfaces import ITargetGetter, ITargetSetter
 from tsn_adapters.tasks.argentina.types import StreamId
 
 

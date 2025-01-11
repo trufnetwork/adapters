@@ -19,7 +19,7 @@ from prefect import task
 from prefect.tasks import task_input_hash
 import requests
 
-from tsn_adapters.tasks.argentina.models.sepa_models import SepaProductosDataModel
+from tsn_adapters.tasks.argentina.models.sepa import SepaProductosDataModel
 from tsn_adapters.utils.filter_failures import filter_failures
 
 U = TypeVar("U", bound=pa.DataFrameModel)
