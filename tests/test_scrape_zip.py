@@ -1,23 +1,28 @@
+"""
+Tests for SEPA website scraping functionality.
+"""
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tsn_adapters.tasks.argentina.scrapers.sepa_scraper import SepaHistoricalDataItem, SepaPreciosScraper
+from tsn_adapters.tasks.argentina.models.sepa import SepaWebsiteDataItem
+from tsn_adapters.tasks.argentina.models.sepa.website_item import SepaWebsiteScraper
 
 
 def test_dataitem_valid_date():
-    item = SepaHistoricalDataItem(website_date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
-    assert item.website_date == "2024-12-16"
+    item = SepaWebsiteDataItem(item_reported_date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
+    assert item.item_reported_date == "2024-12-16"
 
 
 def test_dataitem_invalid_date():
     with pytest.raises(ValueError, match="does not match format"):
-        SepaHistoricalDataItem(website_date="16/12/2024", resource_id="abc123", dataset_id="xyz789")
+        SepaWebsiteDataItem(item_reported_date="16/12/2024", resource_id="abc123", dataset_id="xyz789")
 
 
 def test_dataitem_download_link():
     # Monday -> lunes
-    item = SepaHistoricalDataItem(website_date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
+    item = SepaWebsiteDataItem(item_reported_date="2024-12-16", resource_id="abc123", dataset_id="xyz789")
     expected = "https://datos.produccion.gob.ar/dataset/xyz789/resource/" "abc123/download/sepa_lunes.zip"
     assert item.get_download_link() == expected
 
@@ -74,18 +79,18 @@ def test_scraper_parses_pkg_containers(mock_get):
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
-    scraper = SepaPreciosScraper()
-    items = scraper.scrape_historical_items()
+    scraper = SepaWebsiteScraper()
+    items = scraper.scrape_items()
 
     assert len(items) == 2
 
     # First container: date=2024-12-25, resource_id=abc123, dataset_id=xyz789
-    assert items[0].website_date == "2024-12-25"
+    assert items[0].item_reported_date == "2024-12-25"
     assert items[0].dataset_id == "xyz789"
     assert items[0].resource_id == "abc123"
 
     # Second container: date=2024-12-26, resource_id=def456, dataset_id=xyz789
-    assert items[1].website_date == "2024-12-26"
+    assert items[1].item_reported_date == "2024-12-26"
     assert items[1].dataset_id == "xyz789"
     assert items[1].resource_id == "def456"
 
@@ -98,9 +103,9 @@ def test_scraper_no_pkg_containers(mock_get):
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
-    scraper = SepaPreciosScraper()
+    scraper = SepaWebsiteScraper()
     with pytest.raises(ValueError, match="No .pkg-container elements found"):
-        scraper.scrape_historical_items()
+        scraper.scrape_items()
 
 
 @patch("requests.Session.get")
@@ -128,6 +133,6 @@ def test_scraper_invalid_href(mock_get):
     mock_response.raise_for_status = MagicMock()
     mock_get.return_value = mock_response
 
-    scraper = SepaPreciosScraper()
+    scraper = SepaWebsiteScraper()
     with pytest.raises(ValueError, match="No valid items extracted"):
-        scraper.scrape_historical_items()
+        scraper.scrape_items()
