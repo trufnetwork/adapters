@@ -14,7 +14,6 @@ from tsn_adapters.tasks.argentina.task_wrappers import (
     task_create_sepa_provider,
     task_create_stream_fetcher,
     task_create_transformer,
-    task_dates_already_processed,
     task_determine_needed_keys,
     task_get_data_for_date,
     task_get_streams,
@@ -62,11 +61,10 @@ def argentina_ingestor_flow(
         provider_type="s3",
         s3_block_name="argentina-sepa",
         s3_prefix="source_data/",
-
     )
 
-    # Create TrufNetwork components
-    target_getter, target_setter = create_trufnetwork_components(block_name=trufnetwork_access_block_name)
+    # Create TrufNetwork client
+    target_client = create_trufnetwork_components(block_name=trufnetwork_access_block_name)
 
     # Create reconciliation strategy
     recon_strategy = task_create_reconciliation_strategy()
@@ -89,7 +87,7 @@ def argentina_ingestor_flow(
         strategy=recon_strategy,
         streams_df=streams_df,
         provider_getter=provider,
-        target_getter=target_getter,
+        target_client=target_client,
         data_provider=data_provider,
     )
 
@@ -155,7 +153,7 @@ def argentina_ingestor_flow(
         # Insert into target
         insert_tasks.append(
             task_insert_data.submit(
-                setter=target_setter, stream_id=stream_id, data=stream_records, data_provider=data_provider
+                client=target_client, stream_id=stream_id, data=stream_records, data_provider=data_provider
             )
         )
 

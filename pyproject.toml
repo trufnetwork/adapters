@@ -20,7 +20,9 @@ dependencies = [
 argentina = [
     "beautifulsoup4",
     "dateparser",
-    "tqdm"
+    "tqdm",
+    "boto3",
+    "prefect-aws>=0.5.3",
 ]
 dev = [
     "black",

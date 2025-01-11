@@ -1,8 +1,8 @@
 """
-Stream details fetcher implementation.
+Stream details fetcher implementations.
 """
 
-from typing import cast
+from typing import Literal, cast
 
 from prefect import task
 
@@ -12,10 +12,11 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
     get_descriptor_from_github,
     get_descriptor_from_url,
 )
-from tsn_adapters.tasks.argentina.base_types import PrimitiveSourcesTypeStr
+from tsn_adapters.common.interfaces.provider import IStreamSourceMapFetcher
 from tsn_adapters.tasks.argentina.models.stream_source import StreamSourceMetadataModel
-from tsn_adapters.tasks.argentina.provider.interfaces.base import IStreamSourceMapFetcher
 from tsn_adapters.tasks.argentina.types import StreamSourceMapDF
+
+PrimitiveSourcesTypeStr = Literal["url", "github"]
 
 
 class GitHubStreamDetailsFetcher(IStreamSourceMapFetcher):

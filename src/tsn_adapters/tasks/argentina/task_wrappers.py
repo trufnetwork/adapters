@@ -1,5 +1,5 @@
 """
-Task wrappers for Argentina SEPA data ingestion pipeline components.
+Task wrappers for Argentina data pipeline.
 """
 
 from datetime import datetime, timedelta
@@ -9,21 +9,17 @@ from prefect import get_run_logger, task
 import prefect.cache_policies as policies
 from prefect_aws import S3Bucket
 
+from tsn_adapters.common.interfaces.provider import IProviderGetter
+from tsn_adapters.common.interfaces.reconciliation import IReconciliationStrategy
+from tsn_adapters.common.interfaces.target import ITargetClient
+from tsn_adapters.common.interfaces.transformer import IDataTransformer
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
 from tsn_adapters.tasks.argentina.provider.factory import create_sepa_provider
-from tsn_adapters.tasks.argentina.provider.interfaces import IProviderGetter
-from tsn_adapters.tasks.argentina.reconciliation import IReconciliationStrategy
 from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
 from tsn_adapters.tasks.argentina.stream_details import create_stream_details_fetcher
-from tsn_adapters.tasks.argentina.target import ITargetGetter
-from tsn_adapters.tasks.argentina.target.trufnetwork import create_trufnetwork_components
-from tsn_adapters.tasks.argentina.transformers import (
-    IDataTransformer,
-)
 from tsn_adapters.tasks.argentina.transformers.sepa import create_sepa_transformer
 from tsn_adapters.tasks.argentina.types import (
     DateStr,
-    NeededKeysMap,
     SepaDF,
     StreamId,
     StreamIdMap,
@@ -136,25 +132,23 @@ def task_get_data_for_date(provider: IProviderGetter, date: DateStr) -> SepaDF:
 
 
 # Target Tasks
-@task(retries=3)
-def task_create_trufnetwork_components(block_name: str):
-    """Create and return TrufNetwork components."""
-    logger = get_run_logger()
-    logger.info(f"Creating TrufNetwork components with block: {block_name}")
-    try:
-        return create_trufnetwork_components(block_name=block_name)
-    except Exception as e:
-        logger.error(f"Failed to create TrufNetwork components: {e}")
-        raise
-
-
 @task(retries=2)
-def task_get_latest_records(getter: ITargetGetter, stream_id: StreamId, data_provider: str) -> pd.DataFrame:
-    """Get latest records from the target system."""
+def task_get_latest_records(client: ITargetClient, stream_id: StreamId, data_provider: str) -> pd.DataFrame:
+    """
+    Get latest records from the target system.
+
+    Args:
+        client: The target client to use
+        stream_id: The stream ID to fetch data for
+        data_provider: The data provider identifier
+
+    Returns:
+        pd.DataFrame: The latest records from the target system
+    """
     logger = get_run_logger()
     logger.info(f"Getting latest records for stream: {stream_id}")
     try:
-        df = getter.get_latest(stream_id=stream_id, data_provider=data_provider)
+        df = client.get_latest(stream_id=stream_id, data_provider=data_provider)
         logger.info(f"Got {len(df)} records")
         return df
     except Exception as e:
@@ -163,12 +157,20 @@ def task_get_latest_records(getter: ITargetGetter, stream_id: StreamId, data_pro
 
 
 @task
-def task_insert_data(setter, stream_id: StreamId, data: pd.DataFrame, data_provider: str) -> None:
-    """Insert data into the target system."""
+def task_insert_data(client: ITargetClient, stream_id: StreamId, data: pd.DataFrame, data_provider: str) -> None:
+    """
+    Insert data into the target system.
+
+    Args:
+        client: The target client to use
+        stream_id: The stream ID to insert data for
+        data: The data to insert
+        data_provider: The data provider identifier
+    """
     logger = get_run_logger()
     logger.info(f"Inserting {len(data)} rows for stream: {stream_id}")
     try:
-        setter.insert_data(stream_id=stream_id, data=data, data_provider=data_provider)
+        client.insert_data(stream_id=stream_id, data=data, data_provider=data_provider)
         logger.info("Data inserted successfully")
     except Exception as e:
         logger.error(f"Failed to insert data: {e}")
@@ -177,7 +179,7 @@ def task_insert_data(setter, stream_id: StreamId, data: pd.DataFrame, data_provi
 
 # Reconciliation Tasks
 @task
-def task_create_reconciliation_strategy():
+def task_create_reconciliation_strategy() -> IReconciliationStrategy[DateStr, StreamId]:
     """Create and return a reconciliation strategy."""
     logger = get_run_logger()
     logger.info("Creating reconciliation strategy")
@@ -190,19 +192,19 @@ def task_create_reconciliation_strategy():
 
 @task
 def task_determine_needed_keys(
-    strategy: IReconciliationStrategy,
+    strategy: IReconciliationStrategy[DateStr, StreamId],
     streams_df: StreamSourceMapDF,
-    provider_getter: IProviderGetter,
-    target_getter: ITargetGetter,
+    provider_getter: IProviderGetter[DateStr, SepaDF],
+    target_client: ITargetClient,
     data_provider: str,
-) -> NeededKeysMap:
+) -> dict[StreamId, list[DateStr]]:
     """
     Determine which keys need to be fetched.
 
     - from the target, get the latest records for each stream
     - from the provider, get the dates for which data is available
     - determine which dates are needed by comparing the target and provider data
-    
+
     we don't cache, because the intention is to detect changes on the provider or target
     """
     logger = get_run_logger()
@@ -211,7 +213,7 @@ def task_determine_needed_keys(
         needed_keys = strategy.determine_needed_keys(
             streams_df=streams_df,
             provider_getter=provider_getter,
-            target_getter=target_getter,
+            target_client=target_client,
             data_provider=data_provider,
         )
         for stream_id, keys in needed_keys.items():
@@ -224,7 +226,9 @@ def task_determine_needed_keys(
 
 # Transformer Tasks
 @task
-def task_create_transformer(product_category_map_df: pd.DataFrame, stream_id_map: StreamIdMap):
+def task_create_transformer(
+    product_category_map_df: pd.DataFrame, stream_id_map: StreamIdMap
+) -> IDataTransformer[SepaDF]:
     """Create and return a data transformer."""
     logger = get_run_logger()
     logger.info("Creating data transformer")
@@ -262,10 +266,11 @@ def task_load_category_map(url: str) -> pd.DataFrame:
         logger.error(f"Failed to load category map: {e}")
         raise
 
+
 @task
 def task_dates_already_processed(needed_dates: list[DateStr]) -> bool:
     """
-    If the needed dates are 
+    If the needed dates are
     """
     # stringify the dates
     cache_key = "|".join(needed_dates)
@@ -277,7 +282,6 @@ def task_dates_already_processed(needed_dates: list[DateStr]) -> bool:
     real_date = datetime.now()
     maybe_cached_date = get_date_with_cache(cache_key=cache_key)
 
-
     # in theory is instant, but we'll give it a grace period to know its not cached
     FRESHNESS_PERIOD = timedelta(seconds=10)
 
@@ -285,7 +289,7 @@ def task_dates_already_processed(needed_dates: list[DateStr]) -> bool:
     its_cached = abs(real_date - maybe_cached_date) > FRESHNESS_PERIOD
     if its_cached:
         return True
-    
+
     return False
 
 
@@ -293,7 +297,7 @@ def task_dates_already_processed(needed_dates: list[DateStr]) -> bool:
 @task(cache_policy=policies.INPUTS)
 def task_get_now_date(cache_key: str) -> datetime:
     """Get the current date.
-    
+
     key is used to cache the date, so we can check if the date has changed
     """
     return datetime.now()

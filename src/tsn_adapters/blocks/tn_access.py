@@ -12,7 +12,7 @@ from prefect.states import Completed
 from pydantic import ConfigDict, SecretStr
 import trufnetwork_sdk_py.client as tn_client
 
-from tsn_adapters.tasks.trufnetwork.models.tn_models import TnRecordModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
 
 

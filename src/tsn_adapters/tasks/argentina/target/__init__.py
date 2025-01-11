@@ -1,8 +1,6 @@
-"""
-Target system components.
-"""
+"""Target system interfaces for Argentina data."""
 
-from .interfaces import ITargetGetter, ITargetSetter
+from tsn_adapters.common.interfaces.target import ITargetClient
 from .trufnetwork import create_trufnetwork_components
 
-__all__ = ["ITargetGetter", "ITargetSetter", "create_trufnetwork_components"] 
+__all__ = ["ITargetClient", "create_trufnetwork_components"] 

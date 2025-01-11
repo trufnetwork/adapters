@@ -8,22 +8,22 @@ import pandas as pd
 from prefect import task
 from prefect.artifacts import create_markdown_artifact
 
-from tsn_adapters.tasks.argentina.provider.interfaces.base import IProviderGetter
-from tsn_adapters.tasks.argentina.reconciliation.interfaces import IReconciliationStrategy
-from tsn_adapters.tasks.argentina.target import ITargetGetter
-from tsn_adapters.tasks.argentina.types import DateStr, NeededKeysMap, StreamId
+from tsn_adapters.common.interfaces.provider import IProviderGetter
+from tsn_adapters.common.interfaces.reconciliation import IReconciliationStrategy
+from tsn_adapters.common.interfaces.target import ITargetClient
+from tsn_adapters.tasks.argentina.types import DateStr, StreamId
 
 
-class ByLastInsertedStrategy(IReconciliationStrategy):
+class ByLastInsertedStrategy(IReconciliationStrategy[DateStr, StreamId]):
     """Strategy that determines needed data based on the last inserted date."""
 
     def determine_needed_keys(
         self,
         streams_df: pd.DataFrame,
         provider_getter: IProviderGetter,
-        target_getter: ITargetGetter,
+        target_client: ITargetClient,
         data_provider: str,
-    ) -> NeededKeysMap:
+    ) -> dict[StreamId, list[DateStr]]:
         """
         Determine which dates need to be fetched for each stream.
 
@@ -32,13 +32,13 @@ class ByLastInsertedStrategy(IReconciliationStrategy):
                 - stream_id: StreamId
                 - source_id: str
                 - available_dates: List[DateStr]
-            target_getter: The target system getter
+            target_client: The target system client
             data_provider: The data provider identifier
 
         Returns:
             Dict mapping stream_id to list of dates that need to be fetched
         """
-        results: NeededKeysMap = {}
+        results: dict[StreamId, list[DateStr]] = {}
         summary: list[str] = []
         summary.append(f"Strategy: {self.__class__.__name__}\n\n")
         available_keys = provider_getter.list_available_keys()
@@ -46,7 +46,7 @@ class ByLastInsertedStrategy(IReconciliationStrategy):
             stream_id = cast(StreamId, row["stream_id"])
 
             # Get existing data for this stream
-            existing_df = target_getter.get_latest(stream_id=stream_id, data_provider=data_provider)
+            existing_df = target_client.get_latest(stream_id=stream_id, data_provider=data_provider)
 
             # Get the last inserted date, or use a very old date if no data exists
             if not existing_df.empty:
@@ -81,12 +81,7 @@ class ByLastInsertedStrategy(IReconciliationStrategy):
         return results
 
 
-@task(name="Create Reconciliation Strategy")
-def create_reconciliation_strategy() -> ByLastInsertedStrategy:
-    """
-    Create a reconciliation strategy instance.
-
-    Returns:
-        ByLastInsertedStrategy: The strategy instance
-    """
+@task
+def create_reconciliation_strategy() -> IReconciliationStrategy[DateStr, StreamId]:
+    """Create and return a reconciliation strategy."""
     return ByLastInsertedStrategy()

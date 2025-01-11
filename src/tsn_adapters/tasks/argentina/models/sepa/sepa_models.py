@@ -147,4 +147,4 @@ class SepaDataItem(ABC):
     def fetch_into_memory(self) -> bytes:
         """
         Fetch the data into memory.
-        """ 
+        """

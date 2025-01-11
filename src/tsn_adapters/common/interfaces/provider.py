@@ -1,14 +1,14 @@
 """
-Base interfaces for SEPA data providers.
+Base interfaces for data providers.
 """
 
 from abc import ABC, abstractmethod
 from typing import Generic, TypeVar
 
-from tsn_adapters.tasks.argentina.types import StreamSourceMapDF
+import pandas as pd
 
 K = TypeVar("K")  # For key types (e.g. DateStr)
-T = TypeVar("T")  # For data types (e.g. SepaDF)
+T = TypeVar("T")  # For data types (e.g. a DataFrame)
 
 
 class IProviderGetter(ABC, Generic[K, T]):
@@ -39,16 +39,24 @@ class IProviderGetter(ABC, Generic[K, T]):
 
 
 class IStreamSourceMapFetcher(ABC):
-    """Interface for fetching stream metadata."""
+    """Interface for fetching stream to source mapping.
+
+    We have a defined stream for BTC. Our provider is Coinbase.
+    We need to know which coinbase ID corresponds to this stream:
+    {
+        "stream_id": "st123...789",
+        "source_id": "BTC"
+    }
+    """
 
     @abstractmethod
-    def get_streams(self) -> StreamSourceMapDF:
+    def get_streams(self) -> pd.DataFrame:
         """
         Return a dataframe of stream metadata.
 
         Returns:
-            StreamMetadataDF: DataFrame containing stream metadata with columns:
-                - stream_id: StreamId
+            pd.DataFrame: DataFrame containing stream metadata with columns:
+                - stream_id: str
                 - source_id: str
         """
         pass

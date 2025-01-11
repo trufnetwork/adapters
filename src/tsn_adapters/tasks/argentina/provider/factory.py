@@ -1,26 +1,26 @@
 """
-Factory for creating SEPA data providers.
+Factory functions for creating SEPA data providers.
 """
 
 from prefect import task
 from prefect_aws import S3Bucket
 
-from tsn_adapters.tasks.argentina.provider.interfaces import IProviderGetter
-from tsn_adapters.tasks.argentina.provider.s3 import create_sepa_s3_provider
+from tsn_adapters.common.interfaces.provider import IProviderGetter
+from tsn_adapters.tasks.argentina.provider.s3 import SepaS3Provider
 from tsn_adapters.tasks.argentina.provider.website import create_sepa_website_provider
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF
 
 
 @task(name="Create SEPA Provider")
 def create_sepa_provider(
-    provider_type: str,
+    provider_type: str = "website",
     s3_block: S3Bucket | None = None,
     s3_prefix: str = "source_data/",
     delay_seconds: float = 0.1,
-    show_progress_bar: bool = False
+    show_progress_bar: bool = False,
 ) -> IProviderGetter[DateStr, SepaDF]:
     """
-    Factory function to create a provider based on provider_type.
+    Create a SEPA provider instance.
 
     Args:
         provider_type: Type of provider to create ('website' or 's3')
@@ -31,21 +31,12 @@ def create_sepa_provider(
 
     Returns:
         IProviderGetter: The provider instance
-
-    Raises:
-        ValueError: If provider_type is unknown or if s3_block is missing for 's3' provider
     """
-    if provider_type == "website":
-        return create_sepa_website_provider(
-            delay_seconds=delay_seconds,
-            show_progress_bar=show_progress_bar
-        )
-    elif provider_type == "s3":
-        if s3_block is None:
+    if provider_type == "s3":
+        if not s3_block:
             raise ValueError("s3_block is required for 's3' provider")
-        return create_sepa_s3_provider(
-            s3_block=s3_block,
-            prefix=s3_prefix
-        )
+        return SepaS3Provider(s3_block=s3_block, prefix=s3_prefix)
+    elif provider_type == "website":
+        return create_sepa_website_provider(delay_seconds=delay_seconds, show_progress_bar=show_progress_bar)
     else:
-        raise ValueError(f"Unknown provider_type: {provider_type}") 
+        raise ValueError(f"Invalid provider type: {provider_type}")

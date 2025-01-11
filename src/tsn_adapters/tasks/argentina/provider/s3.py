@@ -9,9 +9,9 @@ from typing import cast
 from prefect import task
 from prefect_aws import S3Bucket
 
+from tsn_adapters.common.interfaces.provider import IProviderGetter
 from tsn_adapters.tasks.argentina.models.sepa import SepaS3DataItem
 from tsn_adapters.tasks.argentina.provider.data_processor import process_sepa_data
-from tsn_adapters.tasks.argentina.provider.interfaces import IProviderGetter
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF
 from tsn_adapters.utils.logging import get_logger_safe
 

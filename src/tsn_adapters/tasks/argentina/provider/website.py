@@ -6,9 +6,10 @@ from typing import cast
 
 from prefect import task
 
-from tsn_adapters.tasks.argentina.models.sepa.website_item import SepaWebsiteDataItem, SepaWebsiteScraper
+from tsn_adapters.common.interfaces.provider import IProviderGetter
+from tsn_adapters.tasks.argentina.models.sepa import SepaWebsiteDataItem
+from tsn_adapters.tasks.argentina.models.sepa.website_item import SepaWebsiteScraper
 from tsn_adapters.tasks.argentina.provider.data_processor import process_sepa_data
-from tsn_adapters.tasks.argentina.provider.interfaces import IProviderGetter
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF
 
 

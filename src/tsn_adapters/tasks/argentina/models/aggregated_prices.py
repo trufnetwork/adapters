@@ -10,7 +10,7 @@ from typing import Callable
 from pandera import DataFrameModel
 from pandera.typing import DataFrame, Series
 
-from tsn_adapters.tasks.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 
 
 class SepaAggregatedPricesModel(DataFrameModel):

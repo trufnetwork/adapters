@@ -3,17 +3,18 @@ Base interfaces for target system interactions.
 """
 
 from abc import ABC, abstractmethod
+from typing import Generic, TypeVar
 
 import pandas as pd
 
-from tsn_adapters.tasks.argentina.types import StreamId
+S = TypeVar("S")  # For stream ID types (e.g. StreamId)
 
 
-class ITargetGetter(ABC):
-    """Interface for reading data from the target system."""
+class ITargetClient(ABC, Generic[S]):
+    """Unified interface for reading/writing data in the target system."""
 
     @abstractmethod
-    def get_latest(self, stream_id: StreamId, data_provider: str) -> pd.DataFrame:
+    def get_latest(self, stream_id: S, data_provider: str) -> pd.DataFrame:
         """
         Fetch existing records for the given stream from the target system.
 
@@ -26,12 +27,8 @@ class ITargetGetter(ABC):
         """
         pass
 
-
-class ITargetSetter(ABC):
-    """Interface for writing data to the target system."""
-
     @abstractmethod
-    def insert_data(self, stream_id: StreamId, data: pd.DataFrame, data_provider: str) -> None:
+    def insert_data(self, stream_id: S, data: pd.DataFrame, data_provider: str) -> None:
         """
         Insert data into the target system.
 

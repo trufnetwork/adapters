@@ -1,38 +1,64 @@
 # Argentina SEPA Ingestion Module
 
-This module handles data ingestion and processing for the Argentina SEPA dataset using Prefect flows, tasks, and Pandera schemas.
+This module implements Argentina's SEPA (Sistema Electrónico de Publicidad de Precios Argentinos) data ingestion using the TSN Adapters pipeline architecture.
 
-## Architecture Overview
+## Overview
 
-This module implements a generic pipeline architecture designed for reuse across different data sources:
-- **Interfaces**: Core abstractions (`interfaces/`) for data providers, reconciliation strategies, and target systems
-- **Implementations**: Concrete SEPA-specific components that implement these interfaces
-- **Flow Orchestration**: Prefect tasks and flows coordinating the entire pipeline
+The Argentina module demonstrates a specialized implementation of the TSN Adapters pipeline for ingesting and processing SEPA pricing data. It showcases how to adapt the core pipeline interfaces for this specific data source.
 
-## Directory Structure
+### Key Components
 
-- **`aggregate/`**: Category-level price aggregation logic
-- **`flows/`**: Pipeline orchestration and entry points
-- **`interfaces/`**: Abstract interfaces for pipeline components
-- **`models/`**: Pandera schemas for data validation
-- **`scrapers/`**: SEPA-specific data extraction
-- **`utils/`**: Shared helper functions
+- **Data Providers** (`provider/`): Implementations for fetching SEPA data
+  - Website scraper
+  - S3 bucket integration
+  
+- **Models** (`models/`): Pandera schemas for data validation
+  - SEPA-specific data models
+  - Category mapping schemas
+  
+- **Transformers** (`transformers/`): Data transformation logic
+  - Raw SEPA → TSN-compatible format
+  - Category-specific transformations
 
-**Key Files:**
-- `provider.py`: Data retrieval implementation
-- `reconciliation.py`: Data reconciliation strategies
-- `target.py`: TrufNetwork integration
-- `task_wrappers.py`: Prefect task implementations
+- **Reconciliation** (`reconciliation/`): Strategies for data consistency
+  - Date-based reconciliation
+  - Partial data handling
+
+- **Aggregation** (`aggregate/`): Price aggregation logic
+  - Category-level computations
+  - Statistical processing
 
 ## Usage
 
-1. **Setup**: Configure Prefect blocks (`TNAccessBlock`, `PrimitiveSourcesDescriptor`)
-2. **Configure**: Set `source_descriptor_type`, block names, and category map URL
-3. **Run**: Execute `flows/argentina_ingestor_flow.py` or create a custom deployment
-4. **Monitor**: Check Prefect artifacts for logs and summaries
+### Prerequisites
 
-## Extending
+1. Configure required Prefect blocks:
+   - `TNAccessBlock` for TSN network access
+   - Data source descriptor (e.g., `S3Block` or `UrlBlock`)
 
-- Implement `interfaces/` for new data sources. We plan to extract these into a top level `interfaces/` folder in the next iterations.
-- Add custom reconciliation strategies via `IReconciliationStrategy`
-- Update Pandera models for new data schemas
+### Basic Implementation
+
+```python
+from tsn_adapters.tasks.argentina.flows import argentina_ingestor_flow
+
+# Run the ingestion flow
+argentina_ingestor_flow(
+    source_descriptor_type="github",  # or "s3", "url"
+    source_descriptor_block_name="your-block-name",
+    trufnetwork_access_block_name="your-tn-block",
+    product_category_map_url="your-category-map",
+    data_provider="your-provider-id"
+)
+```
+
+### Monitoring
+
+- Track progress via Prefect UI
+- Review logs for validation results
+- Monitor TSN network for successful data insertion
+
+## See Also
+
+- [TSN Adapters Documentation](../../../../README.md)
+- [Prefect Documentation](https://docs.prefect.io/)
+- [Pandera Documentation](https://pandera.readthedocs.io/)

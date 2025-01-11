@@ -199,6 +199,7 @@ class SepaWebsiteDataItem(SepaDataItem, BaseModel):
         with open(path, "wb") as f:
             f.write(self.fetch_into_memory(show_progress_bar=show_progress_bar))
 
+
 class SepaWebsiteScraper:
     """
     Scraper for the structure:

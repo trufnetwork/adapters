@@ -1,20 +1,24 @@
 """
-TrufNetwork target implementations for getting and setting data.
+TrufNetwork target system implementation.
 """
 
+import logging
+
 import pandas as pd
-from prefect import task
+from prefect import get_run_logger
 from prefect.utilities.asyncutils import sync_compatible
 
 from tsn_adapters.blocks.tn_access import TNAccessBlock, task_insert_and_wait_for_tx, task_read_records
-from tsn_adapters.tasks.argentina.target.interfaces import ITargetGetter, ITargetSetter
+from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.tasks.argentina.types import StreamId
 
+logger = logging.getLogger(__name__)
 
-class TrufNetworkTargetGetter(ITargetGetter):
-    """Gets data from TrufNetwork."""
 
-    def __init__(self, block_name: str):
+class TrufNetworkClient(ITargetClient[StreamId]):
+    """Client for interacting with TrufNetwork target system."""
+
+    def __init__(self, block_name: str) -> None:
         """
         Initialize with a TrufNetwork access block name.
 
@@ -48,38 +52,26 @@ class TrufNetworkTargetGetter(ITargetGetter):
         Returns:
             pd.DataFrame: The existing data in TrufNetwork
         """
-        return task_read_records(
+        logger = get_run_logger()
+        logger.debug(f"Getting latest data for stream {stream_id} from TrufNetwork")
+
+        # Get latest record from TrufNetwork
+        df = task_read_records(
             block=self.block,
             stream_id=stream_id,
             data_provider=data_provider,
         )
 
+        if df is None or df.empty:
+            logger.info("No existing data found for stream %s", stream_id)
+            return pd.DataFrame()
 
-class TrufNetworkTargetSetter(ITargetSetter):
-    """Sets data in TrufNetwork."""
+        # check only 1 record
+        if len(df) > 1:
+            raise ValueError(f"More than 1 record found for stream {stream_id}")
 
-    def __init__(self, block_name: str):
-        """
-        Initialize with a TrufNetwork access block name.
-
-        Args:
-            block_name: Name of the TrufNetwork access block
-        """
-        self._block_name = block_name
-        self._state: dict[str, TNAccessBlock] = {}
-
-    @property
-    def block(self) -> TNAccessBlock:
-        """Get the initialized block instance."""
-        if "block" not in self._state:
-            raise RuntimeError("Block not initialized. Call initialize() first.")
-        return self._state["block"]
-
-    @sync_compatible
-    async def initialize(self) -> None:
-        """Initialize by loading the block."""
-        block = await TNAccessBlock.aload(self._block_name)
-        self._state["block"] = block
+        logger.debug("Found existing record for stream %s", stream_id)
+        return df
 
     def insert_data(self, stream_id: StreamId, data: pd.DataFrame, data_provider: str) -> None:
         """
@@ -90,31 +82,30 @@ class TrufNetworkTargetSetter(ITargetSetter):
             data: The data to insert
             data_provider: The data provider identifier
         """
+        logger = get_run_logger()
+        logger.info(f"Inserting {len(data)} records for stream {stream_id} into TrufNetwork")
+
+        # Insert data into TrufNetwork
         task_insert_and_wait_for_tx(
             block=self.block,
             stream_id=stream_id,
-            records=data,
+            data=data,
             data_provider=data_provider,
         )
 
+        logger.info("Data inserted successfully")
 
-@task(name="Create TrufNetwork Target Components")
-def create_trufnetwork_components(
-    block_name: str,
-) -> tuple[TrufNetworkTargetGetter, TrufNetworkTargetSetter]:
+
+def create_trufnetwork_components(block_name: str) -> TrufNetworkClient:
     """
-    Create TrufNetwork target components.
+    Create TrufNetwork client instance.
 
     Args:
-        block_name: Name of the TrufNetwork access block
+        block_name: The name of the TrufNetwork block to use
 
     Returns:
-        tuple: (getter, setter) instances
+        TrufNetworkClient: The client instance
     """
-    getter = TrufNetworkTargetGetter(block_name)
-    getter.initialize()
-
-    setter = TrufNetworkTargetSetter(block_name)
-    setter.initialize()
-
-    return getter, setter
+    client = TrufNetworkClient(block_name)
+    client.initialize()  # Initialize the block
+    return client
