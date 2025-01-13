@@ -5,28 +5,29 @@ import time
 from typing import Optional
 
 from bs4 import BeautifulSoup
-from prefect import get_run_logger, task
-from prefect.context import TaskRunContext, get_run_context
+from prefect import get_run_logger
 from pydantic import BaseModel, field_validator
 import requests
 from tqdm import tqdm
 
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaDataItem
 from tsn_adapters.tasks.argentina.utils.dates import date_to_weekday
+from tsn_adapters.utils.logging import get_logger_safe
 
 
-class SepaHistoricalDataItem(BaseModel):
+class SepaWebsiteDataItem(SepaDataItem, BaseModel):
     """
     Represents a historical data item from the dataset.
     """
 
     # not necessarily the website date corresponds to the real date inside the zip file
     # e.g. they may report at the website to have updated on a certain date, but the real date inside the zip file is different  # noqa: E501
-    website_date: str
+    item_reported_date: str
     resource_id: str
     dataset_id: str
     _base_url = "https://datos.produccion.gob.ar/dataset"
 
-    @field_validator("website_date")
+    @field_validator("item_reported_date")
     @classmethod
     def validate_date(cls, v: str) -> str:
         # Strict check for YYYY-MM-DD
@@ -45,7 +46,7 @@ class SepaHistoricalDataItem(BaseModel):
         Returns the direct download link in the 'resource' pattern, including the weekday in Spanish.
         e.g. https://datos.produccion.gob.ar/dataset/<dataset_id>/resource/<resource_id>/download/sepa_<weekday>.zip
         """
-        lowercase_weekday = date_to_weekday(self.website_date).lower()
+        lowercase_weekday = date_to_weekday(self.item_reported_date).lower()
         return f"{self._base_url}/{self.dataset_id}/resource/{self.resource_id}/download/sepa_{lowercase_weekday}.zip"
 
     def fetch_into_memory(self, show_progress_bar: bool = True) -> bytes:
@@ -57,7 +58,7 @@ class SepaHistoricalDataItem(BaseModel):
             bytes: The complete file content, or raises an exception if download failed/cancelled
         """
         download_link = self.get_download_link()
-        logger = self._get_logger()
+        logger = get_logger_safe(__name__)
         logger.info(f"Starting download from {download_link}")
 
         # Try HEAD request first, but don't fail if it doesn't work
@@ -138,14 +139,6 @@ class SepaHistoricalDataItem(BaseModel):
                 if time_since_last_chunk > chunk_timeout:
                     raise requests.exceptions.ReadTimeout(f"No data received for {time_since_last_chunk:.1f} seconds")
 
-                # Check for cancellation
-                run_context = get_run_context()
-                task_run = run_context.task_run if isinstance(run_context, TaskRunContext) else None
-                state = task_run.state if task_run is not None else None
-                if state is not None and (state.is_crashed() or state.is_cancelled()):
-                    logger.warning("Cancellation detected by Prefect.")
-                    raise InterruptedError("Download cancelled by Prefect")
-
                 if not chunk:  # Skip empty chunks
                     continue
 
@@ -206,16 +199,8 @@ class SepaHistoricalDataItem(BaseModel):
         with open(path, "wb") as f:
             f.write(self.fetch_into_memory(show_progress_bar=show_progress_bar))
 
-    def _get_logger(self):
-        try:
-            logger = get_run_logger()
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to get run logger: {e}")
-        return logger
 
-
-class SepaPreciosScraper:
+class SepaWebsiteScraper:
     """
     Scraper for the structure:
     <div class="pkg-container">
@@ -271,7 +256,7 @@ class SepaPreciosScraper:
             raise ValueError(f"No valid YYYY-MM-DD date found in text: {text}")
         return match.group(0)
 
-    def _extract_data_item(self, container) -> SepaHistoricalDataItem:
+    def _extract_data_item(self, container) -> SepaWebsiteDataItem:
         """
         For each .pkg-container, parse:
          - The date from the .package-info's <p> text
@@ -313,9 +298,9 @@ class SepaPreciosScraper:
         dataset_id = match.group(1)
         resource_id = match.group(3)
 
-        return SepaHistoricalDataItem(website_date=date_str, resource_id=resource_id, dataset_id=dataset_id)
+        return SepaWebsiteDataItem(item_reported_date=date_str, resource_id=resource_id, dataset_id=dataset_id)
 
-    def scrape_historical_items(self) -> list[SepaHistoricalDataItem]:
+    def scrape_items(self) -> list[SepaWebsiteDataItem]:
         soup = self._get_soup()
 
         # Each resource is in a .pkg-container
@@ -335,10 +320,3 @@ class SepaPreciosScraper:
         if not items:
             raise ValueError("No valid items extracted from the page.")
         return items
-
-
-@task(retries=3, retry_delay_seconds=10)
-def task_scrape_historical_items(
-    scraper: SepaPreciosScraper,
-) -> list[SepaHistoricalDataItem]:
-    return scraper.scrape_historical_items()

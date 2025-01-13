@@ -1,33 +1,29 @@
 """
-Task wrappers for Argentina SEPA data ingestion pipeline components.
+Task wrappers for Argentina data pipeline.
 """
 
-from typing import cast
+from datetime import datetime, timedelta
 
 import pandas as pd
 from prefect import get_run_logger, task
-from prefect.artifacts import create_markdown_artifact
+import prefect.cache_policies as policies
+from prefect_aws import S3Bucket
 
-from tsn_adapters.tasks.argentina.interfaces.base import (
-    IDataTransformer,
-    IProviderGetter,
-    IReconciliationStrategy,
-    ITargetGetter,
-)
+from tsn_adapters.common.interfaces.provider import IProviderGetter
+from tsn_adapters.common.interfaces.reconciliation import IReconciliationStrategy
+from tsn_adapters.common.interfaces.target import ITargetClient
+from tsn_adapters.common.interfaces.transformer import IDataTransformer
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
-from tsn_adapters.tasks.argentina.provider import SepaByDateGetter, create_sepa_provider
-from tsn_adapters.tasks.argentina.reconciliation import create_reconciliation_strategy
-from tsn_adapters.tasks.argentina.scrapers.sepa_scraper import SepaPreciosScraper
+from tsn_adapters.tasks.argentina.provider.factory import create_sepa_provider
+from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
 from tsn_adapters.tasks.argentina.stream_details import create_stream_details_fetcher
-from tsn_adapters.tasks.argentina.target import create_trufnetwork_components
-from tsn_adapters.tasks.argentina.transformers import SepaDataTransformer, create_sepa_transformer
+from tsn_adapters.tasks.argentina.transformers.sepa import create_sepa_transformer
 from tsn_adapters.tasks.argentina.types import (
     DateStr,
-    NeededKeysMap,
     SepaDF,
     StreamId,
     StreamIdMap,
-    StreamMetadataDF,
+    StreamSourceMapDF,
 )
 
 
@@ -46,203 +42,149 @@ def task_create_stream_fetcher(source_type: str, block_name: str):
 
 
 @task(retries=2)
-def task_get_streams(fetcher) -> StreamMetadataDF:
+def task_get_streams(fetcher) -> StreamSourceMapDF:
     """Get stream metadata using the fetcher."""
     logger = get_run_logger()
     logger.info("Fetching stream metadata")
-
     try:
         streams_df = fetcher.get_streams()
+        logger.info(f"Found {len(streams_df)} streams")
+        return streams_df
     except Exception as e:
         logger.error(f"Failed to fetch streams: {e}")
         raise
 
-    if streams_df.empty:
-        logger.warning("No streams found in the fetcher response")
-        return streams_df
-
-    # Create summary artifact
-    summary = ["# Streams Metadata Summary\n\n"]
-
-    # Basic statistics
-    total_streams = len(streams_df)
-    logger.info(f"Successfully fetched {total_streams} streams")
-
-    summary.extend(
-        [
-            "## Overview\n",
-            f"- Total streams: {total_streams}\n\n",
-        ]
-    )
-
-    # Stream details
-    summary.append("## Streams\n")
-    for _, stream in streams_df.iterrows():
-        summary.extend(
-            [
-                f"- Stream Id: {stream['stream_id']}, Source Id: {stream['source_id']}\n",
-            ]
-        )
-
-    create_markdown_artifact(
-        key="streams-metadata-summary", markdown="".join(summary), description="Summary of available SEPA data streams"
-    )
-
-    return streams_df
-
 
 # Provider Tasks
 @task(retries=3)
-def task_create_sepa_provider():
-    """Create and return a SEPA provider."""
+def task_create_sepa_provider(
+    provider_type: str = "website",
+    s3_block_name: str | None = None,
+    s3_prefix: str = "source_data/",
+    delay_seconds: float = 0.1,
+    show_progress_bar: bool = False,
+) -> IProviderGetter[DateStr, SepaDF]:
+    """
+    Create a SEPA provider instance.
+
+    Args:
+        provider_type: Type of provider to create ('website' or 's3')
+        s3_block_name: Name of the S3 block to use (required for 's3' provider)
+        s3_prefix: The prefix for S3 keys (only used for 's3' provider)
+        delay_seconds: Delay between requests for website scraping (only used for 'website' provider)
+        show_progress_bar: Whether to show progress bars during downloads
+
+    Returns:
+        IProviderGetter: The provider instance
+    """
     logger = get_run_logger()
-    logger.info("Creating SEPA provider")
+    logger.info(f"Creating SEPA provider of type: {provider_type}")
 
     try:
-        scraper = SepaPreciosScraper()
-        provider = create_sepa_provider(scraper=scraper)
-        provider.load_items()
+        if provider_type == "s3" and s3_block_name:
+            s3_block = S3Bucket.load(s3_block_name)
+            provider = create_sepa_provider(
+                provider_type=provider_type, s3_block=s3_block, s3_prefix=s3_prefix, show_progress_bar=show_progress_bar
+            )
+        else:
+            provider = create_sepa_provider(
+                provider_type="website", delay_seconds=delay_seconds, show_progress_bar=show_progress_bar
+            )
+        return provider
     except Exception as e:
         logger.error(f"Failed to create SEPA provider: {e}")
         raise
 
-    # Create summary of loaded historical items
-    items = provider._historical_items
-    if not items:
-        logger.warning("No historical items found in provider")
-        return provider
 
-    summary = ["# Historical Items Summary\n\n"]
-
-    # Basic statistics
-    total_items = len(items)
-    unique_dates = len(set(items.keys()))
-    logger.info(f"Loaded {total_items:,} items across {unique_dates:,} unique dates")
-
-    summary.extend(
-        [
-            "## Overview\n",
-            f"- Total items: {total_items:,}\n",
-            f"- Unique dates: {unique_dates:,}\n\n",
-        ]
-    )
-
-    # Date range information
-    if items:
-        dates = sorted(items.keys())
-        date_span = (pd.to_datetime(dates[-1]) - pd.to_datetime(dates[0])).days
-        logger.info(f"Date range: {dates[0]} to {dates[-1]} ({date_span} days)")
-
-        summary.extend(
-            [
-                "## Date Range\n",
-                f"- First date: {dates[0]}\n",
-                f"- Last date: {dates[-1]}\n",
-                f"- Total span: {date_span} days\n\n",
-            ]
-        )
-
-        # Sample of recent dates
-        summary.extend(["## Most Recent Dates\n", *[f"- {date}\n" for date in dates[-5:]], "\n"])
-
-    create_markdown_artifact(
-        key="historical-items-summary",
-        markdown="".join(summary),
-        description="Summary of historical items loaded by the SEPA provider",
-    )
-
-    return provider
-
-
-@task(retries=2)
-def task_load_sepa_items(provider: SepaByDateGetter):
-    """Load items into the provider."""
-    logger = get_run_logger()
-    logger.info("Loading SEPA items")
-    try:
-        provider.load_items()
-        logger.info("Successfully loaded SEPA items")
-    except Exception as e:
-        logger.error(f"Failed to load SEPA items: {e}")
-        raise
-
-
-@task(name="get_data_for_date", task_run_name="get data for {date}", retries=3)
+@task(
+    name="get_data_for_date",
+    task_run_name="get data for {date}",
+    # long cache:
+    # - we only try to get data for a date when it is available, so we're effectively skipping download
+    # - we don't care about the provider: data should be the same across providers
+    cache_expiration=timedelta(days=7),
+    cache_key_fn=lambda ctx, args: f"get_data_for_date_{args['date']}",
+    retries=3,
+)
 def task_get_data_for_date(provider: IProviderGetter, date: DateStr) -> SepaDF:
-    """Get data for a specific date using the provider."""
+    """
+    Get SEPA data for a specific date.
+
+    Args:
+        provider: The provider to use
+        date: The date to fetch data for
+
+    Returns:
+        DataFrame: The SEPA data
+    """
     logger = get_run_logger()
     logger.info(f"Fetching data for date: {date}")
     try:
-        data = provider.get_data_for(date)
-        if data.empty:
+        df = provider.get_data_for(date)
+        if df.empty:
             logger.warning(f"No data found for date: {date}")
         else:
-            logger.info(f"Successfully fetched {len(data)} records for date: {date}")
-        return data
+            logger.info(f"Got {len(df)} rows for date: {date}")
+        return df
     except Exception as e:
         logger.error(f"Failed to get data for date {date}: {e}")
         raise
 
 
 # Target Tasks
-@task(retries=3)
-def task_create_trufnetwork_components(block_name: str):
-    """Create and return TrufNetwork getter and setter components."""
-    logger = get_run_logger()
-    logger.info(f"Creating TrufNetwork components with block: {block_name}")
-    try:
-        components = create_trufnetwork_components(block_name=block_name)
-        logger.info("Successfully created TrufNetwork components")
-        return components
-    except Exception as e:
-        logger.error(f"Failed to create TrufNetwork components: {e}")
-        raise
-
-
 @task(retries=2)
-def task_get_latest_records(getter: ITargetGetter, stream_id: StreamId, data_provider: str) -> pd.DataFrame:
-    """Get latest records from the target system."""
+def task_get_latest_records(client: ITargetClient, stream_id: StreamId, data_provider: str) -> pd.DataFrame:
+    """
+    Get latest records from the target system.
+
+    Args:
+        client: The target client to use
+        stream_id: The stream ID to fetch data for
+        data_provider: The data provider identifier
+
+    Returns:
+        pd.DataFrame: The latest records from the target system
+    """
     logger = get_run_logger()
-    logger.info(f"Fetching latest records for stream {stream_id}")
+    logger.info(f"Getting latest records for stream: {stream_id}")
     try:
-        data = getter.get_latest(stream_id, data_provider)
-        if data.empty:
-            logger.warning(f"No latest records found for stream {stream_id}")
-        else:
-            logger.info(f"Successfully fetched {len(data)} latest records for stream {stream_id}")
-        return data
+        df = client.get_latest(stream_id=stream_id, data_provider=data_provider)
+        logger.info(f"Got {len(df)} records")
+        return df
     except Exception as e:
-        logger.error(f"Failed to get latest records for stream {stream_id}: {e}")
+        logger.error(f"Failed to get latest records: {e}")
         raise
 
 
 @task
-def task_insert_data(setter, stream_id: StreamId, data: pd.DataFrame, data_provider: str) -> None:
-    """Insert data into the target system."""
-    logger = get_run_logger()
-    if data.empty:
-        logger.warning(f"Skipping insertion for stream {stream_id}: No data to insert")
-        return
+def task_insert_data(client: ITargetClient, stream_id: StreamId, data: pd.DataFrame, data_provider: str) -> None:
+    """
+    Insert data into the target system.
 
-    logger.info(f"Inserting {len(data)} records into stream {stream_id}")
+    Args:
+        client: The target client to use
+        stream_id: The stream ID to insert data for
+        data: The data to insert
+        data_provider: The data provider identifier
+    """
+    logger = get_run_logger()
+    logger.info(f"Inserting {len(data)} rows for stream: {stream_id}")
     try:
-        setter.insert_data(stream_id, data, data_provider)
-        logger.info(f"Successfully inserted data into stream {stream_id}")
+        client.insert_data(stream_id=stream_id, data=data, data_provider=data_provider)
+        logger.info("Data inserted successfully")
     except Exception as e:
-        logger.error(f"Failed to insert data into stream {stream_id}: {e}")
+        logger.error(f"Failed to insert data: {e}")
         raise
 
 
 # Reconciliation Tasks
 @task
-def task_create_reconciliation_strategy():
+def task_create_reconciliation_strategy() -> IReconciliationStrategy[DateStr, StreamId]:
     """Create and return a reconciliation strategy."""
     logger = get_run_logger()
     logger.info("Creating reconciliation strategy")
     try:
-        strategy = create_reconciliation_strategy()
-        logger.info("Successfully created reconciliation strategy")
-        return strategy
+        return create_reconciliation_strategy()
     except Exception as e:
         logger.error(f"Failed to create reconciliation strategy: {e}")
         raise
@@ -250,17 +192,32 @@ def task_create_reconciliation_strategy():
 
 @task
 def task_determine_needed_keys(
-    strategy: IReconciliationStrategy, streams_df: StreamMetadataDF, target_getter: ITargetGetter, data_provider: str
-) -> NeededKeysMap:
-    """Determine which keys need to be fetched."""
+    strategy: IReconciliationStrategy[DateStr, StreamId],
+    streams_df: StreamSourceMapDF,
+    provider_getter: IProviderGetter[DateStr, SepaDF],
+    target_client: ITargetClient,
+    data_provider: str,
+) -> dict[StreamId, list[DateStr]]:
+    """
+    Determine which keys need to be fetched.
+
+    - from the target, get the latest records for each stream
+    - from the provider, get the dates for which data is available
+    - determine which dates are needed by comparing the target and provider data
+
+    we don't cache, because the intention is to detect changes on the provider or target
+    """
     logger = get_run_logger()
     logger.info("Determining needed keys")
     try:
-        needed_keys = strategy.determine_needed_keys(streams_df, target_getter, data_provider)
-        if not needed_keys:
-            logger.warning("No keys need to be fetched")
-        else:
-            logger.info(f"Found {len(needed_keys)} streams that need updating")
+        needed_keys = strategy.determine_needed_keys(
+            streams_df=streams_df,
+            provider_getter=provider_getter,
+            target_client=target_client,
+            data_provider=data_provider,
+        )
+        for stream_id, keys in needed_keys.items():
+            logger.info(f"Stream {stream_id} needs {len(keys)} keys")
         return needed_keys
     except Exception as e:
         logger.error(f"Failed to determine needed keys: {e}")
@@ -269,20 +226,14 @@ def task_determine_needed_keys(
 
 # Transformer Tasks
 @task
-def task_create_transformer(product_category_map_df: pd.DataFrame, stream_id_map: StreamIdMap):
-    """Create and return a SEPA transformer."""
+def task_create_transformer(
+    product_category_map_df: pd.DataFrame, stream_id_map: StreamIdMap
+) -> IDataTransformer[SepaDF]:
+    """Create and return a data transformer."""
     logger = get_run_logger()
-    if product_category_map_df.empty:
-        logger.error("Cannot create transformer: Product category map is empty")
-        raise ValueError("Product category map is empty")
-
-    logger.info("Creating SEPA transformer")
+    logger.info("Creating data transformer")
     try:
-        transformer = create_sepa_transformer(
-            product_category_map_df=product_category_map_df, stream_id_map=stream_id_map
-        )
-        logger.info("Successfully created SEPA transformer")
-        return transformer
+        return create_sepa_transformer(product_category_map_df=product_category_map_df, stream_id_map=stream_id_map)
     except Exception as e:
         logger.error(f"Failed to create transformer: {e}")
         raise
@@ -290,79 +241,63 @@ def task_create_transformer(product_category_map_df: pd.DataFrame, stream_id_map
 
 @task
 def task_transform_data(transformer: IDataTransformer, data: SepaDF) -> pd.DataFrame:
-    """Transform data using the transformer."""
+    """Transform data from source format to target format."""
     logger = get_run_logger()
-    if data.empty:
-        logger.warning("No data to transform")
-        return data
-
-    logger.info(f"Transforming {len(data)} records")
-
-    # Check for uncategorized products before transformation
-    sepa_transformer = cast(SepaDataTransformer, transformer)
+    logger.info("Transforming data")
     try:
-        uncategorized = sepa_transformer.get_uncategorized(data)
-    except Exception as e:
-        logger.error(f"Failed to check for uncategorized products: {e}")
-        raise
-
-    if not uncategorized.empty:
-        logger.warning(f"Found {len(uncategorized)} uncategorized products")
-        # Create summary for uncategorized products
-        summary = ["# Uncategorized Products Report\n\n"]
-        summary.extend(
-            [
-                "## Overview\n",
-                f"- Total uncategorized products: {len(uncategorized)}\n",
-                f"- Date: {uncategorized['date'].iloc[0]}\n\n",
-                "## Sample Products\n",
-            ]
-        )
-
-        # Show up to 10 sample products
-        for _, row in uncategorized.head(10).iterrows():
-            summary.extend(
-                [
-                    f"### Product: {row['productos_descripcion']}\n",
-                    f"- ID: {row['id_producto']}\n",
-                    f"- Price: {row['productos_precio_lista']}\n",
-                    "\n",
-                ]
-            )
-
-        create_markdown_artifact(
-            key=f"uncategorized-products-{uncategorized['date'].iloc[0]}",
-            markdown="".join(summary),
-            description=f"Uncategorized products for date {uncategorized['date'].iloc[0]}",
-        )
-
-    # Proceed with the transformation
-    try:
-        transformed_data = transformer.transform(data)
-        logger.info(f"Successfully transformed data into {len(transformed_data)} records")
-        return transformed_data
+        df = transformer.transform(data)
+        logger.info(f"Transformed {len(df)} rows")
+        return df
     except Exception as e:
         logger.error(f"Failed to transform data: {e}")
         raise
 
 
-# Category Map Tasks
-@task(retries=3)
+@task(retries=3, cache_expiration=timedelta(hours=1), cache_policy=policies.INPUTS + policies.TASK_SOURCE)
 def task_load_category_map(url: str) -> pd.DataFrame:
-    """Load the product category mapping."""
+    """Load the product category mapping from a URL."""
     logger = get_run_logger()
-    logger.info(f"Loading category map from {url}")
+    logger.info(f"Loading category map from: {url}")
     try:
-        df = SepaProductCategoryMapModel.task_from_url(
-            url=url,
-            compression="zip",
-            sep="|",
-        )
-        if df.empty:
-            logger.error("Loaded category map is empty")
-            raise ValueError("Category map is empty")
-        logger.info(f"Successfully loaded category map with {len(df)} mappings")
+        df = SepaProductCategoryMapModel.from_url(url, sep="|", compression="zip")
+        logger.info(f"Loaded {len(df)} category mappings")
         return df
     except Exception as e:
         logger.error(f"Failed to load category map: {e}")
         raise
+
+
+@task
+def task_dates_already_processed(needed_dates: list[DateStr]) -> bool:
+    """
+    If the needed dates are
+    """
+    # stringify the dates
+    cache_key = "|".join(needed_dates)
+
+    # get the current date with cache
+    cache_expiration = timedelta(days=1)
+    get_date_with_cache = task_get_now_date.with_options(cache_expiration=cache_expiration)
+
+    real_date = datetime.now()
+    maybe_cached_date = get_date_with_cache(cache_key=cache_key)
+
+    # in theory is instant, but we'll give it a grace period to know its not cached
+    FRESHNESS_PERIOD = timedelta(seconds=10)
+
+    # check if the date is fresh or was cached
+    its_cached = abs(real_date - maybe_cached_date) > FRESHNESS_PERIOD
+    if its_cached:
+        return True
+
+    return False
+
+
+# cache here is a placeholder. the real one should be set by the caller
+@task(cache_policy=policies.INPUTS + policies.TASK_SOURCE)
+def task_get_now_date(cache_key: str) -> datetime:
+    """Get the current date.
+
+    key is used to cache the date, so we can check if the date has changed
+    """
+    return datetime.now()

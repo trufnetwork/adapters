@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from typing import TypeVar
 
 import pandera as pa
@@ -131,3 +132,19 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
         df = filter_failures(with_average_price, cls)
 
         return df
+
+
+class SepaDataItem(ABC):
+    """
+    Generic data item from the dataset.
+
+    This represet a fetchable unit of data. E.g. a file in S3, a file in the website, etc.
+    """
+
+    item_reported_date: str
+
+    @abstractmethod
+    def fetch_into_memory(self) -> bytes:
+        """
+        Fetch the data into memory.
+        """

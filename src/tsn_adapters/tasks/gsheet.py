@@ -29,6 +29,6 @@ def read_gsheet(gsheets_id: str, second_column_name: Optional[str] = "value"):
 
     # truflation connector expects that the second column is a value column, and it forces its renaming to "value"
     # we need to rename it back to the original name
-    if second_column_name:
+    if second_column_name and df is not None:
         df.columns.values[1] = second_column_name
     return df

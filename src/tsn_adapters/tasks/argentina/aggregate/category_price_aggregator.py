@@ -7,11 +7,9 @@ SEPA dataset.
 
 from pandera.typing import DataFrame as paDataFrame
 
-from tsn_adapters.tasks.argentina.models import (
-    SepaAggregatedPricesModel,
-    SepaAvgPriceProductModel,
-    SepaProductCategoryMapModel,
-)
+from tsn_adapters.tasks.argentina.models.aggregated_prices import SepaAggregatedPricesModel
+from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.utils.logging import get_logger_safe
 
 logger = get_logger_safe(__name__)
