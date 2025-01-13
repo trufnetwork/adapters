@@ -89,7 +89,7 @@ class TrufNetworkClient(ITargetClient[StreamId]):
         task_insert_and_wait_for_tx(
             block=self.block,
             stream_id=stream_id,
-            data=data,
+            records=data,
             data_provider=data_provider,
         )
 

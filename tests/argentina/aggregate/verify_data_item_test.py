@@ -20,7 +20,7 @@ from prefect_aws import S3Bucket
 def manual_test(provider_type: str = "website", test_date: str = "2025-01-04"):
     """
     Manually test fetching SEPA data and aggregating it for a single date.
-    
+
     provider_type : "website" or "s3"
     test_date     : The date string (YYYY-MM-DD) to test
     """
@@ -34,18 +34,10 @@ def manual_test(provider_type: str = "website", test_date: str = "2025-01-04"):
         # For S3, you'll need a valid S3Block name, e.g. "argentina-sepa-bucket"
         s3_block_name = "argentina-sepa"
         s3_block = S3Bucket.load(s3_block_name)
-        provider = create_sepa_provider(
-            provider_type="s3",
-            s3_block=s3_block,
-            s3_prefix="source_data/"
-        )
+        provider = create_sepa_provider(provider_type="s3", s3_block=s3_block, s3_prefix="source_data/")
     else:
         # Website provider
-        provider = create_sepa_provider(
-            provider_type="website",
-            delay_seconds=0.1,
-            show_progress_bar=True
-        )
+        provider = create_sepa_provider(provider_type="website", delay_seconds=0.1, show_progress_bar=True)
 
     # 2. List available keys
     print(f"Listing available keys from provider {provider_type}...")
@@ -68,7 +60,9 @@ def manual_test(provider_type: str = "website", test_date: str = "2025-01-04"):
 
     # 5. Transform into average prices by product
     print("Loading product-category map from a known URL...")
-    category_map_url = "https://drive.usercontent.google.com/u/2/uc?id=1nfcAjCF-BYU5-rrWJW9eFqCw2AjNpc1x&export=download"
+    category_map_url = (
+        "https://drive.usercontent.google.com/u/2/uc?id=1nfcAjCF-BYU5-rrWJW9eFqCw2AjNpc1x&export=download"
+    )
     category_map_df = SepaProductCategoryMapModel.from_url(category_map_url, sep="|", compression="zip")
     print(f"Loaded {len(category_map_df)} category-map rows.")
 

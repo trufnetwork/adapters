@@ -253,7 +253,7 @@ def task_transform_data(transformer: IDataTransformer, data: SepaDF) -> pd.DataF
         raise
 
 
-@task(retries=3, cache_expiration=timedelta(hours=1), cache_policy=policies.INPUTS)
+@task(retries=3, cache_expiration=timedelta(hours=1), cache_policy=policies.INPUTS + policies.TASK_SOURCE)
 def task_load_category_map(url: str) -> pd.DataFrame:
     """Load the product category mapping from a URL."""
     logger = get_run_logger()
@@ -294,7 +294,7 @@ def task_dates_already_processed(needed_dates: list[DateStr]) -> bool:
 
 
 # cache here is a placeholder. the real one should be set by the caller
-@task(cache_policy=policies.INPUTS)
+@task(cache_policy=policies.INPUTS + policies.TASK_SOURCE)
 def task_get_now_date(cache_key: str) -> datetime:
     """Get the current date.
 

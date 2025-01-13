@@ -5,7 +5,7 @@ Argentina SEPA data ingestion flow using task-based architecture.
 from typing import cast
 
 import pandas as pd
-from prefect import flow, get_run_logger
+from prefect import flow, get_run_logger, transactions
 from prefect.artifacts import create_markdown_artifact
 
 from tsn_adapters.tasks.argentina.target import create_trufnetwork_components
@@ -14,6 +14,7 @@ from tsn_adapters.tasks.argentina.task_wrappers import (
     task_create_sepa_provider,
     task_create_stream_fetcher,
     task_create_transformer,
+    task_dates_already_processed,
     task_determine_needed_keys,
     task_get_data_for_date,
     task_get_streams,
@@ -106,60 +107,62 @@ def argentina_ingestor_flow(
     # this is an optimization to avoid processing if we have no new dates to process
     # some dates gets processed over multiple runs because not all streams have data for all dates
     # then it might understand that it's pending when it's not
-    # if task_dates_already_processed(needed_dates=sorted_needed_dates):
-    #     logger.info("Dates have already been processed in the last day, skipping...")
-    #     return
+    # we use transaction so cache is not stored if we have errors
+    with transactions.transaction():
+        if task_dates_already_processed(needed_dates=sorted_needed_dates):
+            logger.info("Dates have already been processed in the last day, skipping...")
+            return
 
-    logger.info("Dates have not been processed in the last day, processing...")
+        logger.info("Dates have not been processed in the last day, processing...")
 
-    tn_records_tasks = []
-    records_to_insert = pd.DataFrame()
-    # Process each date in parallel
-    for date in sorted_needed_dates:
-        # Fetch data
-        data = task_get_data_for_date.submit(provider, date)
+        tn_records_tasks = []
+        records_to_insert = pd.DataFrame()
+        # Process each date in parallel
+        for date in sorted_needed_dates:
+            # Fetch data
+            data = task_get_data_for_date.submit(provider, date)
 
-        # check if data is empty
-        if data.result().empty:
-            logger.warning(f"No data found for date {date}")
-            continue
+            # check if data is empty
+            if data.result().empty:
+                logger.warning(f"No data found for date {date}")
+                continue
 
-        # Get uncategorized products and store them
-        sepa_transformer = cast(SepaDataTransformer, transformer)
-        uncategorized = sepa_transformer.get_uncategorized(data.result())
-        if not uncategorized.empty:
-            uncategorized_products[date] = uncategorized
-        # Transform data
-        tn_records = task_transform_data.submit(transformer, cast_future(data))
-        tn_records_tasks.append(tn_records)
-        dates_processed.append(date)
+            # Get uncategorized products and store them
+            sepa_transformer = cast(SepaDataTransformer, transformer)
+            uncategorized = sepa_transformer.get_uncategorized(data.result())
+            if not uncategorized.empty:
+                uncategorized_products[date] = uncategorized
+            # Transform data
+            tn_records = task_transform_data.submit(transformer, cast_future(data))
+            tn_records_tasks.append(tn_records)
+            dates_processed.append(date)
 
-    # Wait for all tasks to complete
-    for tn_records in tn_records_tasks:
-        records_to_insert = pd.concat([records_to_insert, tn_records.result()])
+        # Wait for all tasks to complete
+        for tn_records in tn_records_tasks:
+            records_to_insert = pd.concat([records_to_insert, tn_records.result()])
 
-    # Now process each stream in parallel
-    insert_tasks = []
-    for stream_id, needed_dates in needed_keys.items():
-        stream_records = records_to_insert[records_to_insert["stream_id"] == stream_id]
-        # filter stream_records to only include records for the needed dates
-        stream_records = stream_records[stream_records["date"].isin(needed_dates)]
+        # Now process each stream in parallel
+        insert_tasks = []
+        for stream_id, needed_dates in needed_keys.items():
+            stream_records = records_to_insert[records_to_insert["stream_id"] == stream_id]
+            # filter stream_records to only include records for the needed dates
+            stream_records = stream_records[stream_records["date"].isin(needed_dates)]
 
-        # skip if no records for this stream
-        if stream_records.empty:
-            logger.warning(f"No records found for stream {stream_id}")
-            continue
+            # skip if no records for this stream
+            if stream_records.empty:
+                logger.warning(f"No records found for stream {stream_id}")
+                continue
 
-        # Insert into target
-        insert_tasks.append(
-            task_insert_data.submit(
-                client=target_client, stream_id=stream_id, data=stream_records, data_provider=data_provider
+            # Insert into target
+            insert_tasks.append(
+                task_insert_data.submit(
+                    client=target_client, stream_id=stream_id, data=stream_records, data_provider=data_provider
+                )
             )
-        )
 
-    # Wait for all insert tasks to complete
-    for insert_task in insert_tasks:
-        insert_task.result()
+        # Wait for all insert tasks to complete
+        for insert_task in insert_tasks:
+            insert_task.result()
 
     # Step 4: Create summary
     logger.info("Creating processing summary...")
