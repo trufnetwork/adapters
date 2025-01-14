@@ -47,6 +47,7 @@ __pycache__/
 
 # IDEs
 .idea
+.cursorrules
 *.code-workspace
 
 # Python specific
