@@ -10,9 +10,9 @@ from examples.gsheets.utils import (
     task_normalize_source,
     task_prepare_records_for_tsn,
 )
+from tsn_adapters.common.trufnetwork.tn import task_get_all_tsn_records, task_insert_tsn_records
 from tsn_adapters.tasks.data_manipulation import task_reconcile_data
 from tsn_adapters.tasks.gsheet import task_read_gsheet
-from tsn_adapters.tasks.trufnetwork import task_get_all_tsn_records, task_insert_tsn_records
 
 
 @flow(log_prints=True)
@@ -47,23 +47,23 @@ def gsheets_flow(destination_tsn_provider: str):
     records = task_read_gsheet(gsheets_id=gsheets_id, second_column_name="Month")
 
     # Standardize the records
-    normalized_records = task_normalize_source(records=records)
+    normalized_records = task_normalize_source(df=records)
 
     # Filter the records by source_id
-    filtered_records = task_filter_by_source_id(normalized_records=normalized_records, source_id=source_id)
+    filtered_records = task_filter_by_source_id(df=normalized_records, source_id=source_id)
     print(f"Found {len(filtered_records)} records for {source_id}")
 
     # Prepare the records for TSN
-    prepared_records = task_prepare_records_for_tsn(filtered_records=filtered_records)
+    prepared_records = task_prepare_records_for_tsn(df=filtered_records)
 
     # Get the existing records from TSN, so we can compare and only insert new or modified records
     existing_records = task_get_all_tsn_records(stream_id=stream_id, client=client)
 
     # Reconcile the records with the existing ones in TSN
-    reconciled_records = task_reconcile_data(existing_records=existing_records, prepared_records=prepared_records)
+    reconciled_records = task_reconcile_data(df_base=existing_records, df_target=prepared_records)
 
     # Insert the records into TSN, if needed
-    task_insert_tsn_records(stream_id=stream_id, reconciled_records=reconciled_records, client=client)
+    task_insert_tsn_records(stream_id=stream_id, records=reconciled_records, client=client)
 
 
 if __name__ == "__main__":
