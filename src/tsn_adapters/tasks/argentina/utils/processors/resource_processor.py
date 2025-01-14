@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from io import StringIO
 import logging
 import os
 from pathlib import Path
@@ -13,9 +12,12 @@ import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import BaseModel, field_validator
 
-from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaProductosDataModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import (
+    SepaProductosAlternativeModel,
+    SepaProductosDataModel,
+    SepaProductosDataModelAlt1,
+)
 from tsn_adapters.tasks.argentina.utils.archives import extract_zip
-from tsn_adapters.utils.filter_failures import filter_failures
 from tsn_adapters.utils.logging import get_logger_safe
 
 
@@ -191,30 +193,20 @@ class SepaDataDirectory(BaseModel):
             self.logger.warning(f"Empty product file found in {self.dir_path}")
             return cast(DataFrame[SepaProductosDataModel], pd.DataFrame())
 
-        text_content = "\n".join(text_lines)
-        content_io = StringIO(text_content)
+        # models might be
+        models: list[type[SepaProductosAlternativeModel]] = [
+            SepaProductosDataModel,
+            SepaProductosDataModelAlt1,
+        ]
 
-        try:
-            df = pd.read_csv(
-                content_io,
-                skip_blank_lines=True,
-                sep="|",
-                usecols=["id_producto", "productos_descripcion", "productos_precio_lista"],
-            )
-        except Exception as e:
-            # if the error is about missing columns, print first 2 lines
-            if "Usecols do not match columns, columns expected but not found" in str(e):
-                lines = []
-                with open(file_path) as file:
-                    for _ in range(2):
-                        lines.append(file.readline().strip())
-                self.logger.error(f"First 2 lines of {file_path}:\n{lines}")
+        for model in models:
+            if model.has_columns(text_lines[0]):
+                original_model = model.from_csv(self.date, text_lines, self.logger)
+                if model != SepaProductosDataModel:
+                    self.logger.info(f"Converting {model} to core model")
+                    return model.to_core_model(original_model)
+                return original_model
 
-            raise e
+        raise ValueError("No valid model found for the given lines")
 
-        df["date"] = self.date
-        original_len = len(df)
-        df = filter_failures(df, SepaProductosDataModel)
-        if len(df) < original_len:
-            self.logger.warning(f"Filtered out {original_len - len(df)} invalid rows from {self.dir_path}")
-        return df
+
