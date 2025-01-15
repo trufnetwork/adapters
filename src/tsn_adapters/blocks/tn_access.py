@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import decimal
-from typing import Optional
+from typing import Optional, overload
 
 import pandas as pd
 import pandera as pa
@@ -37,23 +37,58 @@ class TNAccessBlock(Block):
         """Read all records from TSN"""
         return self.read_records(stream_id, data_provider, date_from="1000-01-01")
 
-    @pa.check_types
+    @overload
     def read_records(
         self,
         stream_id: str,
         data_provider: Optional[str] = None,
         date_from: Optional[ShortIso8601Date] = None,
         date_to: Optional[ShortIso8601Date] = None,
+        is_unix: bool = False,
+    ) -> DataFrame[TnRecordModel]: ...
+
+    @overload
+    def read_records(
+        self,
+        stream_id: str,
+        data_provider: Optional[str] = None,
+        date_from: Optional[int] = None,
+        date_to: Optional[int] = None,
+        is_unix: bool = True,
+    ) -> DataFrame[TnRecordModel]: ...
+
+    @pa.check_types
+    def read_records(
+        self,
+        stream_id: str,
+        data_provider: Optional[str] = None,
+        date_from: Optional[ShortIso8601Date | int] = None,
+        date_to: Optional[ShortIso8601Date | int] = None,
+        is_unix: bool = False,
     ) -> DataFrame[TnRecordModel]:
         logger = get_run_logger()
         try:
             with concurrency("tn-read", occupy=1):
-                recs = self.get_client().get_records(
-                    stream_id,
-                    data_provider,
-                    date_from if date_from else None,
-                    date_to if date_to else None,
-                )
+                if is_unix:
+                    # Cast to int for unix timestamps
+                    unix_from = int(date_from) if date_from is not None else None
+                    unix_to = int(date_to) if date_to is not None else None
+                    recs = self.get_client().get_records_unix(
+                        stream_id,
+                        data_provider,
+                        unix_from,
+                        unix_to,
+                    )
+                else:
+                    # Cast to str for ISO format
+                    iso_from = str(date_from) if date_from is not None else None
+                    iso_to = str(date_to) if date_to is not None else None
+                    recs = self.get_client().get_records(
+                        stream_id,
+                        data_provider,
+                        iso_from,
+                        iso_to,
+                    )
 
             recs_list = [
                 {
@@ -108,6 +143,37 @@ class TNAccessBlock(Block):
 
         return txHash
 
+    def insert_unix_tn_records(
+        self,
+        stream_id: str,
+        records: DataFrame[TnRecordModel],
+        data_provider: Optional[str] = None,
+    ) -> Optional[str]:
+        logging = get_run_logger()
+
+        if len(records) == 0:
+            logging.info(f"No records to insert for stream {stream_id}")
+            return None
+
+        logging.info(f"Inserting {len(records)} records into stream {stream_id}")
+        args = [[record["date"], str(record["value"])] for record in records.to_dict(orient="records")]
+
+        for col in ["date", "value"]:
+            if col not in records.columns:
+                logging.error(f"Missing required column '{col}' in records DataFrame.")
+                raise ValueError(f"Missing required column '{col}' in records DataFrame.")
+
+        with concurrency("tn-write", occupy=1):
+            txHash = self.get_client().execute_procedure(
+                stream_id=stream_id,
+                procedure="insert_record",
+                args=args,
+                wait=False,
+                data_provider=data_provider or "",
+            )
+
+        return txHash
+
     def wait_for_tx(self, tx_hash: str) -> None:
         with concurrency("tn-read", occupy=1):
             self.get_client().wait_for_tx(tx_hash)
@@ -126,8 +192,9 @@ def task_read_records(
     data_provider: Optional[str] = None,
     date_from: Optional[ShortIso8601Date] = None,
     date_to: Optional[ShortIso8601Date] = None,
+    is_unix: bool = False,
 ) -> DataFrame[TnRecordModel]:
-    return block.read_records(stream_id, data_provider, date_from, date_to)
+    return block.read_records(stream_id, data_provider, date_from, date_to, is_unix)
 
 
 @task()
@@ -138,6 +205,16 @@ def task_insert_tn_records(
     data_provider: Optional[str] = None,
 ) -> Optional[str]:
     return block.insert_tn_records(stream_id, records, data_provider)
+
+
+@task()
+def task_insert_unix_tn_records(
+    block: TNAccessBlock,
+    stream_id: str,
+    records: DataFrame[TnRecordModel],
+    data_provider: Optional[str] = None,
+) -> Optional[str]:
+    return block.insert_unix_tn_records(stream_id, records, data_provider)
 
 
 @task(retries=3, retry_delay_seconds=2)
@@ -155,7 +232,7 @@ def task_insert_and_wait_for_tx(
     """Insert records into TSN and wait for transaction confirmation"""
     logging = get_run_logger()
 
-    logging.info(f"waitInserting {len(records)} records into stream {stream_id}")
+    logging.info(f"Inserting {len(records)} records into stream {stream_id}")
     insertion = task_insert_tn_records(block=block, stream_id=stream_id, records=records, data_provider=data_provider)
 
     if insertion is None:
@@ -170,6 +247,31 @@ def task_insert_and_wait_for_tx(
             raise e
     return insertion
 
+
+@task(retries=5, retry_delay_seconds=10)
+def task_insert_unix_and_wait_for_tx(
+    block: TNAccessBlock,
+    stream_id: str,
+    records: DataFrame[TnRecordModel],
+    data_provider: Optional[str] = None,
+):
+    """Insert records into TSN and wait for transaction confirmation"""
+    logging = get_run_logger()
+
+    logging.info(f"Inserting {len(records)} records into stream {stream_id}")
+    insertion = task_insert_unix_tn_records(block=block, stream_id=stream_id, records=records, data_provider=data_provider)
+
+    if insertion is None:
+        return Completed(message="No records to insert")
+
+    try:
+        task_wait_for_tx(block=block, tx_hash=insertion)
+    except Exception as e:
+        if "duplicate key value violates unique constraint" in str(e):
+            logging.warning(f"Continuing after duplicate key value violation: {e}")
+        else:
+            raise e
+    return insertion
 
 if __name__ == "__main__":
     TNAccessBlock.register_type_and_schema()
