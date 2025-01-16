@@ -3,7 +3,7 @@ Base interfaces for target system interactions.
 """
 
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import Generic, Optional, TypeVar
 
 import pandas as pd
 
@@ -28,7 +28,7 @@ class ITargetClient(ABC, Generic[S]):
         pass
 
     @abstractmethod
-    def insert_data(self, stream_id: S, data: pd.DataFrame, data_provider: str) -> None:
+    def insert_data(self, stream_id: S, data: pd.DataFrame, data_provider: Optional[str] = None) -> None:
         """
         Insert data into the target system.
 
