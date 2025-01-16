@@ -1,9 +1,8 @@
 from datetime import datetime, timezone
 import decimal
-from typing import Optional, overload
+from typing import Literal, Optional, Union, cast, overload
 
 import pandas as pd
-import pandera as pa
 from pandera.typing import DataFrame
 from prefect import Task, get_run_logger, task
 from prefect.blocks.core import Block
@@ -44,7 +43,8 @@ class TNAccessBlock(Block):
         data_provider: Optional[str] = None,
         date_from: Optional[ShortIso8601Date] = None,
         date_to: Optional[ShortIso8601Date] = None,
-        is_unix: bool = False,
+        *,  # Force is_unix to be keyword-only
+        is_unix: Literal[False] = False,
     ) -> DataFrame[TnRecordModel]: ...
 
     @overload
@@ -54,16 +54,17 @@ class TNAccessBlock(Block):
         data_provider: Optional[str] = None,
         date_from: Optional[int] = None,
         date_to: Optional[int] = None,
-        is_unix: bool = True,
+        *,  # Force is_unix to be keyword-only
+        is_unix: Literal[True],
     ) -> DataFrame[TnRecordModel]: ...
 
-    @pa.check_types
     def read_records(
         self,
         stream_id: str,
         data_provider: Optional[str] = None,
-        date_from: Optional[ShortIso8601Date | int] = None,
-        date_to: Optional[ShortIso8601Date | int] = None,
+        date_from: Union[ShortIso8601Date, int, None] = None,
+        date_to: Union[ShortIso8601Date, int, None] = None,
+        *,  # Force is_unix to be keyword-only
         is_unix: bool = False,
     ) -> DataFrame[TnRecordModel]:
         logger = get_run_logger()
@@ -71,8 +72,8 @@ class TNAccessBlock(Block):
             with concurrency("tn-read", occupy=1):
                 if is_unix:
                     # Cast to int for unix timestamps
-                    unix_from = int(date_from) if date_from is not None else None
-                    unix_to = int(date_to) if date_to is not None else None
+                    unix_from = int(cast(int, date_from)) if date_from is not None else None
+                    unix_to = int(cast(int, date_to)) if date_to is not None else None
                     recs = self.get_client().get_records_unix(
                         stream_id,
                         data_provider,
@@ -81,8 +82,8 @@ class TNAccessBlock(Block):
                     )
                 else:
                     # Cast to str for ISO format
-                    iso_from = str(date_from) if date_from is not None else None
-                    iso_to = str(date_to) if date_to is not None else None
+                    iso_from = str(cast(ShortIso8601Date, date_from)) if date_from is not None else None
+                    iso_to = str(cast(ShortIso8601Date, date_to)) if date_to is not None else None
                     recs = self.get_client().get_records(
                         stream_id,
                         data_provider,
@@ -184,17 +185,67 @@ class TNAccessBlock(Block):
 def task_read_all_records(block: TNAccessBlock, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
     return block.read_all_records(stream_id, data_provider)
 
-
-@task()
+@overload
 def task_read_records(
     block: TNAccessBlock,
     stream_id: str,
     data_provider: Optional[str] = None,
     date_from: Optional[ShortIso8601Date] = None,
     date_to: Optional[ShortIso8601Date] = None,
+    *,  # Force is_unix to be keyword-only
+    is_unix: Literal[False] = False,
+) -> DataFrame[TnRecordModel]: ...
+
+@overload
+def task_read_records(
+    block: TNAccessBlock,
+    stream_id: str,
+    data_provider: Optional[str] = None,
+    date_from: Optional[int] = None,
+    date_to: Optional[int] = None,
+    *,  # Force is_unix to be keyword-only
+    is_unix: Literal[True],
+) -> DataFrame[TnRecordModel]: ...
+
+@task()
+def task_read_records(
+    block: TNAccessBlock,
+    stream_id: str,
+    data_provider: Optional[str] = None,
+    date_from: Union[ShortIso8601Date, int, None] = None,
+    date_to: Union[ShortIso8601Date, int, None] = None,
+    *,  # Force is_unix to be keyword-only
     is_unix: bool = False,
 ) -> DataFrame[TnRecordModel]:
-    return block.read_records(stream_id, data_provider, date_from, date_to, is_unix)
+    """Read records from TSN with support for both ISO dates and Unix timestamps.
+    
+    Args:
+        block: The TNAccessBlock instance
+        stream_id: The stream ID to read from
+        data_provider: Optional data provider
+        date_from: Start date (ISO string or Unix timestamp)
+        date_to: End date (ISO string or Unix timestamp)
+        is_unix: If True, treat dates as Unix timestamps
+    
+    Returns:
+        DataFrame containing the records
+    """
+    if is_unix:
+        return cast(DataFrame[TnRecordModel], block.read_records(
+            stream_id=stream_id,
+            data_provider=data_provider,
+            date_from=cast(Optional[int], date_from),
+            date_to=cast(Optional[int], date_to),
+            is_unix=True,
+        ))
+    else:
+        return cast(DataFrame[TnRecordModel], block.read_records(
+            stream_id=stream_id,
+            data_provider=data_provider,
+            date_from=cast(Optional[ShortIso8601Date], date_from),
+            date_to=cast(Optional[ShortIso8601Date], date_to),
+            is_unix=False,
+        ))
 
 
 @task()
