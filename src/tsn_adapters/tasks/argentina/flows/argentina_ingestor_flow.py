@@ -2,7 +2,7 @@
 Argentina SEPA data ingestion flow using task-based architecture.
 """
 
-from typing import cast
+from typing import Optional, cast
 
 import pandas as pd
 from prefect import flow, get_run_logger, transactions
@@ -33,7 +33,7 @@ def argentina_ingestor_flow(
     source_descriptor_block_name: str,
     trufnetwork_access_block_name: str,
     product_category_map_url: str,
-    data_provider: str,
+    data_provider: Optional[str] = None,
 ):
     """
     Ingest Argentina SEPA data using task-based architecture.
@@ -206,6 +206,4 @@ if __name__ == "__main__":
         source_descriptor_block_name="argentina-sepa-source-descriptor",
         trufnetwork_access_block_name="default",
         product_category_map_url="https://drive.usercontent.google.com/u/2/uc?id=1nfcAjCF-BYU5-rrWJW9eFqCw2AjNpc1x&export=download",
-        # 000...001
-        data_provider="7e5f4552091a69125d5dfcb7b8c2659029395bdf",
     )

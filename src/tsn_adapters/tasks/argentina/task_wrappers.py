@@ -3,6 +3,7 @@ Task wrappers for Argentina data pipeline.
 """
 
 from datetime import datetime, timedelta
+from typing import Optional
 
 import pandas as pd
 from prefect import get_run_logger, task
@@ -157,7 +158,9 @@ def task_get_latest_records(client: ITargetClient, stream_id: StreamId, data_pro
 
 
 @task
-def task_insert_data(client: ITargetClient, stream_id: StreamId, data: pd.DataFrame, data_provider: str) -> None:
+def task_insert_data(
+    client: ITargetClient, stream_id: StreamId, data: pd.DataFrame, data_provider: Optional[str] = None
+) -> None:
     """
     Insert data into the target system.
 
