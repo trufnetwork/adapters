@@ -85,23 +85,15 @@ def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
 
             # Get the existing records from TSN, so we can compare and only insert new or modified records
             existing_records = task_get_all_tsn_records.submit(
-                stream_id=row["stream_id"], 
-                client=client,
-                data_provider=None,
-                wait_for=[deployment_job]
+                stream_id=row["stream_id"], client=client, data_provider=None, wait_for=[deployment_job]
             )
 
             # Reconcile the records with the existing ones in TSN
-            reconciled_records = task_reconcile_data.submit(
-                df_base=existing_records, 
-                df_target=prepared_records
-            )
+            reconciled_records = task_reconcile_data.submit(df_base=existing_records, df_target=prepared_records)
 
             # Insert the records into TSN, concurrently, if needed
             insert_job = task_insert_tsn_records.submit(
-                stream_id=row["stream_id"],
-                records=cast_future.cast_future(reconciled_records),
-                client=client
+                stream_id=row["stream_id"], records=cast_future.cast_future(reconciled_records), client=client
             )
             insert_jobs.append(insert_job)
 
