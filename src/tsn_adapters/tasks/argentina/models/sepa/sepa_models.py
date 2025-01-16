@@ -138,7 +138,9 @@ class SepaProductosDataModelAlt1(SepaProductosAlternativeModel):
         )
         return filter_failures(new_df, SepaProductosDataModel)
 
+
 # Other Models
+
 
 class ProductDescriptionModel(pa.DataFrameModel):
     """

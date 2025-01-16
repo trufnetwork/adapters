@@ -7,7 +7,7 @@ import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
 
 
-@task(tags=["tsn", "tsn-write"])
+@task(tags=["tn", "tn-write"])
 def task_insert_tsn_records(
     stream_id: str,
     records: pd.DataFrame,
@@ -53,7 +53,7 @@ This task fetches all the records from the TSN for a given stream_id and data_pr
 """  # noqa: E501
 
 
-@task(tags=["tsn", "tsn-read"])
+@task(tags=["tn", "tn-read"])
 def task_get_all_tsn_records(
     stream_id: str, client: tn_client.TNClient, data_provider: Optional[str] = None
 ) -> pd.DataFrame:
@@ -77,7 +77,7 @@ def get_all_tsn_records(
     return df
 
 
-@task(tags=["tsn", "tsn-write"])
+@task(tags=["tn", "tn-write"])
 def task_deploy_primitive(stream_id: str, client: tn_client.TNClient):
     return deploy_primitive(stream_id, client)
 

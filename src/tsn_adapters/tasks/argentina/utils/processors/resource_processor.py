@@ -208,5 +208,3 @@ class SepaDataDirectory(BaseModel):
                 return original_model
 
         raise ValueError("No valid model found for the given lines")
-
-
