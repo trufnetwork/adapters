@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import decimal
 from typing import Optional, overload
 
@@ -259,7 +259,9 @@ def task_insert_unix_and_wait_for_tx(
     logging = get_run_logger()
 
     logging.info(f"Inserting {len(records)} records into stream {stream_id}")
-    insertion = task_insert_unix_tn_records(block=block, stream_id=stream_id, records=records, data_provider=data_provider)
+    insertion = task_insert_unix_tn_records(
+        block=block, stream_id=stream_id, records=records, data_provider=data_provider
+    )
 
     if insertion is None:
         return Completed(message="No records to insert")
@@ -272,6 +274,7 @@ def task_insert_unix_and_wait_for_tx(
         else:
             raise e
     return insertion
+
 
 if __name__ == "__main__":
     TNAccessBlock.register_type_and_schema()
