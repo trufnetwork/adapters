@@ -11,7 +11,7 @@ from prefect.states import Completed
 from pydantic import ConfigDict, SecretStr
 import trufnetwork_sdk_py.client as tn_client
 
-from tsn_adapters.common.trufnetwork.models.tn_models import TnRecordModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
 
 
@@ -116,6 +116,7 @@ class TNAccessBlock(Block):
         stream_id: str,
         records: DataFrame[TnRecordModel],
         data_provider: Optional[str] = None,
+        lock_write: bool = True,
     ) -> Optional[str]:
         logging = get_run_logger()
 
@@ -125,7 +126,6 @@ class TNAccessBlock(Block):
 
         current_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        logging.info(f"Inserting {len(records)} records into stream {stream_id}")
         args = [[record["date"], str(record["value"]), current_date] for record in records.to_dict(orient="records")]
 
         for col in ["date", "value"]:
@@ -133,7 +133,8 @@ class TNAccessBlock(Block):
                 logging.error(f"Missing required column '{col}' in records DataFrame.")
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
-        with concurrency("tn-write", occupy=1):
+        def write_data():
+            logging.info(f"Inserting {len(records)} records into stream {stream_id}")
             txHash = self.get_client().execute_procedure(
                 stream_id=stream_id,
                 procedure="insert_record",
@@ -141,14 +142,39 @@ class TNAccessBlock(Block):
                 wait=False,
                 data_provider=data_provider or "",
             )
+            logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
+            return txHash
+
+        if lock_write:
+            with concurrency("tn-write", occupy=1):
+                txHash = write_data()
+        else:
+            txHash = write_data()
 
         return txHash
+
+    def batch_insert_tn_records(
+        self,
+        records: DataFrame[TnDataRowModel],
+        data_provider: Optional[str] = None,
+    ) -> Optional[list[str]]:
+        stream_ids = records["stream_id"].unique()
+        tx_hashes = []
+        with concurrency("tn-write", occupy=1):
+            for stream_id in stream_ids:
+                tx_hashes.append(
+                    self.insert_tn_records(
+                        stream_id, records[records["stream_id"] == stream_id], data_provider, lock_write=False
+                    )
+                )
+        return tx_hashes
 
     def insert_unix_tn_records(
         self,
         stream_id: str,
         records: DataFrame[TnRecordModel],
         data_provider: Optional[str] = None,
+        lock_write: bool = True,
     ) -> Optional[str]:
         logging = get_run_logger()
 
@@ -164,7 +190,7 @@ class TNAccessBlock(Block):
                 logging.error(f"Missing required column '{col}' in records DataFrame.")
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
-        with concurrency("tn-write", occupy=1):
+        def write_data():
             txHash = self.get_client().execute_procedure(
                 stream_id=stream_id,
                 procedure="insert_record",
@@ -172,8 +198,41 @@ class TNAccessBlock(Block):
                 wait=False,
                 data_provider=data_provider or "",
             )
+            logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
+            return txHash
+
+        if lock_write:
+            with concurrency("tn-write", occupy=1):
+                txHash = write_data()
+        else:
+            txHash = write_data()
 
         return txHash
+
+    def batch_insert_unix_tn_records(
+        self,
+        records: DataFrame[TnDataRowModel],
+        data_provider: Optional[str] = None,
+    ) -> Optional[list[str]]:
+        """Batch insert records with unix timestamps into multiple streams.
+        
+        Args:
+            records: DataFrame containing records with stream_id column
+            data_provider: Optional data provider name
+            
+        Returns:
+            List of transaction hashes for each stream insert
+        """
+        stream_ids = records["stream_id"].unique()
+        tx_hashes = []
+        with concurrency("tn-write", occupy=1):
+            for stream_id in stream_ids:
+                tx_hashes.append(
+                    self.insert_unix_tn_records(
+                        stream_id, records[records["stream_id"] == stream_id], data_provider, lock_write=False
+                    )
+                )
+        return tx_hashes
 
     def wait_for_tx(self, tx_hash: str) -> None:
         with concurrency("tn-read", occupy=1):
@@ -334,6 +393,118 @@ def task_insert_unix_and_wait_for_tx(
         else:
             raise e
     return insertion
+
+
+@task()
+def task_batch_insert_tn_records(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    data_provider: Optional[str] = None,
+) -> Optional[list[str]]:
+    """Batch insert records into multiple streams.
+    
+    Args:
+        block: The TNAccessBlock instance
+        records: DataFrame containing records with stream_id column
+        data_provider: Optional data provider name
+        
+    Returns:
+        List of transaction hashes for each stream insert
+    """
+    return block.batch_insert_tn_records(records, data_provider)
+
+
+@task()
+def task_batch_insert_unix_tn_records(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    data_provider: Optional[str] = None,
+) -> Optional[list[str]]:
+    """Batch insert records with unix timestamps into multiple streams.
+    
+    Args:
+        block: The TNAccessBlock instance
+        records: DataFrame containing records with stream_id column
+        data_provider: Optional data provider name
+        
+    Returns:
+        List of transaction hashes for each stream insert
+    """
+    return block.batch_insert_unix_tn_records(records, data_provider)
+
+
+@task(retries=5, retry_delay_seconds=10)
+def task_batch_insert_and_wait_for_tx(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    data_provider: Optional[str] = None,
+):
+    """Batch insert records into multiple streams and wait for all transactions.
+    
+    Args:
+        block: The TNAccessBlock instance
+        records: DataFrame containing records with stream_id column
+        data_provider: Optional data provider name
+        
+    Returns:
+        List of transaction hashes for completed inserts
+    """
+    logging = get_run_logger()
+    
+    logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
+    insertions = task_batch_insert_tn_records(block=block, records=records, data_provider=data_provider)
+    
+    if not insertions:
+        return Completed(message="No records to insert")
+    
+    for tx_hash in insertions:
+        if tx_hash:  # Skip None values
+            try:
+                task_wait_for_tx(block=block, tx_hash=tx_hash)
+            except Exception as e:
+                if "duplicate key value violates unique constraint" in str(e):
+                    logging.warning(f"Continuing after duplicate key value violation: {e}")
+                else:
+                    raise e
+    
+    return insertions
+
+
+@task(retries=5, retry_delay_seconds=10)
+def task_batch_insert_unix_and_wait_for_tx(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    data_provider: Optional[str] = None,
+):
+    """Batch insert unix timestamp records into multiple streams and wait for all transactions.
+    
+    Args:
+        block: The TNAccessBlock instance
+        records: DataFrame containing records with stream_id column
+        data_provider: Optional data provider name
+        
+    Returns:
+        List of transaction hashes for completed inserts
+    """
+    logging = get_run_logger()
+    
+    logging.info(f"Batch inserting {len(records)} unix records across {len(records['stream_id'].unique())} streams")
+    insertions = task_batch_insert_unix_tn_records(block=block, records=records, data_provider=data_provider)
+    
+    if not insertions:
+        return Completed(message="No records to insert")
+    
+    for tx_hash in insertions:
+        if tx_hash:  # Skip None values
+            try:
+                task_wait_for_tx(block=block, tx_hash=tx_hash)
+            except Exception as e:
+                if "duplicate key value violates unique constraint" in str(e):
+                    logging.warning(f"Continuing after duplicate key value violation: {e}")
+                else:
+                    raise e
+    
+    return insertions
 
 
 if __name__ == "__main__":
