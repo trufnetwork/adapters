@@ -10,6 +10,7 @@ from prefect.concurrency.sync import concurrency
 from prefect.states import Completed
 from pydantic import ConfigDict, SecretStr
 import trufnetwork_sdk_py.client as tn_client
+from trufnetwork_sdk_py.client import BatchInsertResults
 
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
@@ -149,7 +150,6 @@ class TNAccessBlock(Block):
         stream_id: str,
         records: DataFrame[TnRecordModel],
         data_provider: Optional[str] = None,
-        lock_write: bool = True,
     ) -> Optional[str]:
         logging = get_run_logger()
 
@@ -165,7 +165,7 @@ class TNAccessBlock(Block):
                 logging.error(f"Missing required column '{col}' in records DataFrame.")
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
-        def write_data():
+        with concurrency("tn-write", occupy=1):
             txHash = self.get_client().execute_procedure(
                 stream_id=stream_id,
                 procedure="insert_record",
@@ -174,13 +174,6 @@ class TNAccessBlock(Block):
                 data_provider=data_provider or "",
             )
             logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
-            return txHash
-
-        if lock_write:
-            with concurrency("tn-write", occupy=1):
-                txHash = write_data()
-        else:
-            txHash = write_data()
 
         return txHash
 
@@ -188,7 +181,7 @@ class TNAccessBlock(Block):
         self,
         records: DataFrame[TnDataRowModel],
         data_provider: Optional[str] = None,
-    ) -> Optional[list[str]]:
+    ) -> Optional[BatchInsertResults]:
         """Batch insert records with unix timestamps into multiple streams.
 
         Args:
@@ -214,11 +207,11 @@ class TNAccessBlock(Block):
             batches.append(batch)
 
         with concurrency("tn-write", occupy=1):
-            tx_hashes = self.get_client().batch_insert_records_unix(
+            results = self.get_client().batch_insert_records_unix(
                 batches=batches,
                 wait=False,
             )
-        return tx_hashes
+        return results
 
     def wait_for_tx(self, tx_hash: str) -> None:
         with concurrency("tn-read", occupy=1):
@@ -386,7 +379,7 @@ def task_batch_insert_unix_tn_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     data_provider: Optional[str] = None,
-) -> Optional[list[str]]:
+) -> Optional[BatchInsertResults]:
     """Batch insert records with unix timestamps into multiple streams.
 
     Args:
