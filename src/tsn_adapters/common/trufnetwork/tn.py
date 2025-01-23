@@ -12,7 +12,7 @@ def task_insert_tsn_records(
     stream_id: str,
     records: pd.DataFrame,
     client: tn_client.TNClient,
-    wait: bool = True,
+    wait: bool = False,
     data_provider: Optional[str] = None,
 ):
     return insert_tsn_records(stream_id, records, client, wait, data_provider)
