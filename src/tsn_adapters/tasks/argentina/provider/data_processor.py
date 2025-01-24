@@ -8,6 +8,8 @@ from typing import cast
 
 import pandas as pd
 
+from prefect.concurrency.sync import concurrency
+
 from tsn_adapters.tasks.argentina.models.sepa import SepaDataItem
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF
 from tsn_adapters.tasks.argentina.utils.processors import SepaDirectoryProcessor
@@ -46,7 +48,9 @@ def process_sepa_data(
     # Create a temporary directory for extraction
     with tempfile.TemporaryDirectory() as temp_dir:
         # Download the zip file
-        zip_content = data_item.fetch_into_memory()
+        # ~ 200 MB
+        with concurrency('network-usage', 200):
+            zip_content = data_item.fetch_into_memory()
 
         # Create a temporary file for the zip
         with tempfile.NamedTemporaryFile(suffix=".zip", dir=temp_dir, delete=False) as temp_zip:

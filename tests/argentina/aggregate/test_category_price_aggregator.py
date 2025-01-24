@@ -13,10 +13,8 @@ import pytest
 from tsn_adapters.tasks.argentina.aggregate.category_price_aggregator import (
     aggregate_prices_by_category,
 )
-from tsn_adapters.tasks.argentina.models import (
-    SepaAvgPriceProductModel,
-    SepaProductCategoryMapModel,
-)
+from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 
 
 @pytest.fixture

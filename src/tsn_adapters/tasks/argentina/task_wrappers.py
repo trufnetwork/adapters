@@ -3,11 +3,12 @@ Task wrappers for Argentina data pipeline.
 """
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, cast
 
 import pandas as pd
 from prefect import get_run_logger, task
 import prefect.cache_policies as policies
+from prefect.concurrency.sync import concurrency
 from prefect_aws import S3Bucket
 
 from tsn_adapters.common.interfaces.provider import IProviderGetter
@@ -18,7 +19,7 @@ from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategory
 from tsn_adapters.tasks.argentina.provider.factory import create_sepa_provider
 from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
 from tsn_adapters.tasks.argentina.stream_details import create_stream_details_fetcher
-from tsn_adapters.tasks.argentina.transformers.sepa import create_sepa_transformer
+from tsn_adapters.tasks.argentina.transformers.sepa import SepaDataTransformer, create_sepa_transformer
 from tsn_adapters.tasks.argentina.types import (
     DateStr,
     SepaDF,
@@ -100,11 +101,6 @@ def task_create_sepa_provider(
 @task(
     name="get_data_for_date",
     task_run_name="get data for {date}",
-    # long cache:
-    # - we only try to get data for a date when it is available, so we're effectively skipping download
-    # - we don't care about the provider: data should be the same across providers
-    cache_expiration=timedelta(days=7),
-    cache_key_fn=lambda ctx, args: f"get_data_for_date_{args['date']}",
     retries=3,
 )
 def task_get_data_for_date(provider: IProviderGetter, date: DateStr) -> SepaDF:
@@ -254,6 +250,23 @@ def task_transform_data(transformer: IDataTransformer, data: SepaDF) -> pd.DataF
     except Exception as e:
         logger.error(f"Failed to transform data: {e}")
         raise
+
+
+@task(
+    cache_policy=policies.INPUTS + policies.TASK_SOURCE,
+    cache_expiration=timedelta(days=7),
+    cache_key_fn=lambda ctx, args: f"get_and_transform_data_{args['date']}",
+)
+def task_get_and_transform_data(
+    provider: IProviderGetter, transformer: IDataTransformer, date: DateStr
+) -> tuple[pd.DataFrame, SepaDF]:
+    """Get data for a date and transform it."""
+    # guess we're using 1GB of memory
+    with concurrency('memory-usage', 1000):
+        data = task_get_data_for_date(provider=provider, date=date)
+        sepa_transformer = cast(SepaDataTransformer, transformer)
+        uncategorized = sepa_transformer.get_uncategorized(data)
+        return task_transform_data(transformer=transformer, data=data), uncategorized
 
 
 @task(retries=3, cache_expiration=timedelta(hours=1), cache_policy=policies.INPUTS + policies.TASK_SOURCE)
