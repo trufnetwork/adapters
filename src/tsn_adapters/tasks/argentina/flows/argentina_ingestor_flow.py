@@ -7,6 +7,7 @@ from typing import Optional, cast
 import pandas as pd
 from prefect import flow, get_run_logger, transactions
 from prefect.artifacts import create_markdown_artifact
+from prefect.futures import PrefectFuture
 
 from tsn_adapters.tasks.argentina.target import create_trufnetwork_components
 from tsn_adapters.tasks.argentina.task_wrappers import (
@@ -16,15 +17,12 @@ from tsn_adapters.tasks.argentina.task_wrappers import (
     task_create_transformer,
     task_dates_already_processed,
     task_determine_needed_keys,
-    task_get_data_for_date,
+    task_get_and_transform_data,
     task_get_streams,
     task_insert_data,
     task_load_category_map,
-    task_transform_data,
 )
-from tsn_adapters.tasks.argentina.transformers import SepaDataTransformer
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF, SourceId, StreamId, StreamIdMap
-from tsn_adapters.utils.cast_future import cast_future
 
 
 @flow(name="Argentina SEPA Ingestor")
@@ -115,31 +113,22 @@ def argentina_ingestor_flow(
 
         logger.info("Dates have not been processed in the last day, processing...")
 
-        tn_records_tasks = []
-        records_to_insert = pd.DataFrame()
+        get_data_tasks: list[PrefectFuture[tuple[pd.DataFrame, SepaDF]]] = []
         # Process each date in parallel
         for date in sorted_needed_dates:
-            # Fetch data
-            data = task_get_data_for_date.submit(provider, date)
-
-            # check if data is empty
-            if data.result().empty:
-                logger.warning(f"No data found for date {date}")
-                continue
-
-            # Get uncategorized products and store them
-            sepa_transformer = cast(SepaDataTransformer, transformer)
-            uncategorized = sepa_transformer.get_uncategorized(data.result())
-            if not uncategorized.empty:
-                uncategorized_products[date] = uncategorized
-            # Transform data
-            tn_records = task_transform_data.submit(transformer, cast_future(data))
-            tn_records_tasks.append(tn_records)
+            get_data_tasks.append(task_get_and_transform_data.submit(provider, transformer, date))
             dates_processed.append(date)
 
         # Wait for all tasks to complete
-        for tn_records in tn_records_tasks:
-            records_to_insert = pd.concat([records_to_insert, tn_records.result()])
+        records_to_insert = pd.DataFrame()
+        for index, get_data_task in enumerate(get_data_tasks):
+            new_records, uncategorized = get_data_task.result()
+            # tasks are in the same order as the dates in sorted_needed_dates
+            date = sorted_needed_dates[index]
+            if not new_records.empty:
+                records_to_insert = pd.concat([records_to_insert, new_records])
+            if not uncategorized.empty:
+                uncategorized_products[date] = uncategorized
 
         # Now process each stream in parallel
         insert_tasks = []
