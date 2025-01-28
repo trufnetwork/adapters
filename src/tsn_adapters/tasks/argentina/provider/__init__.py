@@ -14,3 +14,10 @@ For detailed documentation and usage examples:
     - See s3.py and website.py for specific provider implementations
     - See docstrings in the source files for detailed API documentation
 """
+
+from .s3 import RawDataProvider, ProcessedDataProvider
+
+__all__ = [
+    "RawDataProvider",
+    "ProcessedDataProvider",
+]

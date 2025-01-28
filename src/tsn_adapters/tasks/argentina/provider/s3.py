@@ -6,12 +6,47 @@ import re
 from typing import Optional
 
 from prefect_aws import S3Bucket
+import pandas as pd
 
 from tsn_adapters.tasks.argentina.models.sepa import SepaS3RawDataItem
-from tsn_adapters.tasks.argentina.provider.base import SepaS3BaseProvider
+from tsn_adapters.tasks.argentina.models.sepa.s3_item import SepaS3BaseProvider
 from tsn_adapters.tasks.argentina.provider.data_processor import process_sepa_data
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF
 from tsn_adapters.utils import deroutine
+
+
+class RawDataProvider(SepaS3BaseProvider):
+    """Handles raw data from source_data/ prefix"""
+    def __init__(self):
+        super().__init__(prefix="source_data/")
+
+
+class ProcessedDataProvider(SepaS3BaseProvider):
+    """Handles processed data from processed/ prefix"""
+    def __init__(self):
+        super().__init__(prefix="processed/")
+    
+    def get_processed_data(self, date_str: str) -> pd.DataFrame:
+        """Get processed data for specific date"""
+        key = f"{date_str}/data.csv"
+        return self.read_csv(key)
+    
+    def save_processed_data(
+        self,
+        date_str: str,
+        data: pd.DataFrame,
+        uncategorized: pd.DataFrame,
+        logs: bytes
+    ) -> None:
+        """Save all processed outputs for a date"""
+        # Save main data
+        self.write_csv(f"{date_str}/data.csv", data)
+        
+        # Save uncategorized products
+        self.write_csv(f"{date_str}/uncategorized.csv", uncategorized)
+        
+        # Save compressed logs
+        self.write_bytes(f"{date_str}/logs.zip", logs)
 
 
 class SepaS3Provider(SepaS3BaseProvider[SepaDF]):
