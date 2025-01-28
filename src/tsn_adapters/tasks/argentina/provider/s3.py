@@ -1,103 +1,75 @@
 """
-S3-based SEPA data provider implementation.
+S3-based data providers for Argentina SEPA data.
 """
 
-from collections.abc import Coroutine
 import re
-from typing import cast
+from typing import Optional
 
-from prefect import task
 from prefect_aws import S3Bucket
 
-from tsn_adapters.common.interfaces.provider import IProviderGetter
-from tsn_adapters.tasks.argentina.models.sepa import SepaS3DataItem
+from tsn_adapters.tasks.argentina.models.sepa import SepaS3RawDataItem
+from tsn_adapters.tasks.argentina.provider.base import SepaS3BaseProvider
 from tsn_adapters.tasks.argentina.provider.data_processor import process_sepa_data
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF
-from tsn_adapters.utils.logging import get_logger_safe
+from tsn_adapters.utils import deroutine
 
 
-class SepaS3Provider(IProviderGetter[DateStr, SepaDF]):
-    """S3-based provider for SEPA data."""
+class SepaS3Provider(SepaS3BaseProvider[SepaDF]):
+    """Provider for accessing SEPA data from S3."""
 
-    def __init__(self, s3_block: S3Bucket, prefix: str = "source_data/"):
-        """
-        Initialize with an S3 block.
-
+    def __init__(self, prefix: str = "source_data/", s3_block: Optional[S3Bucket] = None):
+        """Initialize the S3 provider.
+        
         Args:
-            s3_block: The S3 block to use
-            prefix: The prefix for S3 keys
+            prefix: S3 prefix to use (default: 'source_data/')
+            s3_block: Optional preconfigured S3 block
         """
-        self.s3_block = s3_block
-        self.prefix = prefix
-        self._historical_items = {}  # date -> item
+        super().__init__(prefix=prefix, s3_block=s3_block)
+        self._date_pattern = re.compile(r"sepa_(\d{4}-\d{2}-\d{2})\.zip$")
+        self._historical_items: dict[DateStr, SepaS3RawDataItem] = {}
 
     def list_available_keys(self) -> list[DateStr]:
-        """
-        Return a list of available dates from S3.
-
+        """List available dates in the S3 prefix.
+        
         Returns:
-            list[DateStr]: List of available dates in YYYY-MM-DD format
+            List of available dates in YYYY-MM-DD format
         """
-        # List objects in the bucket with the given prefix
-        objects = self.s3_block.list_objects(folder=self.prefix)
-        if isinstance(objects, Coroutine):
-            raise ValueError("S3 objects coroutines are not supported")
-
-        file_regex = re.compile(r"sepa_(\d{4}-\d{2}-\d{2})\.zip")
-
-        # Build items dictionary
-        items = []
-        for obj in objects:
-            try:
-                # Extract date from key (assuming format like source_data/YYYY-MM-DD/...)
-                key = obj["Key"]
-                date_match = file_regex.search(key)
-                if not date_match:
-                    continue
-
-                date = date_match.group(1)
-                item = SepaS3DataItem.create(block=self.s3_block, key=key, item_reported_date=date)
-                items.append(item)
-                self._historical_items[cast(DateStr, date)] = item
-            except Exception as e:
-                logger = get_logger_safe(__name__)
-                logger.warning(f"Failed to process S3 object {obj['Key']}: {e}")
-                continue
-
-        sorted_keys = sorted(self._historical_items.keys())
-        return sorted_keys
+        keys = deroutine(self.s3_block.list_objects(folder=self.prefix))
+        dates = []
+        
+        for key in keys:
+            match = self._date_pattern.search(str(key))
+            if match:
+                date = DateStr(match.group(1))
+                # Create and store the data item for later use
+                self._historical_items[date] = SepaS3RawDataItem.create(
+                    block=self.s3_block,
+                    key=str(key),
+                    item_reported_date=date
+                )
+                dates.append(date)
+                
+        return sorted(dates)
 
     def get_data_for(self, key: DateStr) -> SepaDF:
-        """
-        Get SEPA data for a specific date.
-
+        """Get SEPA data for a specific date.
+        
         Args:
-            key: The date to fetch data for (YYYY-MM-DD)
-
+            key: Date in YYYY-MM-DD format
+            
         Returns:
-            DataFrame: The SEPA data for the given date
-
+            DataFrame containing the SEPA data
+            
         Raises:
-            KeyError: If the date is not available
-            ValueError: If the data is invalid
+            ValueError: If key format is invalid
+            FileNotFoundError: If ZIP file doesn't exist
+            KeyError: If data for date hasn't been listed yet
         """
+        if not re.match(r"\d{4}-\d{2}-\d{2}", key):
+            raise ValueError(f"Invalid date format: {key}")
+
         if key not in self._historical_items:
             raise KeyError(f"No data available for date: {key}")
-
+            
         data_item = self._historical_items[key]
         return process_sepa_data(data_item=data_item, source_name="s3")
-
-
-@task(name="Create SEPA S3 Provider")
-def create_sepa_s3_provider(s3_block: S3Bucket, prefix: str = "source_data/") -> SepaS3Provider:
-    """
-    Create a SEPA S3 provider instance.
-
-    Args:
-        s3_block: The S3 block to use
-        prefix: The prefix for S3 keys
-
-    Returns:
-        SepaS3Provider: The provider instance
-    """
-    return SepaS3Provider(s3_block=s3_block, prefix=prefix)

@@ -11,7 +11,7 @@ from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaDataItem
 from tsn_adapters.tasks.argentina.models.sepa.website_item import SepaWebsiteDataItem
 
 
-class SepaS3DataItem(SepaDataItem, BaseModel):
+class SepaS3RawDataItem(SepaDataItem, BaseModel):
     """Represents a SEPA data item stored in S3."""
 
     key: str
@@ -27,7 +27,7 @@ class SepaS3DataItem(SepaDataItem, BaseModel):
         return SepaWebsiteDataItem.validate_date(v)
 
     @classmethod
-    def create(cls, block: S3Bucket, key: str, item_reported_date: str) -> "SepaS3DataItem":
+    def create(cls, block: S3Bucket, key: str, item_reported_date: str) -> "SepaS3RawDataItem":
         """Factory method to create a SepaS3DataItem instance."""
         return cls(
             block=block,
