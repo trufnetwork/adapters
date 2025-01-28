@@ -215,7 +215,13 @@ class SepaDataItem(ABC):
     This represet a fetchable unit of data. E.g. a file in S3, a file in the website, etc.
     """
 
-    item_reported_date: str
+    @property
+    @abstractmethod
+    def item_reported_date(self) -> str:
+        """
+        The date of the item.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def fetch_into_memory(self) -> bytes:
