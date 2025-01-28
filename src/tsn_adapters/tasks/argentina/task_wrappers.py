@@ -3,24 +3,26 @@ Task wrappers for Argentina data pipeline.
 """
 
 from datetime import datetime, timedelta
-from typing import Optional, cast
+from typing import Optional
 
 import pandas as pd
+from pandera.typing import DataFrame
 from prefect import get_run_logger, task
 import prefect.cache_policies as policies
 from prefect.concurrency.sync import concurrency
-from prefect_aws import S3Bucket
 
 from tsn_adapters.common.interfaces.provider import IProviderGetter
 from tsn_adapters.common.interfaces.reconciliation import IReconciliationStrategy
 from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.interfaces.transformer import IDataTransformer
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
 from tsn_adapters.tasks.argentina.provider.factory import create_sepa_provider
 from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
 from tsn_adapters.tasks.argentina.stream_details import create_stream_details_fetcher
-from tsn_adapters.tasks.argentina.transformers.sepa import SepaDataTransformer, create_sepa_transformer
+from tsn_adapters.tasks.argentina.transformers.sepa import create_sepa_transformer
 from tsn_adapters.tasks.argentina.types import (
+    AggregatedPricesDF,
     DateStr,
     SepaDF,
     StreamId,
@@ -59,13 +61,7 @@ def task_get_streams(fetcher) -> StreamSourceMapDF:
 
 # Provider Tasks
 @task(retries=3)
-def task_create_sepa_provider(
-    provider_type: str = "website",
-    s3_block_name: str | None = None,
-    s3_prefix: str = "source_data/",
-    delay_seconds: float = 0.1,
-    show_progress_bar: bool = False,
-) -> IProviderGetter[DateStr, SepaDF]:
+def task_create_sepa_provider() -> IProviderGetter[DateStr, DataFrame[AggregatedPricesDF]]:
     """
     Create a SEPA provider instance.
 
@@ -80,22 +76,8 @@ def task_create_sepa_provider(
         IProviderGetter: The provider instance
     """
     logger = get_run_logger()
-    logger.info(f"Creating SEPA provider of type: {provider_type}")
-
-    try:
-        if provider_type == "s3" and s3_block_name:
-            s3_block = S3Bucket.load(s3_block_name)
-            provider = create_sepa_provider(
-                provider_type=provider_type, s3_block=s3_block, s3_prefix=s3_prefix, show_progress_bar=show_progress_bar
-            )
-        else:
-            provider = create_sepa_provider(
-                provider_type="website", delay_seconds=delay_seconds, show_progress_bar=show_progress_bar
-            )
-        return provider
-    except Exception as e:
-        logger.error(f"Failed to create SEPA provider: {e}")
-        raise
+    logger.info("Creating SEPA provider")
+    return create_sepa_provider()
 
 
 @task(
@@ -103,7 +85,7 @@ def task_create_sepa_provider(
     task_run_name="get data for {date}",
     retries=3,
 )
-def task_get_data_for_date(provider: IProviderGetter, date: DateStr) -> SepaDF:
+def task_get_data_for_date(provider: IProviderGetter, date: DateStr) -> AggregatedPricesDF:
     """
     Get SEPA data for a specific date.
 
@@ -227,7 +209,7 @@ def task_determine_needed_keys(
 @task
 def task_create_transformer(
     product_category_map_df: pd.DataFrame, stream_id_map: StreamIdMap
-) -> IDataTransformer[SepaDF]:
+) -> IDataTransformer[AggregatedPricesDF]:
     """Create and return a data transformer."""
     logger = get_run_logger()
     logger.info("Creating data transformer")
@@ -239,7 +221,7 @@ def task_create_transformer(
 
 
 @task
-def task_transform_data(transformer: IDataTransformer, data: SepaDF) -> pd.DataFrame:
+def task_transform_data(transformer: IDataTransformer, data: AggregatedPricesDF) -> DataFrame[TnDataRowModel]:
     """Transform data from source format to target format."""
     logger = get_run_logger()
     logger.info("Transforming data")
@@ -259,14 +241,12 @@ def task_transform_data(transformer: IDataTransformer, data: SepaDF) -> pd.DataF
 )
 def task_get_and_transform_data(
     provider: IProviderGetter, transformer: IDataTransformer, date: DateStr
-) -> tuple[pd.DataFrame, SepaDF]:
+) -> DataFrame[TnDataRowModel]:
     """Get data for a date and transform it."""
     # guess we're using 1GB of memory
-    with concurrency('memory-usage', 1000):
+    with concurrency("memory-usage", 1000):
         data = task_get_data_for_date(provider=provider, date=date)
-        sepa_transformer = cast(SepaDataTransformer, transformer)
-        uncategorized = sepa_transformer.get_uncategorized(data)
-        return task_transform_data(transformer=transformer, data=data), uncategorized
+        return task_transform_data(transformer=transformer, data=data)
 
 
 @task(retries=3, cache_expiration=timedelta(hours=1), cache_policy=policies.INPUTS + policies.TASK_SOURCE)

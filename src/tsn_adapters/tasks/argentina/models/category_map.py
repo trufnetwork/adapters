@@ -19,7 +19,7 @@ from prefect import task
 from prefect.tasks import task_input_hash
 import requests
 
-from tsn_adapters.tasks.argentina.models.sepa import SepaProductosDataModel
+from tsn_adapters.tasks.argentina.types import CategoryMapDF, SepaDF, UncategorizedDF
 from tsn_adapters.utils.filter_failures import filter_failures
 
 U = TypeVar("U", bound=pa.DataFrameModel)
@@ -149,9 +149,9 @@ class SepaProductCategoryMapModel(DataFrameModel):
 
 
 def get_uncategorized_products(
-    data: DataFrame[SepaProductosDataModel],
-    category_map: DataFrame[SepaProductCategoryMapModel],
-) -> DataFrame[SepaProductosDataModel]:
+    data: SepaDF,
+    category_map: CategoryMapDF,
+) -> UncategorizedDF:
     """
     Get the products without category
     """
@@ -160,4 +160,4 @@ def get_uncategorized_products(
     # get data without id_producto (=null)
     data[data["id_producto"].isnull()]
 
-    return DataFrame[SepaProductosDataModel](diff_df)
+    return UncategorizedDF(diff_df)

@@ -7,7 +7,6 @@ import tempfile
 from typing import cast
 
 import pandas as pd
-
 from prefect.concurrency.sync import concurrency
 
 from tsn_adapters.tasks.argentina.models.sepa import SepaDataItem
@@ -49,7 +48,7 @@ def process_sepa_data(
     with tempfile.TemporaryDirectory() as temp_dir:
         # Download the zip file
         # ~ 200 MB
-        with concurrency('network-usage', 200):
+        with concurrency("network-usage", 200):
             zip_content = data_item.fetch_into_memory()
 
         # Create a temporary file for the zip
