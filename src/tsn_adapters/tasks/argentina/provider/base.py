@@ -5,7 +5,8 @@ Base provider classes for Argentina SEPA data.
 from abc import ABC, abstractmethod
 import io
 import re
-from typing import Generic, Optional, TypeVar
+from threading import Thread
+from typing import Generator, Generic, Optional, TypeVar
 
 import pandas as pd
 from pandas import DataFrame as PandasDataFrame
@@ -67,35 +68,56 @@ class SepaS3BaseProvider(ABC, Generic[T]):
 
         return prefix
 
-    def get_full_path(self, key: str) -> str:
+    def get_full_path(self, file_key: str) -> str:
         """Get the full S3 path for a key.
 
         Args:
-            key: The key to get the path for
+            file_key: The key to get the path for
 
         Returns:
             Full S3 path including prefix
         """
         # Remove leading/trailing slashes from key
-        key = key.strip("/")
-        return f"{self.prefix}{key}"
+        file_key = file_key.strip("/")
+        return f"{self.prefix}{file_key}"
 
-    def read_csv(self, key: str) -> PandasDataFrame:
+    def read_csv(self, file_key: str) -> PandasDataFrame:
         """Read a CSV file from S3."""
-        content_in_bytes = deroutine(self.s3_block.read_path(self.get_full_path(key)))
+        content_in_bytes = deroutine(self.s3_block.read_path(self.get_full_path(file_key)))
         buffer = io.BytesIO(content_in_bytes)
         return pd.read_csv(buffer, compression="zip")
 
-    def write_csv(self, key: str, data: PandasDataFrame) -> None:
+    def write_csv(self, file_key: str, data: PandasDataFrame) -> None:
         """Write a CSV file to S3."""
         buffer = io.BytesIO()
-        data.to_csv(buffer, compression="zip")
+        data.to_csv(buffer, index=False, compression="zip")
         buffer.seek(0)
-        deroutine(self.s3_block.write_path(self.get_full_path(key), buffer.getvalue()))
+        deroutine(self.s3_block.write_path(self.get_full_path(file_key), buffer.getvalue()))
 
-    def write_bytes(self, key: str, data: bytes) -> None:
+    def path_exists(self, file_key: str) -> bool:
+        """Check if a file exists in S3."""
+        dir_objects = deroutine(self.s3_block.list_objects(folder=self.prefix))
+        full_path = self.get_full_path(file_key)
+        return any(full_path in obj["Key"] for obj in dir_objects)
+
+    def create_reader(self, file_key: str) -> Generator[bytes, None, None]:
+        """Create a lazy reader for a file in S3.
+        
+        This method returns a buffered reader that only downloads the data
+        when it's actually read, helping with memory efficiency for large files.
+        
+        Args:
+            file_key: The S3 key of the file to read
+            
+        Returns:
+            A buffered reader object that can be used to read the file contents
+        """
+        content = deroutine(self.s3_block.read_path(self.get_full_path(file_key)))
+        yield content
+
+    def write_bytes(self, file_key: str, data: bytes) -> None:
         """Write bytes to S3."""
-        deroutine(self.s3_block.write_path(self.get_full_path(key), data))
+        deroutine(self.s3_block.write_path(self.get_full_path(file_key), data))
 
     def list_available_keys(self) -> list[DateStr]:
         """List available keys in the S3 prefix.
@@ -103,17 +125,13 @@ class SepaS3BaseProvider(ABC, Generic[T]):
         Returns:
             List of available keys
         """
-        keys = deroutine(self.s3_block.list_objects(folder=self.prefix))
+        items = deroutine(self.s3_block.list_objects(folder=self.prefix))
         dates = []
 
-        for key in keys:
-            match = self._date_pattern.search(str(key))
+        for item in items:
+            match = self._date_pattern.search(item["Key"])
             if match:
                 date = DateStr(match.group(1))
                 dates.append(date)
 
         return sorted(dates)
-
-    def get_data_for(self, key: DateStr) -> DataFrame[T]:
-        """Get processed data for specific date"""
-        return DataFrame[T](self.read_csv(key))

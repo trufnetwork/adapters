@@ -1,7 +1,9 @@
 from typing import TypeVar
 
 import pandera as pa
-from pandera.typing import Series
+from pandera.typing import DataFrame, Series
+
+from ....tasks.argentina.base_types import StreamId
 
 # Create type variables for the models
 T = TypeVar("T", bound="TnRecordModel")
@@ -31,3 +33,12 @@ class TnDataRowModel(TnRecordModel):
     class Config(TnRecordModel.Config):
         coerce = True
         strict = "filter"
+
+
+def split_data_row(data_row: DataFrame[TnDataRowModel]) -> dict[StreamId, DataFrame[TnRecordModel]]:
+    """Split a data row into a dictionary of dataframes for each stream_id"""
+    unique_stream_ids = data_row["stream_id"].unique()
+    return {
+        stream_id: DataFrame[TnRecordModel](data_row[data_row["stream_id"] == stream_id])
+        for stream_id in unique_stream_ids
+    }

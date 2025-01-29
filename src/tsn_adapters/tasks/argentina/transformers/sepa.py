@@ -12,7 +12,6 @@ from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.models.aggregated_prices import sepa_aggregated_prices_to_tn_records
 from tsn_adapters.tasks.argentina.types import (
     AggregatedPricesDF,
-    CategoryMapDF,
     SourceId,
     StreamIdMap,
 )
@@ -21,15 +20,13 @@ from tsn_adapters.tasks.argentina.types import (
 class SepaDataTransformer(IDataTransformer[AggregatedPricesDF]):
     """Transforms SEPA data into TrufNetwork records."""
 
-    def __init__(self, product_category_map_df: CategoryMapDF, stream_id_map: StreamIdMap):
+    def __init__(self, stream_id_map: StreamIdMap):
         """
-        Initialize with product category mapping and stream ID mapping.
+        Initialize with stream ID mapping.
 
         Args:
-            product_category_map_df: DataFrame mapping products to categories
             stream_id_map: Dict mapping category IDs to stream IDs
         """
-        self.product_category_map_df = product_category_map_df
         self.stream_id_map = stream_id_map
 
     def transform(self, data: AggregatedPricesDF) -> DataFrame[TnDataRowModel]:
@@ -52,15 +49,14 @@ class SepaDataTransformer(IDataTransformer[AggregatedPricesDF]):
 
 
 @task(name="Create SEPA Data Transformer")
-def create_sepa_transformer(product_category_map_df: CategoryMapDF, stream_id_map: StreamIdMap) -> SepaDataTransformer:
+def create_sepa_transformer(stream_id_map: StreamIdMap) -> SepaDataTransformer:
     """
     Create a SEPA data transformer instance.
 
     Args:
-        product_category_map_df: DataFrame mapping products to categories
         stream_id_map: Dict mapping category IDs to stream IDs
 
     Returns:
         SepaDataTransformer: The transformer instance
     """
-    return SepaDataTransformer(product_category_map_df, stream_id_map)
+    return SepaDataTransformer(stream_id_map)

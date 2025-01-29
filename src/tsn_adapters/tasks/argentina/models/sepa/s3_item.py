@@ -16,22 +16,15 @@ class SepaS3RawDataItem(SepaDataItem, BaseModel):
     key: str
     block: S3Bucket
 
-    @property
-    def reported_date(self) -> str:
-        """Get the reported date from the key."""
-        return self.key.split("_")[-1].split(".")[0]
-
-    @property
-    def item_reported_date(self) -> str:
-        """Get the reported date for this item."""
-        return SepaWebsiteDataItem.validate_date(self.reported_date)
 
     @classmethod
-    def create(cls, block: S3Bucket, key: str, item_reported_date: str) -> "SepaS3RawDataItem":
+    def create(cls, block: S3Bucket, key: str) -> "SepaS3RawDataItem":
         """Factory method to create a SepaS3RawDataItem instance."""
+        item_reported_date = key.split("_")[-1].split(".")[0]
         return cls(
             block=block,
             key=key,
+            item_reported_date=item_reported_date,
         )
 
     def fetch_into_memory(self) -> bytes:

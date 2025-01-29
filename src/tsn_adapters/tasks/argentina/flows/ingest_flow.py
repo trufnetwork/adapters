@@ -10,17 +10,18 @@ This flow handles:
 from typing import Optional, cast
 
 import pandas as pd
+from pandera.typing import DataFrame as PanderaDataFrame
 from prefect import flow, transactions
 from prefect.artifacts import create_markdown_artifact
 from prefect_aws import S3Bucket
 
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel, split_data_row
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.target import create_trufnetwork_components
 from tsn_adapters.tasks.argentina.task_wrappers import (
     task_create_reconciliation_strategy,
     task_create_stream_fetcher,
     task_create_transformer,
-    task_dates_already_processed,
     task_determine_needed_keys,
     task_get_streams,
     task_insert_data,
@@ -80,7 +81,9 @@ class IngestFlow(ArgentinaFlowController):
         }
 
         # Create transformer
-        transformer = task_create_transformer(stream_id_map=stream_id_map)
+        transformer = task_create_transformer(
+            stream_id_map=stream_id_map
+        )
 
         # Step 2: Determine what data to fetch
         self.logger.info("Determining what data to fetch...")
@@ -105,34 +108,42 @@ class IngestFlow(ArgentinaFlowController):
 
         # Optimization to avoid processing if no new dates
         with transactions.transaction():
-            if task_dates_already_processed(needed_dates=sorted_needed_dates):
-                self.logger.info("Dates have already been processed in the last day, skipping...")
-                return
+            # if task_dates_already_processed(needed_dates=sorted_needed_dates):
+            #     self.logger.info("Dates have already been processed in the last day, skipping...")
+            #     return
 
             self.logger.info("Dates have not been processed in the last day, processing...")
+
+            all_data = pd.DataFrame()
+            for date in sorted_needed_dates:
+                data = self.processed_provider.get_data_for(date)
+                transformed_data = task_transform_data(transformer=transformer, data=data)
+                if not transformed_data.empty:
+                    all_data = pd.concat([all_data, transformed_data])
+                    dates_processed.append(date)
+
+            typed_all_data = PanderaDataFrame[TnDataRowModel](all_data)
 
             # Process each stream in parallel
             insert_tasks = []
             for stream_id, needed_dates in needed_keys.items():
                 # Get data for this stream's dates
-                stream_data = pd.DataFrame()
-                for date in needed_dates:
-                    data = self.processed_provider.get_data_for(date)
-                    transformed_data = task_transform_data(transformer=transformer, data=data)
-                    if not transformed_data.empty:
-                        stream_data = pd.concat([stream_data, transformed_data])
-                        dates_processed.append(date)
+                stream_data = typed_all_data[
+                    (typed_all_data["stream_id"] == stream_id) & (typed_all_data["date"].isin(needed_dates))
+                ]
 
                 if stream_data.empty:
-                    self.logger.warning(f"No records found for stream {stream_id}")
+                    self.logger.warning(f"No records to insert for stream {stream_id}")
                     continue
+
+                typed_stream_data = PanderaDataFrame[TnRecordModel](stream_data)
 
                 # Insert into target
                 insert_tasks.append(
                     task_insert_data.submit(
                         client=target_client,
-                        stream_id=stream_id,
-                        data=stream_data,
+                        stream_id=cast(StreamId, stream_id),
+                        data=typed_stream_data,
                         data_provider=self.data_provider,
                     )
                 )
@@ -213,3 +224,12 @@ def ingest_flow(
         data_provider=data_provider,
     )
     flow.run()
+
+
+if __name__ == "__main__":
+    ingest_flow(
+        source_descriptor_type="github",
+        source_descriptor_block_name="argentina-sepa",
+        trufnetwork_access_block_name="default",
+        s3_block_name="argentina-sepa",
+    )

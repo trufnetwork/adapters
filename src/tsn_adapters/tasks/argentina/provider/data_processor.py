@@ -2,6 +2,7 @@
 Shared utilities for SEPA data processing.
 """
 
+from collections.abc import Generator
 import os
 import tempfile
 from typing import cast
@@ -25,15 +26,16 @@ class DatesNotMatchError(Exception):
         super().__init__(f"Real date {real_date} does not match {source} date {reported_date}")
 
 
-def process_sepa_data(
-    data_item: SepaDataItem,
+def process_sepa_zip(
+    zip_reader: Generator[bytes, None, None],
+    reported_date: DateStr,
     source_name: str,
 ) -> SepaDF:
     """
     Process SEPA data from a data item.
 
     Args:
-        data_item: The data item to process
+        
         source_name: Name of the source (for error messages)
         reported_date: The date reported by the source
 
@@ -49,7 +51,7 @@ def process_sepa_data(
         # Download the zip file
         # ~ 200 MB
         with concurrency("network-usage", 200):
-            zip_content = data_item.fetch_into_memory()
+            zip_content = b"".join(zip_reader)
 
         # Create a temporary file for the zip
         with tempfile.NamedTemporaryFile(suffix=".zip", dir=temp_dir, delete=False) as temp_zip:
@@ -68,8 +70,8 @@ def process_sepa_data(
 
         # Validate the date matches
         real_date = df["date"].iloc[0]
-        if data_item.item_reported_date != real_date:
+        if reported_date != real_date:
             # we need to raise an error so cache is invalidated
-            raise DatesNotMatchError(real_date, DateStr(data_item.item_reported_date), source_name)
+            raise DatesNotMatchError(real_date, reported_date, source_name)
 
         return cast(SepaDF, df)

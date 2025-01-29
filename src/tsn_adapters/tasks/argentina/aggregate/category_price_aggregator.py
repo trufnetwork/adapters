@@ -5,11 +5,8 @@ This module contains functions for aggregating product prices by category from t
 SEPA dataset.
 """
 
-from pandera.typing import DataFrame as paDataFrame
 
-from tsn_adapters.tasks.argentina.models.aggregated_prices import SepaAggregatedPricesModel
-from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel, get_uncategorized_products
-from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel, SepaProductosDataModel
+from tsn_adapters.tasks.argentina.aggregate.uncategorized import get_uncategorized_products
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, AvgPriceDF, CategoryMapDF, SepaDF, UncategorizedDF
 from tsn_adapters.utils.logging import get_logger_safe
 
@@ -96,6 +93,6 @@ def aggregate_prices_by_category(
     # Log final results
     logger.info(f"Successfully aggregated prices into {len(aggregated_df)} category-date combinations")
 
-    uncategorized_df = get_uncategorized_products(SepaDF(avg_price_product_df), product_category_map_df)
+    uncategorized_df = get_uncategorized_products(avg_price_product_df, product_category_map_df)
 
     return AggregatedPricesDF(aggregated_df), uncategorized_df

@@ -15,9 +15,9 @@ from tsn_adapters.common.interfaces.provider import IProviderGetter
 from tsn_adapters.common.interfaces.reconciliation import IReconciliationStrategy
 from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.interfaces.transformer import IDataTransformer
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
-from tsn_adapters.tasks.argentina.provider.factory import create_sepa_provider
+from tsn_adapters.tasks.argentina.provider.factory import create_sepa_processed_provider
 from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
 from tsn_adapters.tasks.argentina.stream_details import create_stream_details_fetcher
 from tsn_adapters.tasks.argentina.transformers.sepa import create_sepa_transformer
@@ -77,7 +77,7 @@ def task_create_sepa_provider() -> IProviderGetter[DateStr, DataFrame[Aggregated
     """
     logger = get_run_logger()
     logger.info("Creating SEPA provider")
-    return create_sepa_provider()
+    return create_sepa_processed_provider()
 
 
 @task(
@@ -137,7 +137,7 @@ def task_get_latest_records(client: ITargetClient, stream_id: StreamId, data_pro
 
 @task
 def task_insert_data(
-    client: ITargetClient, stream_id: StreamId, data: pd.DataFrame, data_provider: Optional[str] = None
+    client: ITargetClient, stream_id: StreamId, data: DataFrame[TnRecordModel], data_provider: Optional[str] = None
 ) -> None:
     """
     Insert data into the target system.
@@ -207,14 +207,12 @@ def task_determine_needed_keys(
 
 # Transformer Tasks
 @task
-def task_create_transformer(
-    product_category_map_df: pd.DataFrame, stream_id_map: StreamIdMap
-) -> IDataTransformer[AggregatedPricesDF]:
+def task_create_transformer(stream_id_map: StreamIdMap) -> IDataTransformer[AggregatedPricesDF]:
     """Create and return a data transformer."""
     logger = get_run_logger()
     logger.info("Creating data transformer")
     try:
-        return create_sepa_transformer(product_category_map_df=product_category_map_df, stream_id_map=stream_id_map)
+        return create_sepa_transformer(stream_id_map=stream_id_map)
     except Exception as e:
         logger.error(f"Failed to create transformer: {e}")
         raise

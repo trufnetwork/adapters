@@ -12,7 +12,7 @@ from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, DateStr
 
 
 @task(name="Create SEPA Provider")
-def create_sepa_provider(block: S3Bucket) -> IProviderGetter[DateStr, DataFrame[AggregatedPricesDF]]:
+def create_sepa_processed_provider(block: S3Bucket) -> IProviderGetter[DateStr, DataFrame[AggregatedPricesDF]]:
     """
     Create a SEPA provider instance.
 
@@ -20,3 +20,4 @@ def create_sepa_provider(block: S3Bucket) -> IProviderGetter[DateStr, DataFrame[
         IProviderGetter: The provider instance
     """
     return ProcessedDataProvider(s3_block=block)
+

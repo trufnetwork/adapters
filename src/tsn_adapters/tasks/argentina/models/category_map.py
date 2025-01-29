@@ -19,7 +19,6 @@ from prefect import task
 from prefect.tasks import task_input_hash
 import requests
 
-from tsn_adapters.tasks.argentina.types import CategoryMapDF, SepaDF, UncategorizedDF
 from tsn_adapters.utils.filter_failures import filter_failures
 
 U = TypeVar("U", bound=pa.DataFrameModel)
@@ -146,18 +145,3 @@ class SepaProductCategoryMapModel(DataFrameModel):
     class Config(pa.DataFrameModel.Config):
         strict = True
         coerce = True
-
-
-def get_uncategorized_products(
-    data: SepaDF,
-    category_map: CategoryMapDF,
-) -> UncategorizedDF:
-    """
-    Get the products without category
-    """
-    diff_df = data[~data["id_producto"].isin(category_map["id_producto"])]
-
-    # get data without id_producto (=null)
-    data[data["id_producto"].isnull()]
-
-    return UncategorizedDF(diff_df)

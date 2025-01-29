@@ -2,8 +2,6 @@
 Base flow controller for Argentina SEPA data processing.
 """
 
-from typing import Optional
-
 from prefect import get_run_logger
 from prefect_aws import S3Bucket
 
@@ -26,7 +24,6 @@ class ArgentinaFlowController:
         self.logger = get_run_logger()
         self.raw_provider = RawDataProvider(s3_block=s3_block)
         self.processed_provider = ProcessedDataProvider(s3_block=s3_block)
-
 
     def validate_date(self, date: DateStr) -> None:
         """Validate a date string.
