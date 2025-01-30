@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 from io import StringIO
 from logging import Logger
 from typing import TypeVar, cast
@@ -6,7 +7,7 @@ from typing import TypeVar, cast
 import pandas as pd
 import pandera as pa
 from pandera.typing import DataFrame, Series
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from tsn_adapters.utils.filter_failures import filter_failures
 
@@ -208,7 +209,7 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
         return df
 
 
-class SepaDataItem(ABC):
+class SepaDataItem(ABC, BaseModel):
     """
     Generic data item from the dataset.
 
@@ -216,6 +217,13 @@ class SepaDataItem(ABC):
     """
 
     item_reported_date: str
+
+    @field_validator("item_reported_date")
+    @classmethod
+    def _validate_date(cls, v: str) -> str:
+        # Strict check for YYYY-MM-DD
+        datetime.strptime(v, "%Y-%m-%d")
+        return v
 
     @abstractmethod
     def fetch_into_memory(self) -> bytes:

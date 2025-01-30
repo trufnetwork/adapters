@@ -5,20 +5,18 @@ This module contains functions for aggregating product prices by category from t
 SEPA dataset.
 """
 
-from pandera.typing import DataFrame as paDataFrame
 
-from tsn_adapters.tasks.argentina.models.aggregated_prices import SepaAggregatedPricesModel
-from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
-from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
+from tsn_adapters.tasks.argentina.aggregate.uncategorized import get_uncategorized_products
+from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, AvgPriceDF, CategoryMapDF, SepaDF, UncategorizedDF
 from tsn_adapters.utils.logging import get_logger_safe
 
 logger = get_logger_safe(__name__)
 
 
 def aggregate_prices_by_category(
-    product_category_map_df: paDataFrame[SepaProductCategoryMapModel],
-    avg_price_product_df: paDataFrame[SepaAvgPriceProductModel],
-) -> paDataFrame[SepaAggregatedPricesModel]:
+    product_category_map_df: CategoryMapDF,
+    avg_price_product_df: AvgPriceDF,
+) -> tuple[AggregatedPricesDF, UncategorizedDF]:
     """
     Aggregate product prices by category over time.
 
@@ -27,14 +25,14 @@ def aggregate_prices_by_category(
 
     Parameters
     ----------
-    product_category_map_df : paDataFrame[SepaProductCategoryMapModel]
+    product_category_map_df : CategoryMapDF
         DataFrame containing the mapping between products and their categories
-    avg_price_product_df : paDataFrame[SepaAvgPriceProductModel]
+    avg_price_product_df : AvgPriceDF
         DataFrame containing average prices per product over time
 
     Returns
     -------
-    paDataFrame[SepaAggregatedPricesModel]
+    tuple[AggregatedPricesDF, UncategorizedDF]
         DataFrame containing average prices per category over time
 
     Notes
@@ -51,7 +49,7 @@ def aggregate_prices_by_category(
 
     if avg_price_product_df.empty:
         logger.warning("Average price product DataFrame is empty")
-        return paDataFrame[SepaAggregatedPricesModel](avg_price_product_df)
+        return AggregatedPricesDF(), UncategorizedDF()
 
     # Log input data stats
     logger.info(
@@ -95,4 +93,6 @@ def aggregate_prices_by_category(
     # Log final results
     logger.info(f"Successfully aggregated prices into {len(aggregated_df)} category-date combinations")
 
-    return paDataFrame[SepaAggregatedPricesModel](aggregated_df)
+    uncategorized_df = get_uncategorized_products(avg_price_product_df, product_category_map_df)
+
+    return AggregatedPricesDF(aggregated_df), uncategorized_df

@@ -15,24 +15,17 @@ from tsn_adapters.tasks.argentina.utils.dates import date_to_weekday
 from tsn_adapters.utils.logging import get_logger_safe
 
 
-class SepaWebsiteDataItem(SepaDataItem, BaseModel):
+class SepaWebsiteDataItem(SepaDataItem):
     """
     Represents a historical data item from the dataset.
     """
 
     # not necessarily the website date corresponds to the real date inside the zip file
     # e.g. they may report at the website to have updated on a certain date, but the real date inside the zip file is different  # noqa: E501
-    item_reported_date: str
     resource_id: str
     dataset_id: str
     _base_url = "https://datos.produccion.gob.ar/dataset"
 
-    @field_validator("item_reported_date")
-    @classmethod
-    def validate_date(cls, v: str) -> str:
-        # Strict check for YYYY-MM-DD
-        datetime.strptime(v, "%Y-%m-%d")
-        return v
 
     def get_resource_link(self) -> str:
         """

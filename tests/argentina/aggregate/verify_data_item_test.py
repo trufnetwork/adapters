@@ -5,7 +5,7 @@ Usage:
     python test_manual_provider.py
 
 This test:
-1. Creates a SEPA provider (website or s3).
+1. Creates a SEPA provider.
 2. Lists available keys.
 3. Filters for an arbitrary date.
 4. Fetches the data and transforms it.
@@ -16,32 +16,29 @@ import sys
 
 from prefect_aws import S3Bucket
 
+from tsn_adapters.tasks.argentina.provider.s3 import ProcessedDataProvider, RawDataProvider
+from tsn_adapters.utils.deroutine import deroutine
 
-def manual_test(provider_type: str = "website", test_date: str = "2025-01-04"):
+
+def manual_test(test_date: str = "2025-01-04"):
     """
     Manually test fetching SEPA data and aggregating it for a single date.
 
-    provider_type : "website" or "s3"
     test_date     : The date string (YYYY-MM-DD) to test
     """
     from tsn_adapters.tasks.argentina.aggregate.category_price_aggregator import aggregate_prices_by_category
     from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
     from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
-    from tsn_adapters.tasks.argentina.provider.factory import create_sepa_provider
 
     # 1. Create the provider
-    if provider_type == "s3":
-        # For S3, you'll need a valid S3Block name, e.g. "argentina-sepa-bucket"
-        s3_block_name = "argentina-sepa"
-        s3_block = S3Bucket.load(s3_block_name)
-        provider = create_sepa_provider(provider_type="s3", s3_block=s3_block, s3_prefix="source_data/")
-    else:
-        # Website provider
-        provider = create_sepa_provider(provider_type="website", delay_seconds=0.1, show_progress_bar=True)
+    s3_block_name = "argentina-sepa"
+    s3_block = deroutine(S3Bucket.load(s3_block_name))
+    raw_provider = RawDataProvider(s3_block=s3_block)
+    processed_provider = ProcessedDataProvider(s3_block=s3_block)
 
     # 2. List available keys
-    print(f"Listing available keys from provider {provider_type}...")
-    keys = provider.list_available_keys()
+    print("Listing available keys from provider...")
+    keys = raw_provider.list_available_keys()
     print(f"Available dates (truncated): {keys[:10]}... (total={len(keys)})")
 
     # 3. Filter for a specific date
@@ -51,7 +48,7 @@ def manual_test(provider_type: str = "website", test_date: str = "2025-01-04"):
 
     # 4. Fetch data
     print(f"\nFetching SEPA data for date: {test_date}")
-    sepa_df = provider.get_data_for(test_date)
+    sepa_df = raw_provider.get_raw_data_for(test_date)
     print(f"Fetched {len(sepa_df)} rows for {test_date}")
 
     if sepa_df.empty:
@@ -72,30 +69,19 @@ def manual_test(provider_type: str = "website", test_date: str = "2025-01-04"):
 
     # 6. Aggregate by category
     print("Aggregating average prices by category...")
-    aggregated_df = aggregate_prices_by_category(category_map_df, avg_price_df)
+    aggregated_df, uncategorized_df = aggregate_prices_by_category(category_map_df, avg_price_df)
     print(f"Aggregated to {len(aggregated_df)} category-date rows.")
 
     # Show final result head
     print("Sample of the aggregated output:")
     print(aggregated_df.head(10))
 
+    print("Sample of the uncategorized output:")
+    print(uncategorized_df.head(10))
+    print(f"There are {len(uncategorized_df)} rows of uncategorized data.")
+
     print("\nManual test completed successfully.")
 
 
 if __name__ == "__main__":
-    # You could parse CLI arguments here if you wish.
-    # e.g. python test_manual_provider.py website 2025-01-04
-    # or python test_manual_provider.py s3 2024-12-31
-
-    args = sys.argv[1:]
-    if len(args) == 2:
-        provider_type_arg = args[0]
-        date_arg = args[1]
-    elif len(args) == 1:
-        provider_type_arg = args[0]
-        date_arg = "2025-01-04"
-    else:
-        provider_type_arg = "s3"
-        date_arg = "2025-01-04"
-
-    manual_test(provider_type_arg, date_arg)
+    manual_test("2025-01-04")

@@ -2,7 +2,7 @@
 SEPA data models.
 """
 
-from .s3_item import SepaS3DataItem
+from .s3_item import SepaS3RawDataItem
 from .sepa_models import (
     SepaProductosDataModel,
     ProductDescriptionModel,
@@ -12,7 +12,7 @@ from .sepa_models import (
 from .website_item import SepaWebsiteDataItem
 
 __all__ = [
-    "SepaS3DataItem",
+    "SepaS3RawDataItem",
     "SepaWebsiteDataItem",
     "SepaProductosDataModel",
     "ProductDescriptionModel",

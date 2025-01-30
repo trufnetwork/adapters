@@ -394,43 +394,6 @@ def task_batch_insert_unix_tn_records(
 
 
 @task(retries=5, retry_delay_seconds=10)
-def task_batch_insert_and_wait_for_tx(
-    block: TNAccessBlock,
-    records: DataFrame[TnDataRowModel],
-    data_provider: Optional[str] = None,
-):
-    """Batch insert records into multiple streams and wait for all transactions.
-
-    Args:
-        block: The TNAccessBlock instance
-        records: DataFrame containing records with stream_id column
-        data_provider: Optional data provider name
-
-    Returns:
-        List of transaction hashes for completed inserts
-    """
-    logging = get_run_logger()
-
-    logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
-    insertions = task_batch_insert_tn_records(block=block, records=records, data_provider=data_provider)
-
-    if not insertions:
-        return Completed(message="No records to insert")
-
-    for tx_hash in insertions:
-        if tx_hash:  # Skip None values
-            try:
-                task_wait_for_tx(block=block, tx_hash=tx_hash)
-            except Exception as e:
-                if "duplicate key value violates unique constraint" in str(e):
-                    logging.warning(f"Continuing after duplicate key value violation: {e}")
-                else:
-                    raise e
-
-    return insertions
-
-
-@task(retries=5, retry_delay_seconds=10)
 def task_batch_insert_unix_and_wait_for_tx(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
