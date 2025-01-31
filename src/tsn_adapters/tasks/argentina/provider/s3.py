@@ -2,15 +2,13 @@
 S3-based data providers for Argentina SEPA data.
 """
 
-from platform import processor
 import re
 
-from pandera.typing import DataFrame
 from prefect_aws import S3Bucket
 
 from tsn_adapters.common.interfaces.provider import IProviderGetter
 from tsn_adapters.tasks.argentina.provider.base import SepaS3BaseProvider
-from .data_processor import process_sepa_zip
+from tsn_adapters.tasks.argentina.provider.data_processor import process_sepa_zip
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, DateStr, SepaDF, UncategorizedDF
 
 
@@ -34,9 +32,7 @@ class RawDataProvider(SepaS3BaseProvider[SepaDF]):
         return process_sepa_zip(self.create_reader(file_key), date, "sepa")
 
 
-class ProcessedDataProvider(
-    SepaS3BaseProvider[AggregatedPricesDF], IProviderGetter[DateStr, AggregatedPricesDF]
-):
+class ProcessedDataProvider(SepaS3BaseProvider[AggregatedPricesDF], IProviderGetter[DateStr, AggregatedPricesDF]):
     """Handles processed data from processed/ prefix"""
 
     @property
@@ -76,4 +72,3 @@ class ProcessedDataProvider(
         """Check if processed data exists for specific date"""
         file_key = self.to_data_file_key(key)
         return self.path_exists(file_key)
-
