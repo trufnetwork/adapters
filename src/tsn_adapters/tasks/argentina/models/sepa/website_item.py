@@ -1,4 +1,3 @@
-from datetime import datetime
 import logging
 import re
 import time
@@ -6,7 +5,6 @@ from typing import Optional
 
 from bs4 import BeautifulSoup
 from prefect import get_run_logger
-from pydantic import BaseModel, field_validator
 import requests
 from tqdm import tqdm
 
@@ -25,7 +23,6 @@ class SepaWebsiteDataItem(SepaDataItem):
     resource_id: str
     dataset_id: str
     _base_url = "https://datos.produccion.gob.ar/dataset"
-
 
     def get_resource_link(self) -> str:
         """

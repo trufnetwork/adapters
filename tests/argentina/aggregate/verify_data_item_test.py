@@ -12,8 +12,6 @@ This test:
 5. Aggregates prices by category.
 """
 
-import sys
-
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.provider.s3 import ProcessedDataProvider, RawDataProvider
@@ -34,7 +32,7 @@ def manual_test(test_date: str = "2025-01-04"):
     s3_block_name = "argentina-sepa"
     s3_block = deroutine(S3Bucket.load(s3_block_name))
     raw_provider = RawDataProvider(s3_block=s3_block)
-    processed_provider = ProcessedDataProvider(s3_block=s3_block)
+    ProcessedDataProvider(s3_block=s3_block)
 
     # 2. List available keys
     print("Listing available keys from provider...")
