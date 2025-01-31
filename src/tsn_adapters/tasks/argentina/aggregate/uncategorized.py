@@ -10,7 +10,5 @@ def get_uncategorized_products(
     """
     diff_df = data[~data["id_producto"].isin(category_map["id_producto"])]
 
-    # get data without id_producto (=null)
-    data[data["id_producto"].isnull()]
-
     return UncategorizedDF(diff_df)
+

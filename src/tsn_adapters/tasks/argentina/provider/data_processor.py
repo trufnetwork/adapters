@@ -10,19 +10,9 @@ from typing import cast
 import pandas as pd
 from prefect.concurrency.sync import concurrency
 
+from tsn_adapters.tasks.argentina.errors.errors import DateMismatchError, InvalidStructureZIPError
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF
 from tsn_adapters.tasks.argentina.utils.processors import SepaDirectoryProcessor
-
-
-class DatesNotMatchError(Exception):
-    """Exception raised when the date does not match."""
-
-    def __init__(self, real_date: DateStr, reported_date: DateStr, source: str):
-        """Initialize the exception."""
-        self.real_date = real_date
-        self.reported_date = reported_date
-        self.source = source
-        super().__init__(f"Real date {real_date} does not match {source} date {reported_date}")
 
 
 def process_sepa_zip(
@@ -34,7 +24,7 @@ def process_sepa_zip(
     Process SEPA data from a data item.
 
     Args:
-
+zip_reader: Generator yielding bytes of the ZIP file
         source_name: Name of the source (for error messages)
         reported_date: The date reported by the source
 
@@ -42,7 +32,8 @@ def process_sepa_zip(
         DataFrame: The processed SEPA data
 
     Raises:
-        DatesNotMatchError: If the date in the data doesn't match the reported date
+        DateMismatchError: If the date in the data doesn't match the reported date
+        InvalidStructureZIPError: If the ZIP file structure is invalid
         ValueError: If the data is invalid
     """
     # Create a temporary directory for extraction
@@ -60,7 +51,11 @@ def process_sepa_zip(
         # Process the data
         extract_dir = os.path.join(temp_dir, "data")
         os.makedirs(extract_dir, exist_ok=True)
-        processor = SepaDirectoryProcessor.from_zip_path(temp_zip_path, extract_dir)
+        try:
+            processor = SepaDirectoryProcessor.from_zip_path(temp_zip_path, extract_dir)
+        except Exception as e:
+            raise InvalidStructureZIPError({"source": source_name, "date": reported_date, "error": str(e)}) from e
+
         df = processor.get_all_products_data_merged()
 
         # skip empty dataframes
@@ -71,6 +66,6 @@ def process_sepa_zip(
         real_date = df["date"].iloc[0]
         if reported_date != real_date:
             # we need to raise an error so cache is invalidated
-            raise DatesNotMatchError(real_date, reported_date, source_name)
+            raise DateMismatchError(external_date=reported_date, internal_date=real_date)
 
         return cast(SepaDF, df)

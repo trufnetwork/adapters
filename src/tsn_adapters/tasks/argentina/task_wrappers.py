@@ -15,6 +15,7 @@ from tsn_adapters.common.interfaces.reconciliation import IReconciliationStrateg
 from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.interfaces.transformer import IDataTransformer
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.tasks.argentina.errors.errors import EmptyCategoryMapError, InvalidCategorySchemaError
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
 from tsn_adapters.tasks.argentina.provider.factory import create_sepa_processed_provider
 from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
@@ -249,11 +250,15 @@ def task_load_category_map(url: str) -> pd.DataFrame:
     logger.info(f"Loading category map from: {url}")
     try:
         df = SepaProductCategoryMapModel.from_url(url, sep="|", compression="zip")
+        if df.empty:
+            raise EmptyCategoryMapError()
         logger.info(f"Loaded {len(df)} category mappings")
         return df
+    except EmptyCategoryMapError:
+        raise
     except Exception as e:
         logger.error(f"Failed to load category map: {e}")
-        raise
+        raise InvalidCategorySchemaError(issues=[f"Failed to load category map from {url}", f"Error: {e!s}"])
 
 
 @task

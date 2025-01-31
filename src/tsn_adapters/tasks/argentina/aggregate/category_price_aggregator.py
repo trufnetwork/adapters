@@ -6,6 +6,11 @@ SEPA dataset.
 """
 
 from tsn_adapters.tasks.argentina.aggregate.uncategorized import get_uncategorized_products
+from tsn_adapters.tasks.argentina.errors import (
+    EmptyCategoryMapError,
+    ErrorAccumulator,
+    UncategorizedProductsError,
+)
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, AvgPriceDF, CategoryMapDF, UncategorizedDF
 from tsn_adapters.utils.logging import get_logger_safe
 
@@ -40,11 +45,16 @@ def aggregate_prices_by_category(
     1. Merges product prices with their category assignments
     2. Groups the data by category and date
     3. Computes the mean price for each category-date combination
+
+    Raises
+    ------
+    EmptyCategoryMapError
+        If the product category mapping DataFrame is empty
     """
     # Input validation and logging
     if product_category_map_df.empty:
         logger.error("Product category mapping DataFrame is empty")
-        raise ValueError("Cannot aggregate prices: product category mapping is empty")
+        raise EmptyCategoryMapError(url="<unknown>")
 
     if avg_price_product_df.empty:
         logger.warning("Average price product DataFrame is empty")
@@ -55,17 +65,6 @@ def aggregate_prices_by_category(
         f"Starting aggregation with {len(product_category_map_df)} category mappings "
         f"and {len(avg_price_product_df)} price records"
     )
-
-    # Check for products without categories before merge
-    unique_products_with_prices = set(avg_price_product_df["id_producto"].unique())
-    unique_products_with_categories = set(product_category_map_df["id_producto"].unique())
-
-    products_without_categories = unique_products_with_prices - unique_products_with_categories
-    if products_without_categories:
-        logger.warning(
-            f"Found {len(products_without_categories)} products with prices but no category mapping. "
-            "These will be excluded from aggregation."
-        )
 
     # Merge the product categories with prices
     merged_df = avg_price_product_df.merge(
@@ -93,5 +92,14 @@ def aggregate_prices_by_category(
     logger.info(f"Successfully aggregated prices into {len(aggregated_df)} category-date combinations")
 
     uncategorized_df = get_uncategorized_products(avg_price_product_df, product_category_map_df)
+
+    if not uncategorized_df.empty:
+        logger.warning(f"Found {len(uncategorized_df)} uncategorized products")
+        accumulator = ErrorAccumulator.get_or_create_from_context()
+        accumulator.add_error(UncategorizedProductsError(
+            count=len(uncategorized_df),
+            date=avg_price_product_df["date"].iloc[0],
+            store_id=avg_price_product_df["id_comercio"].iloc[0]
+        ))
 
     return AggregatedPricesDF(aggregated_df), uncategorized_df

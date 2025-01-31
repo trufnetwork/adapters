@@ -8,6 +8,7 @@ This flow handles:
 4. Storage of processed data in S3
 """
 
+from contextlib import contextmanager
 from typing import cast
 
 import pandas as pd
@@ -17,6 +18,10 @@ import prefect.cache_policies as CachePolicies
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
+from tsn_adapters.tasks.argentina.errors import (
+    ArgentinaSEPAError,
+    ErrorAccumulator,
+)
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
@@ -82,11 +87,20 @@ class PreprocessFlow(ArgentinaFlowController):
         3. If not, process the date
         """
         logger = get_run_logger()
-        for date in self.raw_provider.list_available_keys():
-            if self.processed_provider.exists(date):
-                logger.info(f"Skipping {date} because it already exists")
-                continue
-            self.process_date(date)
+        with error_collection() as accumulator:
+            for date in self.raw_provider.list_available_keys():
+                if self.processed_provider.exists(date):
+                    logger.info(f"Skipping {date} because it already exists")
+                    continue
+                try:
+                    self.process_date(date)
+                except Exception as e:
+                    if isinstance(e, ArgentinaSEPAError):
+                        accumulator.add_error(e)
+                        logger.warning(f"Collected error for {date}: {e}")
+                    else:
+                        logger.error(f"Unexpected error processing {date}: {e}")
+                        raise
 
     def process_date(self, date: DateStr) -> None:
         """Process data for a specific date.
