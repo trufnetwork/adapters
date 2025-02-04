@@ -3,6 +3,7 @@ This file can't import any non standard library, as it's executed in a prefect a
 """
 
 from abc import ABC, abstractmethod
+from typing import cast
 
 import pandas as pd
 import pandera as pa
@@ -10,6 +11,8 @@ from pandera import DataFrameModel
 from pandera.typing import DataFrame, Series
 from prefect import Task, task
 from prefect.blocks.core import Block
+from prefect.logging import get_run_logger
+from prefect_aws import S3Bucket
 from pydantic import ConfigDict
 
 from tsn_adapters.blocks.github_access import GithubAccess
@@ -25,7 +28,11 @@ class PrimitiveSourceDataModel(DataFrameModel):
         coerce = True
 
 
-class PrimitiveSourcesDescriptor(ABC):
+"""
+Blocks that describe a source of data
+"""
+
+class PrimitiveSourcesDescriptorBlock(Block, ABC):
     """
     PrimitiveSourcesDescriptor is a block that describes a source of data.
     It can be a url or a github repository.
@@ -39,7 +46,9 @@ class PrimitiveSourcesDescriptor(ABC):
         pass
 
 
-class UrlPrimitiveSourcesDescriptor(Block, PrimitiveSourcesDescriptor):
+
+
+class UrlPrimitiveSourcesDescriptor(PrimitiveSourcesDescriptorBlock):
     url: str
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
@@ -47,7 +56,7 @@ class UrlPrimitiveSourcesDescriptor(Block, PrimitiveSourcesDescriptor):
         return DataFrame[PrimitiveSourceDataModel](df)
 
 
-class GithubPrimitiveSourcesDescriptor(Block, PrimitiveSourcesDescriptor):
+class GithubPrimitiveSourcesDescriptor(PrimitiveSourcesDescriptorBlock):
     github_access: GithubAccess
     repo: str
     path: str
@@ -57,6 +66,45 @@ class GithubPrimitiveSourcesDescriptor(Block, PrimitiveSourcesDescriptor):
         file_content: pd.DataFrame = self.github_access.read_repo_csv_file(self.repo, self.path, self.branch)
         return DataFrame[PrimitiveSourceDataModel](file_content)
 
+
+"""
+Writable blocks
+
+Blocks that describe a source of data that can be written to
+"""
+class WritableSourceDescriptorBlock(PrimitiveSourcesDescriptorBlock):
+
+    @abstractmethod
+    def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
+        pass
+
+
+class S3SourceDescriptor(WritableSourceDescriptorBlock):
+    _block_type_name = "S3 Source Descriptor"
+
+    s3_bucket: S3Bucket
+    file_path: str
+
+    @property
+    def logger(self):
+        if not hasattr(self, "_logger"):
+            self._logger = get_run_logger()
+        return self._logger
+
+    def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
+        try:
+            raw_df = pd.read_csv(self.file_path, compression="gzip")
+            return DataFrame[PrimitiveSourceDataModel](raw_df)
+        except Exception as e:
+            self.logger.error(f"Error reading file {self.file_path}: {e}")
+            empty_df = pd.DataFrame(columns=list(PrimitiveSourceDataModel.__fields__.keys()))
+            return cast(DataFrame[PrimitiveSourceDataModel], empty_df)
+
+    def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
+        self.s3_bucket.write_path(
+            path=self.file_path,
+            content=descriptor.to_csv(index=False, encoding="utf-8", compression="gzip").encode("utf-8"),
+        )
 
 # --- Top Level Task Functions ---
 @task(retries=3, retry_delay_seconds=10)

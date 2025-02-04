@@ -25,6 +25,7 @@ argentina = [
     "prefect-aws>=0.5.3",
 ]
 dev = [
+    "pytest-timeout",
     "black",
     "isort",
     "ruff",
