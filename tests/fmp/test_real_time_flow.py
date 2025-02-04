@@ -177,9 +177,15 @@ class TestProcessDataAndDescriptor:
         assert "stream_aapl" in result["stream_id"].values
 
     def test_process_data_with_none(self, sample_descriptor_df):
-        """Test that process_data raises ValueError when quotes_df is None."""
-        with pytest.raises(ValueError, match="Cannot process data: quotes DataFrame is None"):
+        """Test that process_data raises RuntimeError with detailed error messages when quotes_df is None."""
+        with pytest.raises(RuntimeError, match="Cannot process data: quotes DataFrame is None"):
             process_data(None, sample_descriptor_df)  # type: ignore
+
+    def test_process_data_with_exception(self, sample_descriptor_df):
+        """Test that process_data raises RuntimeError with exception details when quotes_df is an Exception."""
+        test_error = RuntimeError("Test API Error")
+        with pytest.raises(RuntimeError, match=f"Cannot process data: quotes DataFrame is {test_error}"):
+            process_data(test_error, sample_descriptor_df)  # type: ignore
 
     def test_get_symbols_from_descriptor(self):
         """Test extracting symbols from descriptor block."""
@@ -219,11 +225,20 @@ class TestBatching:
         assert all(combined.columns == sample_quotes_df.columns)
 
     def test_combine_batch_results_with_none(self, sample_quotes_df):
-        """Test that combine_batch_results raises ValueError when any batch is None."""
+        """Test that combine_batch_results raises RuntimeError with detailed error messages when any batch is None."""
         batch1 = sample_quotes_df.iloc[0:2]
         batch2 = None  # type: ignore
 
-        with pytest.raises(ValueError, match="One or more quote batches failed to fetch"):
+        with pytest.raises(RuntimeError, match="Failed fetching quote batches: Batch 1 is None"):
+            combine_batch_results([batch1, batch2])  # type: ignore
+
+    def test_combine_batch_results_with_exception(self, sample_quotes_df):
+        """Test that combine_batch_results raises RuntimeError with exception details when a batch is an Exception."""
+        batch1 = sample_quotes_df.iloc[0:2]
+        test_error = RuntimeError("Test API Error")
+        batch2 = test_error
+
+        with pytest.raises(RuntimeError, match=f"Failed fetching quote batches: Batch 1: {test_error}"):
             combine_batch_results([batch1, batch2])  # type: ignore
 
 

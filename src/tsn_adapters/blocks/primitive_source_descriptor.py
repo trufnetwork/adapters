@@ -1,7 +1,3 @@
-"""
-This file can't import any non standard library, as it's executed in a prefect agent.
-"""
-
 from abc import ABC, abstractmethod
 from typing import cast
 

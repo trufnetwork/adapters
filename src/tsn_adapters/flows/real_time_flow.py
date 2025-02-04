@@ -129,14 +129,15 @@ def combine_batch_results(quotes_batches: list[DataFrame[BatchQuoteShort]]) -> D
         ValueError: If any batch in quotes_batches is None, indicating a failed API call
         RuntimeError: If propagating an API error from the FMP block
     """
-    # Check for failed batches
-    if any(batch is None for batch in quotes_batches):
-        # If any batch is None due to a RuntimeError, propagate it
-        for batch in quotes_batches:
-            if isinstance(batch, RuntimeError):
-                raise batch
-        # Otherwise, raise a ValueError with a descriptive message
-        raise ValueError("One or more quote batches failed to fetch. Cannot proceed with partial data.")
+    errors = []
+    for i, batch in enumerate(quotes_batches):
+        if isinstance(batch, Exception):
+            errors.append(f"Batch {i}: {batch}")
+        elif batch is None:
+            errors.append(f"Batch {i} is None")
+    if errors:
+        error_msg = "Failed fetching quote batches: " + "; ".join(errors)
+        raise RuntimeError(error_msg)
 
     # At this point all batches are valid DataFrames
     return DataFrame[BatchQuoteShort](pd.concat(quotes_batches, ignore_index=True))
@@ -163,13 +164,11 @@ def process_data(
     logger = get_run_logger()
     logger.info("Processing real-time market data")
 
-    # If quotes_df is None (API error), raise an error
-    if quotes_df is None:
-        # If quotes_df is None due to a RuntimeError, propagate it
-        if isinstance(quotes_df, RuntimeError):
-            raise quotes_df
-        # Otherwise, raise a ValueError with a descriptive message
-        raise ValueError("Cannot process data: quotes DataFrame is None due to failed API call")
+    # If quotes_df is None or an Exception, raise an error with details
+    if quotes_df is None or isinstance(quotes_df, Exception):
+        error_msg = f"Cannot process data: quotes DataFrame is {quotes_df}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
 
     # Create mapping from source_id to stream_id
     id_mapping = dict(zip(descriptor_df["source_id"], descriptor_df["stream_id"]))
@@ -221,8 +220,8 @@ def real_time_flow(
     fetch = fetch_task if fetch_task is not None else fetch_quotes_for_batch
 
     try:
-        # Fetch quotes for each batch using task mapping
-        quotes_batches = fetch.map(unmapped(fmp_block), batches)
+        # Fetch quotes for each batch using task mapping with keyword arguments
+        quotes_batches = fetch.map(fmp_block=unmapped(fmp_block), symbols_batch=batches)  # type: ignore
 
         # Combine all batch results
         combined_data = combine_batch_results(quotes_batches=quotes_batches)
