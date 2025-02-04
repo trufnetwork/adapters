@@ -263,7 +263,7 @@ class TestQuoteConversion:
         assert_tn_data_schema(result)
         assert len(result) == expected_length
         if expected_length:
-            assert all(result["date"] == fixed_timestamp)
+            assert all(result["date"] == str(fixed_timestamp))
 
 
 if __name__ == "__main__":

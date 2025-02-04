@@ -84,7 +84,7 @@ def convert_quotes_to_tn_data(
 
     # Set the timestamp
     current_timestamp = timestamp or int(pd.Timestamp.now().timestamp())
-    result_df["date"] = current_timestamp
+    result_df["date"] = current_timestamp  # Keep as numeric for batch_insert_unix_tn_records
 
     # Use price as the value, converting to string as required by TnRecordModel
     result_df["value"] = result_df["price"].astype(str)
