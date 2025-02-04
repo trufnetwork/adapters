@@ -15,7 +15,7 @@ class TnRecordModel(pa.DataFrameModel):
     Schema for TN records
     """
 
-    date: Series[str]
+    date: Series[str]  # A string here to support both date formats and unix timestamps (seconds)
     value: Series[str]  # Can't use decimal.Decimal in series
 
     class Config(pa.DataFrameModel.Config):
