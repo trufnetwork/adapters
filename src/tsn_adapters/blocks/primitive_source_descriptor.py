@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from io import BytesIO
 from typing import cast
 
 import pandas as pd
@@ -12,6 +13,7 @@ from prefect_aws import S3Bucket
 from pydantic import ConfigDict
 
 from tsn_adapters.blocks.github_access import GithubAccess
+from ..utils.deroutine import deroutine
 
 
 class PrimitiveSourceDataModel(DataFrameModel):
@@ -89,8 +91,10 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
         try:
-            raw_df = pd.read_csv(self.file_path, compression="gzip")
-            return DataFrame[PrimitiveSourceDataModel](raw_df)
+            file_content = deroutine( self.s3_bucket.read_path(self.file_path) )
+            buffer = BytesIO(file_content)
+            df = pd.read_csv(buffer, compression="gzip", encoding="utf-8")
+            return DataFrame[PrimitiveSourceDataModel](df)
         except Exception as e:
             self.logger.error(f"Error reading file {self.file_path}: {e}")
             empty_df = pd.DataFrame(columns=list(PrimitiveSourceDataModel.__fields__.keys()))
