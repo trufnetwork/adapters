@@ -11,6 +11,7 @@ from prefect.blocks.core import Block
 from prefect.logging import get_run_logger
 from prefect_aws import S3Bucket
 from pydantic import ConfigDict
+import gzip
 
 from tsn_adapters.blocks.github_access import GithubAccess
 from ..utils.deroutine import deroutine
@@ -30,6 +31,7 @@ class PrimitiveSourceDataModel(DataFrameModel):
 Blocks that describe a source of data
 """
 
+
 class PrimitiveSourcesDescriptorBlock(Block, ABC):
     """
     PrimitiveSourcesDescriptor is a block that describes a source of data.
@@ -42,8 +44,6 @@ class PrimitiveSourcesDescriptorBlock(Block, ABC):
     @abstractmethod
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
         pass
-
-
 
 
 class UrlPrimitiveSourcesDescriptor(PrimitiveSourcesDescriptorBlock):
@@ -70,8 +70,9 @@ Writable blocks
 
 Blocks that describe a source of data that can be written to
 """
-class WritableSourceDescriptorBlock(PrimitiveSourcesDescriptorBlock):
 
+
+class WritableSourceDescriptorBlock(PrimitiveSourcesDescriptorBlock):
     @abstractmethod
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
         pass
@@ -91,9 +92,17 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
         try:
-            file_content = deroutine( self.s3_bucket.read_path(self.file_path) )
+            file_content = deroutine(self.s3_bucket.read_path(self.file_path))
             buffer = BytesIO(file_content)
-            df = pd.read_csv(buffer, compression="gzip", encoding="utf-8")
+            df = pd.read_csv(
+                buffer,
+                compression="gzip",
+                encoding="utf-8",
+                dtype={"stream_id": str, "source_id": str, "source_type": str},
+                keep_default_na=False,
+                na_values=[],
+            )
+            df.iloc[27840:27850]
             return DataFrame[PrimitiveSourceDataModel](df)
         except Exception as e:
             self.logger.error(f"Error reading file {self.file_path}: {e}")
@@ -101,10 +110,13 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
             return cast(DataFrame[PrimitiveSourceDataModel], empty_df)
 
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
+        csv_bytes = descriptor.to_csv(index=False, encoding="utf-8").encode("utf-8")
+        compressed_bytes = gzip.compress(csv_bytes)
         self.s3_bucket.write_path(
             path=self.file_path,
-            content=descriptor.to_csv(index=False, encoding="utf-8", compression="gzip").encode("utf-8"),
+            content=compressed_bytes,
         )
+
 
 # --- Top Level Task Functions ---
 @task(retries=3, retry_delay_seconds=10)
