@@ -7,7 +7,7 @@ from typing import Generic, TypeVar
 
 from pandera.typing import DataFrame
 
-from ..trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 
 T = TypeVar("T")  # For input data types
 

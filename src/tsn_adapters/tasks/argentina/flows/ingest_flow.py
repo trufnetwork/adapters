@@ -15,7 +15,7 @@ from prefect import flow, transactions
 from prefect.artifacts import create_markdown_artifact
 from prefect_aws import S3Bucket
 
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel, split_data_row
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.target import create_trufnetwork_components
 from tsn_adapters.tasks.argentina.task_wrappers import (
@@ -81,9 +81,7 @@ class IngestFlow(ArgentinaFlowController):
         }
 
         # Create transformer
-        transformer = task_create_transformer(
-            stream_id_map=stream_id_map
-        )
+        transformer = task_create_transformer(stream_id_map=stream_id_map)
 
         # Step 2: Determine what data to fetch
         self.logger.info("Determining what data to fetch...")

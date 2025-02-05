@@ -6,7 +6,6 @@ from prefect_aws import S3Bucket
 from pydantic import BaseModel
 
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaDataItem
-from tsn_adapters.tasks.argentina.models.sepa.website_item import SepaWebsiteDataItem
 from tsn_adapters.utils import deroutine
 
 
@@ -15,7 +14,6 @@ class SepaS3RawDataItem(SepaDataItem, BaseModel):
 
     key: str
     block: S3Bucket
-
 
     @classmethod
     def create(cls, block: S3Bucket, key: str) -> "SepaS3RawDataItem":

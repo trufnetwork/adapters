@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import gzip
 from io import BytesIO
 from typing import cast
 
@@ -11,10 +12,9 @@ from prefect.blocks.core import Block
 from prefect.logging import get_run_logger
 from prefect_aws import S3Bucket
 from pydantic import ConfigDict
-import gzip
 
 from tsn_adapters.blocks.github_access import GithubAccess
-from ..utils.deroutine import deroutine
+from tsn_adapters.utils.deroutine import deroutine
 
 
 class PrimitiveSourceDataModel(DataFrameModel):

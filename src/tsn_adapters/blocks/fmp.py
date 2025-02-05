@@ -17,6 +17,7 @@ class ActiveTicker(DataFrameModel):
         strict = "filter"
         coerce = True
 
+
 class BatchQuoteShort(DataFrameModel):
     symbol: Series[str]
     price: Series[float]

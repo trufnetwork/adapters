@@ -5,9 +5,8 @@ This module contains functions for aggregating product prices by category from t
 SEPA dataset.
 """
 
-
 from tsn_adapters.tasks.argentina.aggregate.uncategorized import get_uncategorized_products
-from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, AvgPriceDF, CategoryMapDF, SepaDF, UncategorizedDF
+from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, AvgPriceDF, CategoryMapDF, UncategorizedDF
 from tsn_adapters.utils.logging import get_logger_safe
 
 logger = get_logger_safe(__name__)
