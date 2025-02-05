@@ -1,14 +1,14 @@
-import io
-import gzip
 import logging
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-import pytest
-from prefect_aws import S3Bucket
 from pandera.typing import DataFrame
-from tsn_adapters.blocks.primitive_source_descriptor import S3SourceDescriptor, PrimitiveSourceDataModel
+from prefect_aws import S3Bucket
+import pytest
+
+from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, S3SourceDescriptor
 from tsn_adapters.utils.deroutine import deroutine
+
 
 @pytest.fixture
 def mock_logger():
@@ -48,20 +48,20 @@ def fake_s3_bucket():
 def sample_dataframe():
     # Create a sample DataFrame matching PrimitiveSourceDataModel schema
     data = {
-        'stream_id': ['stream1', 'stream2', 'stream3'],
+        "stream_id": ["stream1", "stream2", "stream3"],
         # we add na, because we want to ensure it is not treated as NaN
         # as we had in a previous bug
-        'source_id': ['src1', 'src2', 'NA'],
-        'source_type': ['type1', 'type2', 'type3'],
+        "source_id": ["src1", "src2", "NA"],
+        "source_type": ["type1", "type2", "type3"],
     }
     return DataFrame[PrimitiveSourceDataModel](data)
 
 
 def test_set_and_get_descriptor(fake_s3_bucket, sample_dataframe, mock_logger):
     # Mock the get_run_logger to avoid Prefect context issues
-    with patch('tsn_adapters.blocks.primitive_source_descriptor.get_run_logger', return_value=mock_logger):
+    with patch("tsn_adapters.blocks.primitive_source_descriptor.get_run_logger", return_value=mock_logger):
         # Initialize S3SourceDescriptor with the fake S3 bucket and a dummy file path
-        descriptor = S3SourceDescriptor(s3_bucket=fake_s3_bucket, file_path='dummy_path.csv.gz')
+        descriptor = S3SourceDescriptor(s3_bucket=fake_s3_bucket, file_path="dummy_path.csv.gz")
 
         # Write the sample DataFrame using set_sources
         descriptor.set_sources(sample_dataframe)
@@ -77,5 +77,5 @@ def test_set_and_get_descriptor(fake_s3_bucket, sample_dataframe, mock_logger):
         pd.testing.assert_frame_equal(sample_dataframe.reset_index(drop=True), df_result.reset_index(drop=True))
 
 
-if __name__ == '__main__':
-    pytest.main([__file__]) 
+if __name__ == "__main__":
+    pytest.main([__file__])
