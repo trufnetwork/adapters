@@ -1,6 +1,8 @@
 import os
-import pytest
+
 from pydantic import SecretStr
+import pytest
+
 from tsn_adapters.blocks.fmp import FMPBlock
 
 
@@ -30,9 +32,10 @@ def test_get_batch_quote(fmp_block):
     df = fmp_block.get_batch_quote(symbols)
     # Ensuring that we received batch quotes for the provided symbols
     assert df is not None, "Expected non-None result"
-    assert len(df) > 0, "Expected non-empty batch quote result" 
+    assert len(df) > 0, "Expected non-empty batch quote result"
     print(f"Batch quote for {symbols}:")
     print(df)
+
 
 if __name__ == "__main__":
     # run pytest with verbose output and show prints by disabling output capturing

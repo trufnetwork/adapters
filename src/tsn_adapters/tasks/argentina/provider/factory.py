@@ -20,4 +20,3 @@ def create_sepa_processed_provider(block: S3Bucket) -> IProviderGetter[DateStr, 
         IProviderGetter: The provider instance
     """
     return ProcessedDataProvider(s3_block=block)
-

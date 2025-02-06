@@ -3,14 +3,13 @@ Base provider classes for Argentina SEPA data.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 import io
 import re
-from threading import Thread
-from typing import Generator, Generic, Optional, TypeVar
+from typing import Generic, TypeVar
 
 import pandas as pd
 from pandas import DataFrame as PandasDataFrame
-from pandera.typing import DataFrame
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.base_types import DateStr
@@ -102,13 +101,13 @@ class SepaS3BaseProvider(ABC, Generic[T]):
 
     def create_reader(self, file_key: str) -> Generator[bytes, None, None]:
         """Create a lazy reader for a file in S3.
-        
+
         This method returns a buffered reader that only downloads the data
         when it's actually read, helping with memory efficiency for large files.
-        
+
         Args:
             file_key: The S3 key of the file to read
-            
+
         Returns:
             A buffered reader object that can be used to read the file contents
         """
