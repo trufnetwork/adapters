@@ -6,11 +6,12 @@ integration tests for the complete flow, using mock objects to avoid
 actual network calls.
 """
 
+from typing import Optional
+
 import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import SecretStr
 import pytest
-from trufnetwork_sdk_py.client import BatchInsertResults
 
 from tsn_adapters.blocks.fmp import BatchQuoteShort, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import (
@@ -19,7 +20,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 )
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
-from tsn_adapters.flows.real_time_flow import (
+from tsn_adapters.flows.fmp.real_time_flow import (
     batch_symbols,
     combine_batch_results,
     convert_quotes_to_tn_data,
@@ -41,6 +42,10 @@ def assert_tn_data_schema(df: DataFrame):
 
 # --- Fixtures and Test Classes ---
 
+@pytest.fixture(scope="session", autouse=True)
+def include_prefect_in_all_tests(prefect_test_fixture):
+    """Include Prefect test harness in all tests."""
+    yield prefect_test_fixture
 
 @pytest.fixture
 def sample_descriptor_df() -> DataFrame[PrimitiveSourceDataModel]:
@@ -99,10 +104,10 @@ class FakeTNAccessBlock(TNAccessBlock):
 
     def batch_insert_unix_tn_records(
         self, records: DataFrame[TnDataRowModel], data_provider: str | None = None
-    ) -> BatchInsertResults | None:
+    ) -> Optional[str]:
         """Track inserted records and return a fake BatchInsertResults."""
         self.inserted_records.append(records)
-        return ["fake_tx_hash"]  # type: ignore # BatchInsertResults is just a type alias for list[str]
+        return "fake_tx_hash"
 
     def wait_for_tx(self, tx_hash: str) -> None:
         """Mock waiting for transaction - do nothing."""
@@ -140,7 +145,7 @@ class TestRealTimeFlow:
         assert_tn_data_schema(inserted_df)
         assert "stream_aapl" in inserted_df["stream_id"].values
 
-    @pytest.mark.timeout(5)
+    @pytest.mark.timeout(5, func_only=True)
     def test_real_time_flow_api_error(self, error_fmp_block):
         """Test the flow's behavior when FMP API calls fail."""
         # Test direct error from the FMP block

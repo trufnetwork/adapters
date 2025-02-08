@@ -30,7 +30,7 @@ def example_flow():
     return logger
 
 
-def test_get_logger_safe_inside_flow():
+def test_get_logger_safe_inside_flow(prefect_test_fixture):
     """Test that get_logger_safe returns a Prefect logger inside a flow."""
     logger = example_flow()
     # The exact type might vary by Prefect version, but it should not be a standard logger
