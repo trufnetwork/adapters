@@ -175,8 +175,6 @@ def fetch_historical_data(
     """
     logger = get_logger_safe(__name__)
     try:
-        # Use task caching and concurrency control for rate limiting
-        rate_limit("fmp_api")
         df = fmp_block.get_intraday_data(symbol, start_date=start_date, end_date=end_date)
         logger.info(f"Fetched {len(df)} historical records for {symbol}")
         return df
@@ -296,14 +294,14 @@ def run_ticker_pipeline(
             if len(records_to_insert) > BATCH_SIZE:
                 validated_df = DataFrame[TnDataRowModel](records_to_insert.iloc[0:BATCH_SIZE])
                 records_to_insert = records_to_insert.iloc[BATCH_SIZE:]
-                tn_block.split_and_insert_records(records=validated_df, wait=False)
+                tn_block.split_and_insert_records_unix(records=validated_df, wait=False)
 
             logger.info("Completed ticker processing pipeline")
     
         # Process remaining records
         if len(records_to_insert) > 0:
             validated_df = DataFrame[TnDataRowModel](records_to_insert)
-            tn_block.split_and_insert_records(records=validated_df, wait=False)
+            tn_block.split_and_insert_records_unix(records=validated_df, wait=False)
 
     except Exception as e:
         logger.error(f"Pipeline execution failed: {e}")

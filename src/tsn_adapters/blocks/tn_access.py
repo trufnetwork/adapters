@@ -348,7 +348,7 @@ class TNAccessBlock(Block):
         with concurrency("tn-write", occupy=1):
             return self.get_client().destroy_stream(stream_id, wait)
 
-    def split_and_insert_records(
+    def split_and_insert_records_unix(
         self,
         records: DataFrame[TnDataRowModel],
         data_provider: Optional[str] = None,
@@ -580,6 +580,17 @@ def task_batch_insert_unix_tn_records(
         Transaction hash if successful, None otherwise
     """
     return block.batch_insert_unix_tn_records(records, data_provider)
+
+
+@task()
+def task_split_and_insert_records_unix(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    data_provider: Optional[str] = None,
+    max_batch_size: int = 50000,
+    wait: bool = True,
+) -> Optional[SplitInsertResults]:
+    return block.split_and_insert_records_unix(records, data_provider, max_batch_size, wait)
 
 
 @task(retries=5, retry_delay_seconds=10)

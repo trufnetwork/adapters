@@ -93,7 +93,7 @@ class TestSplitAndInsertRecords:
     def test_split_and_insert_small_batches(self, tn_block: TNAccessBlock, sample_records: DataFrame[TnDataRowModel]):
         """Test splitting and inserting records with small batch size."""
         # Split into very small batches (2 records each)
-        results = tn_block.split_and_insert_records(sample_records, max_batch_size=2)
+        results = tn_block.split_and_insert_records_unix(sample_records, max_batch_size=2)
 
         assert results is not None
         assert len(results["success_tx_hashes"]) > 0
@@ -112,7 +112,7 @@ class TestSplitAndInsertRecords:
     def test_split_and_insert_single_batch(self, tn_block: TNAccessBlock, sample_records: DataFrame[TnDataRowModel]):
         """Test inserting all records in a single batch."""
         # Use batch size larger than total records
-        results = tn_block.split_and_insert_records(sample_records, max_batch_size=100)
+        results = tn_block.split_and_insert_records_unix(sample_records, max_batch_size=100)
 
         assert results is not None
         assert len(results["success_tx_hashes"]) == 1  # Should be single batch
@@ -131,7 +131,7 @@ class TestSplitAndInsertRecords:
     def test_split_and_insert_empty_records(self, tn_block: TNAccessBlock):
         """Test handling of empty records DataFrame."""
         empty_records = DataFrame[TnDataRowModel](pd.DataFrame(columns=["stream_id", "date", "value"]))
-        results = tn_block.split_and_insert_records(empty_records)
+        results = tn_block.split_and_insert_records_unix(empty_records)
 
         assert results is None  # Should return None for empty records
 
@@ -150,7 +150,7 @@ class TestSplitAndInsertRecords:
         mixed_records = pd.concat([sample_records, invalid_records])
         mixed_records = DataFrame[TnDataRowModel](mixed_records)
 
-        results = tn_block.split_and_insert_records(mixed_records, max_batch_size=5)
+        results = tn_block.split_and_insert_records_unix(mixed_records, max_batch_size=5)
 
         assert results is not None
         assert len(results["success_tx_hashes"]) > 0

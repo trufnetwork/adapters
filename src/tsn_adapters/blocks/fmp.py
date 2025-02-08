@@ -7,6 +7,7 @@ import pandera as pa
 from pandera import DataFrameModel
 from pandera.typing import DataFrame, Series
 from prefect.blocks.core import Block
+from prefect.concurrency.sync import rate_limit
 from pydantic import Field, SecretStr
 
 
@@ -50,6 +51,7 @@ class FMPBlock(Block):
     def _get_jsonparsed_data(self, path: str) -> dict:
         separator = "&" if "?" in path else "?"
         url = self.base_url + path + separator + "apikey=" + self.api_key.get_secret_value()
+        rate_limit('fmp_api')
         response = urlopen(url, cafile=certifi.where())
         data = response.read().decode("utf-8")
         return json.loads(data)

@@ -359,13 +359,14 @@ class TestHistoricalFlowAdvanced:
         )
 
         # Verify that data was processed in batches
-        assert len(tn_block.inserted_records) == 2  # Should have 2 batches (2 and 3)
+        assert len(tn_block.inserted_records) == 3  # Should have 3 batches (2, 2, 1)
         total_records = sum(len(df) for df in tn_block.inserted_records)
         assert total_records == 5  # All records should be processed
 
         # Verify each batch size
         assert len(tn_block.inserted_records[0]) == TEST_BATCH_SIZE  # First batch
-        assert len(tn_block.inserted_records[1]) == 3  # Second batch (remainder)
+        assert len(tn_block.inserted_records[1]) == TEST_BATCH_SIZE  # Second batch
+        assert len(tn_block.inserted_records[2]) == 1  # Third batch (remainder)
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(15, func_only=True)
