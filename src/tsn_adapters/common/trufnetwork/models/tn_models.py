@@ -2,12 +2,18 @@ from typing import TypeVar
 
 import pandera as pa
 from pandera.typing import DataFrame, Series
+from pydantic import BaseModel
 
 from ....tasks.argentina.base_types import StreamId
 
 # Create type variables for the models
 T = TypeVar("T", bound="TnRecordModel")
 S = TypeVar("S", bound="TnDataRowModel")
+
+
+class TnRecord(BaseModel):
+    date: str
+    value: str
 
 
 class TnRecordModel(pa.DataFrameModel):

@@ -10,7 +10,6 @@ from typing import cast
 import pandas as pd
 from prefect.concurrency.sync import concurrency
 
-from tsn_adapters.tasks.argentina.models.sepa import SepaDataItem
 from tsn_adapters.tasks.argentina.types import DateStr, SepaDF
 from tsn_adapters.tasks.argentina.utils.processors import SepaDirectoryProcessor
 
@@ -35,7 +34,7 @@ def process_sepa_zip(
     Process SEPA data from a data item.
 
     Args:
-        
+
         source_name: Name of the source (for error messages)
         reported_date: The date reported by the source
 
