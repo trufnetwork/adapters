@@ -28,6 +28,7 @@ class PrimitiveSourceDataModel(DataFrameModel):
 Blocks that describe a source of data
 """
 
+
 class PrimitiveSourcesDescriptorBlock(Block, ABC):
     """
     PrimitiveSourcesDescriptor is a block that describes a source of data.
@@ -40,8 +41,6 @@ class PrimitiveSourcesDescriptorBlock(Block, ABC):
     @abstractmethod
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
         pass
-
-
 
 
 class UrlPrimitiveSourcesDescriptor(PrimitiveSourcesDescriptorBlock):
@@ -68,8 +67,9 @@ Writable blocks
 
 Blocks that describe a source of data that can be written to
 """
-class WritableSourceDescriptorBlock(PrimitiveSourcesDescriptorBlock):
 
+
+class WritableSourceDescriptorBlock(PrimitiveSourcesDescriptorBlock):
     @abstractmethod
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
         pass
@@ -101,6 +101,7 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
             path=self.file_path,
             content=descriptor.to_csv(index=False, encoding="utf-8", compression="gzip").encode("utf-8"),
         )
+
 
 # --- Top Level Task Functions ---
 @task(retries=3, retry_delay_seconds=10)
