@@ -17,7 +17,7 @@ from pydantic import SecretStr
 import pytest
 from trufnetwork_sdk_py.client import TNClient
 
-from tsn_adapters.blocks.fmp import FMPBlock, IntradayData
+from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourceDataModel,
     PrimitiveSourcesDescriptorBlock,
@@ -25,7 +25,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.flows.fmp.historical_flow import (
-    convert_intraday_to_tn_df,
+    convert_eod_to_tn_df,
     fetch_historical_data,
     get_earliest_data_date,
     historical_flow,
@@ -38,11 +38,11 @@ pytestmark = pytest.mark.asyncio
 
 EXPECTED_TN_DATA_COLUMNS = {"stream_id", "date", "value"}
 
+
 @pytest.fixture(scope="session", autouse=True)
-def include_prefect_in_all_tests():
+def include_prefect_in_all_tests(prefect_test_fixture):
     """Include Prefect test harness in all tests."""
-    with prefect_test_harness():
-        yield  # This fixture is only used to ensure the test harness is active
+    yield prefect_test_fixture
 
 def assert_tn_data_schema(df: pd.DataFrame):
     """Helper to assert that a DataFrame has the TN data schema."""
@@ -53,45 +53,39 @@ def assert_tn_data_schema(df: pd.DataFrame):
 
 
 @pytest.fixture
-def sample_intraday_data() -> DataFrame[IntradayData]:
-    """Create a sample intraday data DataFrame."""
+def sample_eod_data() -> DataFrame[EODData]:
+    """Create a sample EOD data DataFrame."""
     data = {
-        "date": ["2024-01-01 10:00:00", "2024-01-01 11:00:00"],
-        "open": [150.0, 151.0],
-        "high": [152.0, 153.0],
-        "low": [149.0, 150.0],
-        "close": [151.0, 152.0],
+        "date": ["2024-01-01", "2024-01-02"],
+        "symbol": ["AAPL", "AAPL"],
+        "price": [151.0, 152.0],
         "volume": [1000000, 1100000],
     }
-    return DataFrame[IntradayData](pd.DataFrame(data))
+    return DataFrame[EODData](pd.DataFrame(data))
 
 
 class FakeFMPBlock(FMPBlock):
     """Mock FMPBlock that returns predefined data."""
 
-    def get_intraday_data(
+    def get_historical_eod_data(
         self, symbol: str, start_date: str | None = None, end_date: str | None = None
-    ) -> DataFrame[IntradayData]:
-        """Return fake intraday data."""
+    ) -> DataFrame[EODData]:
+        """Return fake EOD data."""
         if symbol == "AAPL":
             data = {
-                "date": ["2024-01-01 10:00:00", "2024-01-01 11:00:00"],
-                "open": [150.0, 151.0],
-                "high": [152.0, 153.0],
-                "low": [149.0, 150.0],
-                "close": [151.0, 152.0],
+                "date": ["2024-01-01", "2024-01-02"],
+                "symbol": ["AAPL", "AAPL"],
+                "price": [151.0, 152.0],
                 "volume": [1000000, 1100000],
             }
-            return DataFrame[IntradayData](pd.DataFrame(data))
+            return DataFrame[EODData](pd.DataFrame(data))
         # Return empty DataFrame with correct columns
-        return DataFrame[IntradayData](
+        return DataFrame[EODData](
             pd.DataFrame(
                 {
                     "date": [],
-                    "open": [],
-                    "high": [],
-                    "low": [],
-                    "close": [],
+                    "symbol": [],
+                    "price": [],
                     "volume": [],
                 }
             )
@@ -144,8 +138,8 @@ class FakeTNAccessBlock(TNAccessBlock):
         return "fake_tx_hash"
 
     def wait_for_tx(self, tx_hash: str) -> None:
-        """Mock waiting for transaction with a delay."""
-        time.sleep(0.001)
+        """Mock waiting."""
+        pass
 
     def get_earliest_date(self, stream_id: str, data_provider: str | None = None) -> datetime.datetime | None:
         """Mock getting earliest date, raising StreamNotFoundError for unknown streams."""
@@ -163,9 +157,9 @@ class FakeTNAccessBlock(TNAccessBlock):
 class ErrorFMPBlock(FMPBlock):
     """Mock FMPBlock that simulates API errors."""
 
-    def get_intraday_data(
+    def get_historical_eod_data(
         self, symbol: str, start_date: str | None = None, end_date: str | None = None
-    ) -> DataFrame[IntradayData]:
+    ) -> DataFrame[EODData]:
         """Simulate API error."""
         raise RuntimeError("API Error")
 
@@ -236,7 +230,7 @@ class TestDataProcessing:
             get_earliest_data_date(tn_block=tn, stream_id="unknown")
 
     @pytest.mark.timeout(5, func_only=True)
-    def test_fetch_historical_data_success(self, sample_intraday_data):
+    def test_fetch_historical_data_success(self, sample_eod_data):
         """Test successful historical data fetching."""
         fmp_block = FakeFMPBlock(api_key=SecretStr("fake"))
         start_date = "2024-01-01"
@@ -250,7 +244,7 @@ class TestDataProcessing:
         )
         assert isinstance(result, DataFrame)
         assert len(result) > 0
-        assert all(col in result.columns for col in ["date", "open", "high", "low", "close", "volume"])
+        assert all(col in result.columns for col in ["date", "symbol", "price", "volume"])
 
     @pytest.mark.timeout(5, func_only=True)
     def test_fetch_historical_data_empty(self):
@@ -269,13 +263,13 @@ class TestDataProcessing:
         assert len(result) == 0
 
     @pytest.mark.timeout(5, func_only=True)
-    def test_convert_intraday_to_tn_data(self, sample_intraday_data):
-        """Test conversion from intraday data to TN format."""
-        result = convert_intraday_to_tn_df(sample_intraday_data, "stream_aapl")
+    def test_convert_eod_to_tn_data(self, sample_eod_data):
+        """Test conversion from EOD data to TN format."""
+        result = convert_eod_to_tn_df(sample_eod_data, "stream_aapl")
         # Convert list of records to DataFrame
         result_df = pd.DataFrame(result)
         assert_tn_data_schema(result_df)
-        assert len(result) == len(sample_intraday_data)
+        assert len(result) == len(sample_eod_data)
         # Check stream_id and value directly from DataFrame
         assert all(result_df["stream_id"] == "stream_aapl")
         assert all(result_df["value"].astype(float) > 0)  # Values should be positive prices
@@ -317,19 +311,17 @@ class TestHistoricalFlowAdvanced:
 
         # Create a mock FMP block that returns a small dataset
         class SmallBatchFMPBlock(FakeFMPBlock):
-            def get_intraday_data(
+            def get_historical_eod_data(
                 self, symbol: str, start_date: str | None = None, end_date: str | None = None
-            ) -> DataFrame[IntradayData]:
+            ) -> DataFrame[EODData]:
                 """Return a small dataset to test batching."""
                 if symbol != "AAPL":
-                    return DataFrame[IntradayData](
+                    return DataFrame[EODData](
                         pd.DataFrame(
                             {
                                 "date": [],
-                                "open": [],
-                                "high": [],
-                                "low": [],
-                                "close": [],
+                                "symbol": [],
+                                "price": [],
                                 "volume": [],
                             }
                         )
@@ -339,13 +331,11 @@ class TestHistoricalFlowAdvanced:
                 dates = pd.date_range("2023-01-01", periods=5, freq="h")  # Use 'h' instead of 'H'
                 data = {
                     "date": dates,
-                    "open": [150.0] * len(dates),
-                    "high": [152.0] * len(dates),
-                    "low": [149.0] * len(dates),
-                    "close": [151.0] * len(dates),
+                    "symbol": ["AAPL"] * len(dates),
+                    "price": [150.0] * len(dates),
                     "volume": [1000000] * len(dates),
                 }
-                return DataFrame[IntradayData](pd.DataFrame(data))
+                return DataFrame[EODData](pd.DataFrame(data))
 
         fmp_block = SmallBatchFMPBlock(api_key=SecretStr("fake"))
         psd_block = FakePrimitiveSourcesDescriptorBlock()
@@ -359,58 +349,13 @@ class TestHistoricalFlowAdvanced:
         )
 
         # Verify that data was processed in batches
-        assert len(tn_block.inserted_records) == 3  # Should have 3 batches (2, 2, 1)
+        assert len(tn_block.inserted_records) == 1  # Should have 1 batch with all records
         total_records = sum(len(df) for df in tn_block.inserted_records)
         assert total_records == 5  # All records should be processed
 
-        # Verify each batch size
-        assert len(tn_block.inserted_records[0]) == TEST_BATCH_SIZE  # First batch
-        assert len(tn_block.inserted_records[1]) == TEST_BATCH_SIZE  # Second batch
-        assert len(tn_block.inserted_records[2]) == 1  # Third batch (remainder)
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(15, func_only=True)
-    async def test_historical_flow_rate_limiting(self):
-        """Test that the flow respects rate limiting for API calls."""
-        import time
-
-        class RateLimitedFMPBlock(FakeFMPBlock):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.call_times = []
-
-            def get_intraday_data(
-                self, symbol: str, start_date: str | None = None, end_date: str | None = None
-            ) -> DataFrame[IntradayData]:
-                """Track API call times for rate limit verification."""
-                self.call_times.append(time.time())
-                return super().get_intraday_data(symbol, start_date, end_date)
-
-        # Create a descriptor block with multiple tickers
-        class MultiTickerDescriptorBlock(PrimitiveSourcesDescriptorBlock):
-            def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
-                data = {
-                    "source_id": ["AAPL", "GOOGL", "MSFT"],
-                    "stream_id": ["stream_aapl", "stream_googl", "stream_msft"],
-                    "source_type": ["stock", "stock", "stock"],
-                }
-                return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
-
-        fmp_block = RateLimitedFMPBlock(api_key=SecretStr("fake"))
-        psd_block = MultiTickerDescriptorBlock()
-        tn_block = FakeTNAccessBlock()
-
-        await historical_flow(
-            fmp_block=fmp_block,
-            psd_block=psd_block,
-            tn_block=tn_block,
-            min_fetch_date=datetime.datetime(2023, 1, 1),
-        )
-
-        # Verify rate limiting
-        call_intervals = [t2 - t1 for t1, t2 in zip(fmp_block.call_times, fmp_block.call_times[1:])]
-        # Check that calls are at least 1 second apart (RATE_LIMIT_SECONDS from historical_flow.py)
-        assert all(interval >= 1.0 for interval in call_intervals)
+        # Verify batch size
+        assert len(tn_block.inserted_records[0]) == 5  # All records in one batch
+        assert all(tn_block.inserted_records[0]["stream_id"] == "stream_aapl"), "All records should be from AAPL"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(15, func_only=True)
@@ -439,14 +384,14 @@ class TestHistoricalFlowAdvanced:
                 super().__init__(*args, **kwargs)
                 self.fetch_times = {}  # Track when each symbol's data is fetched
 
-            def get_intraday_data(
+            def get_historical_eod_data(
                 self, symbol: str, start_date: str | None = None, end_date: str | None = None
-            ) -> DataFrame[IntradayData]:
+            ) -> DataFrame[EODData]:
                 """Track when each symbol's data is fetched."""
                 self.fetch_times[symbol] = time.time()
                 # Add a small delay to make timing more obvious
                 time.sleep(0.1)
-                return super().get_intraday_data(symbol, start_date, end_date)
+                return super().get_historical_eod_data(symbol, start_date, end_date)
 
         class TimingTNAccessBlock(FakeTNAccessBlock):
             def __init__(self):
@@ -517,16 +462,13 @@ class TestHistoricalFlowAdvanced:
         This test verifies that:
         1. Records are accumulated until reaching the batch size
         2. Each batch is inserted only after it reaches the target size
-        3. The next batch of data is only fetched after the current batch is successfully inserted
+        3. Records are processed sequentially
         4. Memory pressure is controlled by not accumulating too much data at once
 
         The test uses 7 tickers that each produce 1 record:
         - First 4 records form a complete batch
         - Remaining 3 records form a partial batch
-        - Each batch must be fully processed before moving to the next
         """
-        import time
-
         import tsn_adapters.flows.fmp.historical_flow as flow_module
 
         # Mock a smaller batch size
@@ -543,38 +485,57 @@ class TestHistoricalFlowAdvanced:
             return_value=datetime.datetime(2020, 1, 1),
         )
 
-        class AccumulationFMPBlock(FakeFMPBlock):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.fetch_times = {}  # Track when each symbol was fetched
+        # Create a sequence tracker to monitor execution order
+        class SequenceTracker:
+            def __init__(self):
+                self.sequence = []
+                self._counter = 0
+            
+            def next(self, operation: str) -> int:
+                self._counter += 1
+                self.sequence.append((self._counter, operation))
+                return self._counter
 
-            def get_intraday_data(
+        sequence = SequenceTracker()
+
+        class SequencedFMPBlock(FakeFMPBlock):
+            def __init__(self, sequence_tracker: SequenceTracker, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.sequence = sequence_tracker
+                self.fetch_order = {}
+
+            def get_historical_eod_data(
                 self, symbol: str, start_date: str | None = None, end_date: str | None = None
-            ) -> DataFrame[IntradayData]:
-                """Return single record per symbol and track fetch time."""
-                self.fetch_times[symbol] = time.time()
+            ) -> DataFrame[EODData]:
+                """Return single record per symbol and track fetch sequence."""
+                seq_num = self.sequence.next(f"fetch_{symbol}")
+                self.fetch_order[symbol] = seq_num
                 # Return just one record per symbol
                 data = {
-                    "date": ["2024-01-01 10:00:00"],
-                    "open": [150.0],
-                    "high": [152.0],
-                    "low": [149.0],
-                    "close": [151.0],
+                    "date": ["2024-01-01"],
+                    "symbol": [symbol],
+                    "price": [150.0],
                     "volume": [1000000],
                 }
-                return DataFrame[IntradayData](pd.DataFrame(data))
+                return DataFrame[EODData](pd.DataFrame(data))
 
-        class AccumulationTNAccessBlock(FakeTNAccessBlock):
-            def __init__(self):
+        class SequencedTNAccessBlock(FakeTNAccessBlock):
+            def __init__(self, sequence_tracker: SequenceTracker):
                 super().__init__()
-                self._insert_times = []
-                self._batch_sizes = []
+                self.sequence = sequence_tracker
+                self.insert_order = []
+                self._batch_sizes: list[int] = []
+
+            @property
+            def batch_sizes(self) -> list[int]:
+                return self._batch_sizes
 
             def batch_insert_unix_tn_records(
                 self, records: DataFrame[TnDataRowModel], data_provider: str | None = None
             ) -> Optional[str]:
-                """Track inserted records with timing information."""
-                self._insert_times.append(time.time())
+                """Track inserted records with sequence information."""
+                seq_num = self.sequence.next(f"insert_batch_{len(records)}")
+                self.insert_order.append(seq_num)
                 self._batch_sizes.append(len(records))
                 self._inserted_records.append(records)
                 return "fake_tx_hash"
@@ -582,15 +543,12 @@ class TestHistoricalFlowAdvanced:
             def get_earliest_date(self, stream_id: str, data_provider: str | None = None) -> datetime.datetime:
                 return datetime.datetime(2024, 1, 1)
 
-            def wait_for_tx(self, tx_hash: str) -> None:
-                time.sleep(0.001)
-
-        # Create blocks with tracking
-        fmp_block = AccumulationFMPBlock(api_key=SecretStr("fake"))
-        tn_block = AccumulationTNAccessBlock()
+        # Create blocks with sequence tracking
+        fmp_block = SequencedFMPBlock(sequence_tracker=sequence, api_key=SecretStr("fake"))
+        tn_block = SequencedTNAccessBlock(sequence_tracker=sequence)
 
         # Create a descriptor block with enough tickers to create multiple batches
-        class AccumulationDescriptorBlock(PrimitiveSourcesDescriptorBlock):
+        class SequencedDescriptorBlock(PrimitiveSourcesDescriptorBlock):
             def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
                 # Create 7 tickers - should result in one full batch of 4 and partial batch of 3
                 tickers = [f"TICK{i}" for i in range(7)]
@@ -601,7 +559,7 @@ class TestHistoricalFlowAdvanced:
                 }
                 return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
 
-        psd_block = AccumulationDescriptorBlock()
+        psd_block = SequencedDescriptorBlock()
 
         # Run the flow
         await historical_flow(
@@ -611,46 +569,135 @@ class TestHistoricalFlowAdvanced:
             min_fetch_date=datetime.datetime(2023, 1, 1),
         )
 
-        # Get all the times in order
-        fetch_times = [(symbol, time) for symbol, time in fmp_block.fetch_times.items()]
-        fetch_times.sort(key=lambda x: x[1])  # Sort by time
-        insert_times = tn_block.insert_times
+        # Verify we got the expected number of batches with correct sizes
+        assert tn_block.batch_sizes == [TEST_BATCH_SIZE, 3], "Expected one full batch and one partial batch"
+
+        # Get sequence information
+        all_operations = sequence.sequence
+        
+        # Verify operations are sequential
+        fetch_operations = [(seq, op) for seq, op in all_operations if op.startswith("fetch_")]
+        insert_operations = [(seq, op) for seq, op in all_operations if op.startswith("insert_batch_")]
+        
+        # Verify we have the right number of operations
+        assert len(fetch_operations) == 7, "Should have 7 fetch operations"
+        assert len(insert_operations) == 2, "Should have 2 insert operations"
+        
+        # Verify fetches are sequential
+        for i in range(len(fetch_operations) - 1):
+            curr_seq = fetch_operations[i][0]
+            next_seq = fetch_operations[i + 1][0]
+            assert curr_seq < next_seq, f"Fetch operations should be sequential, but {curr_seq} came before {next_seq}"
+        
+        # Verify first batch insert happens after 4 fetches
+        first_insert_seq = insert_operations[0][0]
+        fetches_before_first_insert = len([seq for seq, _ in fetch_operations if seq < first_insert_seq])
+        assert fetches_before_first_insert == TEST_BATCH_SIZE, "First batch should be inserted after 4 fetches"
+        
+        # Verify second batch insert happens after all fetches
+        second_insert_seq = insert_operations[1][0]
+        fetches_before_second_insert = len([seq for seq, _ in fetch_operations if seq < second_insert_seq])
+        assert fetches_before_second_insert == 7, "Second batch should be inserted after all fetches"
+        
+        # Verify batch sizes are correct
+        assert insert_operations[0][1] == f"insert_batch_{TEST_BATCH_SIZE}", "First batch should have TEST_BATCH_SIZE records"
+        assert insert_operations[1][1] == "insert_batch_3", "Second batch should have 3 records"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(15, func_only=True)
+    async def test_historical_flow_large_fetch(self, monkeypatch, mocker):
+        """
+        Test that the flow correctly handles fetches larger than batch size.
+
+        The flow should:
+        1. Accumulate records until exceeding BATCH_SIZE
+        2. When exceeded, process ALL accumulated records at once via split_and_insert_records_unix
+        3. Start fresh accumulation for next records
+        """
+        import tsn_adapters.flows.fmp.historical_flow as flow_module
+
+        # Mock a smaller batch size
+        TEST_BATCH_SIZE = 3
+        monkeypatch.setattr(flow_module, "BATCH_SIZE", TEST_BATCH_SIZE)
+
+        # Create a mock FMP block that returns a large dataset for one ticker
+        class LargeFetchFMPBlock(FakeFMPBlock):
+            def get_historical_eod_data(
+                self, symbol: str, start_date: str | None = None, end_date: str | None = None
+            ) -> DataFrame[EODData]:
+                """Return a large dataset for TICK0, small for others."""
+                if symbol == "TICK0":
+                    # Generate 8 records (> 2x TEST_BATCH_SIZE)
+                    dates = pd.date_range("2023-01-01", periods=8, freq="h")
+                    data = {
+                        "date": dates,
+                        "symbol": ["TICK0"] * len(dates),
+                        "price": [150.0] * len(dates),
+                        "volume": [1000000] * len(dates),
+                    }
+                    return DataFrame[EODData](pd.DataFrame(data))
+                elif symbol == "TICK1":
+                    # Generate 2 records (< TEST_BATCH_SIZE)
+                    dates = pd.date_range("2023-01-01", periods=2, freq="h")
+                    data = {
+                        "date": dates,
+                        "symbol": ["TICK1"] * len(dates),
+                        "price": [160.0] * len(dates),
+                        "volume": [1100000] * len(dates),
+                    }
+                    return DataFrame[EODData](pd.DataFrame(data))
+                return DataFrame[EODData](
+                    pd.DataFrame({"date": [], "symbol": [], "price": [], "volume": []})
+                )
+
+        # Create a descriptor block with two tickers
+        class LargeFetchDescriptorBlock(PrimitiveSourcesDescriptorBlock):
+            def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
+                data = {
+                    "source_id": ["TICK0", "TICK1"],  # TICK0 will return large dataset
+                    "stream_id": ["stream_tick0", "stream_tick1"],
+                    "source_type": ["stock"] * 2,
+                }
+                return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
+
+        # Mock the tasks with no retries
+        mocker.patch(
+            "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
+            side_effect=fetch_historical_data.with_options(retries=0),
+        )
+        mocker.patch(
+            "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
+            return_value=datetime.datetime(2020, 1, 1),
+        )
+
+        # Create blocks
+        fmp_block = LargeFetchFMPBlock(api_key=SecretStr("fake"))
+        psd_block = LargeFetchDescriptorBlock()
+        tn_block = FakeTNAccessBlock()
+
+        # Run the flow
+        await historical_flow(
+            fmp_block=fmp_block,
+            psd_block=psd_block,
+            tn_block=tn_block,
+            min_fetch_date=datetime.datetime(2023, 1, 1),
+        )
+
+        # Verify batch handling
         batch_sizes = tn_block.batch_sizes
+        assert len(batch_sizes) == 2, "Expected 2 batches: one for TICK0's 8 records, one for TICK1's 2 records"
+        
+        # First batch should contain all TICK0 records (processed when exceeding BATCH_SIZE)
+        assert batch_sizes[0] == 8, "First batch should contain all TICK0 records"
+        assert all(tn_block.inserted_records[0]["stream_id"] == "stream_tick0"), "First batch should be all TICK0"
+        
+        # Second batch should contain TICK1 records (processed at end of pipeline)
+        assert batch_sizes[1] == 2, "Second batch should contain TICK1 records"
+        assert all(tn_block.inserted_records[1]["stream_id"] == "stream_tick1"), "Second batch should be all TICK1"
 
-        # Verify we got the expected number of batches
-        assert len(insert_times) == 2, "Expected exactly two batch insertions"
-        assert batch_sizes == [TEST_BATCH_SIZE, 3], "Expected one full batch and one partial batch"
-
-        # Group fetches by batch
-        first_batch_fetches = fetch_times[:TEST_BATCH_SIZE]  # First 4 fetches
-        second_batch_fetches = fetch_times[TEST_BATCH_SIZE:]  # Remaining 3 fetches
-
-        # Get the timestamps
-        first_batch_fetch_times = [t for _, t in first_batch_fetches]
-        second_batch_fetch_times = [t for _, t in second_batch_fetches]
-        first_batch_insert = insert_times[0]
-        second_batch_insert = insert_times[1]
-
-        # Verify first batch fetches happen before first batch insert
-        for fetch_time in first_batch_fetch_times:
-            assert fetch_time < first_batch_insert, (
-                "First batch fetches should complete before first batch insertion"
-            )
-
-        # Verify second batch fetches happen after first batch insert
-        for fetch_time in second_batch_fetch_times:
-            assert fetch_time > first_batch_insert, (
-                "Second batch fetches should start after first batch insertion"
-            )
-
-        # Verify second batch fetches complete before second batch insert
-        for fetch_time in second_batch_fetch_times:
-            assert fetch_time < second_batch_insert, (
-                "Second batch fetches should complete before second batch insertion"
-            )
-
-        # Verify batches are inserted in sequence
-        assert insert_times[0] < insert_times[1], "Second batch should be inserted after first batch"
+        # Verify total records
+        total_records = sum(batch_sizes)
+        assert total_records == 10, "Expected 10 total records (8 from TICK0 + 2 from TICK1)"
 
 
 if __name__ == "__main__":

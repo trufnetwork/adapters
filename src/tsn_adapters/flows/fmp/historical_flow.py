@@ -17,12 +17,11 @@ from typing import Any, NamedTuple, Optional, TypeGuard, TypeVar, Union, cast
 import pandas as pd
 from pandera.typing import DataFrame
 from prefect import flow, task
-from prefect.concurrency.sync import rate_limit
 from prefect.tasks import task_input_hash
 
-from tsn_adapters.blocks.fmp import FMPBlock, IntradayData
+from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock
+from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records_unix
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
@@ -71,7 +70,7 @@ class TickerSuccess(NamedTuple):
 
     symbol: str
     stream_id: str
-    data: DataFrame[IntradayData]
+    data: DataFrame[EODData]
 
 
 class TickerError(NamedTuple):
@@ -157,9 +156,9 @@ def fetch_historical_data(
     symbol: str,
     start_date: str,
     end_date: str,
-) -> DataFrame[IntradayData]:
+) -> DataFrame[EODData]:
     """
-    Fetch historical intraday data for the given symbol and date range.
+    Fetch historical EOD data for the given symbol and date range.
 
     Args:
         fmp_block: Block for FMP API interactions
@@ -168,14 +167,14 @@ def fetch_historical_data(
         end_date: End date in YYYY-MM-DD format
 
     Returns:
-        DataFrame containing historical intraday data
+        DataFrame containing historical EOD data
 
     Raises:
         FMPDataFetchError: If there's an error fetching data from FMP
     """
     logger = get_logger_safe(__name__)
     try:
-        df = fmp_block.get_intraday_data(symbol, start_date=start_date, end_date=end_date)
+        df = fmp_block.get_historical_eod_data(symbol, start_date=start_date, end_date=end_date)
         logger.info(f"Fetched {len(df)} historical records for {symbol}")
         return df
     except Exception as e:
@@ -183,16 +182,16 @@ def fetch_historical_data(
         raise FMPDataFetchError(f"Failed to fetch data for {symbol}: {e}") from e
 
 
-def convert_intraday_to_tn_df(
-    intraday_df: DataFrame[IntradayData],
+def convert_eod_to_tn_df(
+    eod_df: DataFrame[EODData],
     stream_id: str,
 ) -> DataFrame[TnDataRowModel]:
     """
-    Convert IntradayData DataFrame to TnDataRowModel format.
-    Uses the 'close' price as the value.
+    Convert EODData DataFrame to TnDataRowModel format.
+    Uses the 'price' as the value.
 
     Args:
-        intraday_df: DataFrame containing intraday data
+        eod_df: DataFrame containing EOD data
         stream_id: ID of the stream to associate with the data
 
     Returns:
@@ -201,7 +200,7 @@ def convert_intraday_to_tn_df(
     Raises:
         ValueError: If the conversion fails or validation fails
     """
-    if len(intraday_df) == 0:
+    if len(eod_df) == 0:
         # Return an empty DataFrame of data rows
         return cast(DataFrame[TnDataRowModel], pd.DataFrame())
 
@@ -209,16 +208,16 @@ def convert_intraday_to_tn_df(
         # Create the DataFrame with explicit types
         result_df = pd.DataFrame(
             {
-                "stream_id": pd.Series([stream_id] * len(intraday_df), dtype=str),
-                "date": ensure_unix_timestamp(pd.to_datetime(intraday_df["date"])),  # Convert to Unix timestamp
-                "value": intraday_df["close"].astype(str),
+                "stream_id": pd.Series([stream_id] * len(eod_df), dtype=str),
+                "date": ensure_unix_timestamp(pd.to_datetime(eod_df["date"])),  # Convert to Unix timestamp
+                "value": eod_df["price"].astype(str),
             }
         )
         # Convert to DataFrame[TnDataRowModel] and validate
         return DataFrame[TnDataRowModel](result_df)
 
     except Exception as e:
-        raise ValueError(f"Failed to convert intraday data to TN format: {e}") from e
+        raise ValueError(f"Failed to convert EOD data to TN format: {e}") from e
 
 
 def run_ticker_pipeline(
@@ -233,8 +232,9 @@ def run_ticker_pipeline(
 
     Backpressure Control:
       - Throttle FMP API calls using Prefect's rate_limit.
-      - Accumulate TN data rows and synchronously, until BATCH_SIZE is reached, insert them before processing the next ticker.
-      - This is to avoid overwhelming the TN system.
+      - Accumulate TN data rows and synchronously, until BATCH_SIZE is reached,
+        insert them before processing the next ticker.
+      - This is to avoid overwhelming the ingestor.
 
     Args:
         descriptor_df: DataFrame containing ticker descriptors.
@@ -246,6 +246,7 @@ def run_ticker_pipeline(
     Raises:
         Exceptions during processing are logged and raised.
     """
+
     def process_ticker(row: pd.Series) -> TickerResult:
         """Process a single ticker row."""
         symbol = row["source_id"]
@@ -263,19 +264,19 @@ def run_ticker_pipeline(
             start_date = max((earliest_date - datetime.timedelta(days=365)), min_fetch_date).strftime("%Y-%m-%d")
 
             # Fetch historical data
-            intraday_data = fetch_historical_data(
+            eod_data = fetch_historical_data(
                 fmp_block=fmp_block,
                 symbol=symbol,
                 start_date=start_date,
                 end_date=end_date,
             )
 
-            if len(intraday_data) == 0:
+            if len(eod_data) == 0:
                 logger.warning(f"No data found for {symbol}")
                 return TickerError(symbol, stream_id, error="no_data")
 
             logger.info(f"Successfully fetched data for {symbol}")
-            return TickerSuccess(symbol, stream_id, data=intraday_data)
+            return TickerSuccess(symbol, stream_id, data=eod_data)
 
         except Exception as e:
             logger.error(f"Error processing {symbol}: {e}")
@@ -284,24 +285,27 @@ def run_ticker_pipeline(
     # Process tickers with backpressure control
     records_to_insert = pd.DataFrame()
     try:
-        # First, fetch all data
         for _, row_data in descriptor_df.iterrows():
             result = process_ticker(row_data)
             if is_ticker_success(result):
-                tn_df = convert_intraday_to_tn_df(result.data, result.stream_id)
+                tn_df = convert_eod_to_tn_df(result.data, result.stream_id)
                 records_to_insert = pd.concat([records_to_insert, tn_df])
+            elif is_ticker_error(result):
+                logger.warning(f"Skipping ticker {row_data['source_id']} due to error: {result.error}")
+            else:
+                logger.error(f"Unexpected result type for {row_data['source_id']}: {type(result)}")
 
-            if len(records_to_insert) > BATCH_SIZE:
-                validated_df = DataFrame[TnDataRowModel](records_to_insert.iloc[0:BATCH_SIZE])
-                records_to_insert = records_to_insert.iloc[BATCH_SIZE:]
-                tn_block.split_and_insert_records_unix(records=validated_df, wait=False)
+            if len(records_to_insert) >= BATCH_SIZE:
+                validated_df = DataFrame[TnDataRowModel](records_to_insert)
+                records_to_insert = pd.DataFrame()
+                task_split_and_insert_records_unix(block=tn_block, records=validated_df, wait=False)
 
             logger.info("Completed ticker processing pipeline")
-    
+
         # Process remaining records
         if len(records_to_insert) > 0:
             validated_df = DataFrame[TnDataRowModel](records_to_insert)
-            tn_block.split_and_insert_records_unix(records=validated_df, wait=False)
+            task_split_and_insert_records_unix(block=tn_block, records=validated_df, wait=False)
 
     except Exception as e:
         logger.error(f"Pipeline execution failed: {e}")

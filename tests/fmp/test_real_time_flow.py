@@ -42,10 +42,12 @@ def assert_tn_data_schema(df: DataFrame):
 
 # --- Fixtures and Test Classes ---
 
+
 @pytest.fixture(scope="session", autouse=True)
 def include_prefect_in_all_tests(prefect_test_fixture):
     """Include Prefect test harness in all tests."""
     yield prefect_test_fixture
+
 
 @pytest.fixture
 def sample_descriptor_df() -> DataFrame[PrimitiveSourceDataModel]:
@@ -137,7 +139,7 @@ class TestRealTimeFlow:
         psd_block = FakePrimitiveSourcesDescriptorBlock()
         tn_block = FakeTNAccessBlock()
 
-        real_time_flow(fmp_block=fmp_block, psd_block=psd_block, tn_block=tn_block, batch_size=1)
+        real_time_flow(fmp_block=fmp_block, psd_block=psd_block, tn_block=tn_block, tickers_per_request=1)
 
         # Verify that data was processed and inserted
         assert len(tn_block.inserted_records) > 0
@@ -162,7 +164,7 @@ class TestRealTimeFlow:
                 fmp_block=error_fmp_block,
                 psd_block=psd_block,
                 tn_block=tn_block,
-                batch_size=1,
+                tickers_per_request=1,
                 fetch_task=fetch_quotes_for_batch.with_options(retries=0),
             )
 

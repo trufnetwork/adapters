@@ -4,7 +4,7 @@ import pandera as pa
 from pandera.typing import DataFrame, Series
 from pydantic import BaseModel
 
-from ....tasks.argentina.base_types import StreamId
+from tsn_adapters.tasks.argentina.base_types import StreamId
 
 # Create type variables for the models
 T = TypeVar("T", bound="TnRecordModel")

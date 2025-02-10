@@ -12,7 +12,6 @@ import pandas as pd
 from pandera.typing import DataFrame
 from prefect import flow, task
 import pytest
-from trufnetwork_sdk_py.client import truf_sdk
 from trufnetwork_sdk_py.utils import generate_stream_id
 
 from tsn_adapters.blocks.tn_access import TNAccessBlock
@@ -28,6 +27,7 @@ def test_stream_id() -> str:
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     return generate_stream_id(f"test_{timestamp}")
 
+
 @pytest.fixture
 def deployed_test_stream_id(tn_block: TNAccessBlock, test_stream_id: str):
     """Deploys and initializes a test stream."""
@@ -36,6 +36,7 @@ def deployed_test_stream_id(tn_block: TNAccessBlock, test_stream_id: str):
     client.init_stream(test_stream_id, wait=True)
     yield test_stream_id
     tn_block.destroy_stream(test_stream_id)
+
 
 @pytest.fixture
 def sample_records() -> DataFrame[TnRecordModel]:
@@ -50,7 +51,11 @@ def sample_records() -> DataFrame[TnRecordModel]:
 @task
 def insert_records(tn_block: TNAccessBlock, stream_id: str, records: DataFrame[TnRecordModel]) -> None:
     """Task to insert records into a stream."""
-    tx_hash = tn_block.insert_tn_records(stream_id, records, include_current_date=False, )
+    tx_hash = tn_block.insert_tn_records(
+        stream_id,
+        records,
+        include_current_date=False,
+    )
     assert tx_hash is not None
     tn_block.wait_for_tx(tx_hash)
 

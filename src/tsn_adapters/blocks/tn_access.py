@@ -11,16 +11,19 @@ from prefect.states import Completed
 from pydantic import ConfigDict, Field, SecretStr
 import trufnetwork_sdk_py.client as tn_client
 from trufnetwork_sdk_py.utils import generate_stream_id
-from trufnetwork_sdk_py.client import BatchInsertResults
 
-from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
+from tsn_adapters.utils.logging import get_logger_safe
+
 
 class SplitInsertResults(TypedDict):
-        """Results of batch insertions."""
-        success_tx_hashes: list[str]
-        failed_records: DataFrame[TnDataRowModel]
+    """Results of batch insertions."""
+
+    success_tx_hashes: list[str]
+    failed_records: DataFrame[TnDataRowModel]
+
+
 class TNAccessBlock(Block):
     """Prefect Block for managing TSN access credentials.
 
@@ -30,21 +33,23 @@ class TNAccessBlock(Block):
 
     class Error(Exception):
         """Base error class for TNAccessBlock errors."""
+
         pass
 
     class StreamNotFoundError(Error):
         """Error raised when a TN stream is not found."""
+
         pass
 
     class InvalidRecordFormatError(Error):
         """Error raised when a record has invalid format."""
+
         pass
 
     class InvalidTimestampError(Error):
         """Error raised when a timestamp has invalid format."""
+
         pass
-
-
 
     tn_provider: str
     tn_private_key: SecretStr
@@ -131,7 +136,9 @@ class TNAccessBlock(Block):
     ) -> list[dict[str, Any]]:
         return self.get_client().call_procedure(stream_id, data_provider, procedure, args)
 
-    def get_first_record(self, stream_id: str, data_provider: Optional[str] = None, is_unix: bool = False) -> Optional[TnRecord]:
+    def get_first_record(
+        self, stream_id: str, data_provider: Optional[str] = None, is_unix: bool = False
+    ) -> Optional[TnRecord]:
         if is_unix:
             result = self.get_client().get_first_record_unix(stream_id, data_provider)
         else:
@@ -229,12 +236,15 @@ class TNAccessBlock(Block):
             logging.info(f"No records to insert for stream {stream_id}")
             return None
 
-
         if include_current_date:
             current_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            args: list[list[str | float | int]] = [[record["date"], str(record["value"]), current_date] for record in records.to_dict(orient="records")]
+            args: list[list[str | float | int]] = [
+                [record["date"], str(record["value"]), current_date] for record in records.to_dict(orient="records")
+            ]
         else:
-            args: list[list[str | float | int]] = [[record["date"], str(record["value"])] for record in records.to_dict(orient="records")]
+            args: list[list[str | float | int]] = [
+                [record["date"], str(record["value"])] for record in records.to_dict(orient="records")
+            ]
 
         for col in ["date", "value"]:
             if col not in records.columns:
@@ -309,8 +319,7 @@ class TNAccessBlock(Block):
             batch = {
                 "stream_id": stream_id,
                 "inputs": [
-                    {"date": int(row["date"]), "value": float(row["value"])} 
-                    for _, row in stream_records.iterrows()
+                    {"date": int(row["date"]), "value": float(row["value"])} for _, row in stream_records.iterrows()
                 ],
             }
             batches.append(batch)
@@ -326,7 +335,7 @@ class TNAccessBlock(Block):
                     helper_contract_data_provider=self.helper_contract_provider,
                     wait=False,
                 )
-                return results['tx_hash']
+                return results["tx_hash"]
             except Exception as e:
                 self.logger.error(f"Error in batch insert: {e}")
                 return None
@@ -399,12 +408,13 @@ class TNAccessBlock(Block):
                     all_failed_records.append(batch_hashes[tx_hash])
 
         # Combine all failed records
-        failed_records_df = DataFrame[TnDataRowModel](pd.concat(all_failed_records) if all_failed_records else pd.DataFrame(columns=["stream_id", "date", "value"]))
-        
+        failed_records_df = DataFrame[TnDataRowModel](
+            pd.concat(all_failed_records)
+            if all_failed_records
+            else pd.DataFrame(columns=["stream_id", "date", "value"])
+        )
+
         return SplitInsertResults(success_tx_hashes=success_tx_hashes, failed_records=failed_records_df)
-
-
-
 
 
 # --- Top Level Task Functions ---
