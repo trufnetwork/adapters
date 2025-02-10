@@ -45,3 +45,13 @@ This will start the services and keep them running in the background.
 Deploying Prefect or using its Cloud infrastructure is extensively documented [here](https://docs.prefect.io/3.0/deploy/index).
 
 You may try the examples just by running their python files, after installing the package in a virtual environment. Make sure to copy `.env.example` to `.env` and set the correct environment variables.
+
+## Python Environment
+
+We recommend using a virtual environment to manage dependencies. You can create one using the following commands:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
