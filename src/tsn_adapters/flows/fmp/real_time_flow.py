@@ -8,7 +8,10 @@ Flow tasks:
     - process_data: Process and transform fetched data (placeholder).
     - update_primitives: Update the primitive sources with the new data (placeholder).
 
-The flow uses lightweight error handling and logging.
+We expect initially:
+- 60K+ tickers in the descriptor
+- only 1 quote per ticker
+- 2 transactions per flow run
 """
 
 from typing import Any, Optional, TypedDict
@@ -19,7 +22,7 @@ from prefect import flow, get_run_logger, task, unmapped
 
 from tsn_adapters.blocks.fmp import BatchQuoteShort, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_batch_insert_unix_and_wait_for_tx
+from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records_unix
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 
 
@@ -185,7 +188,7 @@ def real_time_flow(
     fmp_block: FMPBlock,
     psd_block: PrimitiveSourcesDescriptorBlock,
     tn_block: TNAccessBlock,
-    batch_size: int = 20000,
+    tickers_per_request: int = 20000,
     fetch_task: Optional[Any] = None,
 ):
     """
@@ -214,13 +217,14 @@ def real_time_flow(
     descriptor_df = get_symbols_from_descriptor(psd_block=psd_block)
 
     # Batch symbols
-    batches = batch_symbols(descriptor_df=descriptor_df, batch_size=batch_size)
+    batches = batch_symbols(descriptor_df=descriptor_df, batch_size=tickers_per_request)
 
     # Use the provided fetch task or default to fetch_quotes_for_batch
     fetch = fetch_task if fetch_task is not None else fetch_quotes_for_batch
 
     try:
         # Fetch quotes for each batch using task mapping with keyword arguments
+        # we let prefect handle the concurrency aspect
         quotes_batches = fetch.map(fmp_block=unmapped(fmp_block), symbols_batch=batches)  # type: ignore
 
         # Combine all batch results
@@ -230,9 +234,8 @@ def real_time_flow(
         processed_data = process_data(quotes_df=combined_data, descriptor_df=descriptor_df)
 
         # Insert processed data into TN
-        task_batch_insert_unix_and_wait_for_tx(block=tn_block, records=processed_data)
-
-        logger.info("Completed real-time market data sync flow")
+        results = task_split_and_insert_records_unix(block=tn_block, records=processed_data, wait=False)
+        logger.info(f"Completed real-time market data sync flow: {results}")
     except RuntimeError as e:
         # Re-raise the RuntimeError to maintain the original error type
         raise RuntimeError("API Error") from e

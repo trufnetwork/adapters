@@ -37,6 +37,18 @@ def test_get_batch_quote(fmp_block):
     print(df)
 
 
+@pytest.mark.integration
+def test_get_historical_eod_data(fmp_block):
+    """Integration test for get_historical_eod_data method."""
+    start_date = "2024-01-01"
+    end_date = "2024-01-31"
+    df = fmp_block.get_historical_eod_data("AAPL", start_date=start_date, end_date=end_date)
+    assert df is not None, "Expected non-None result"
+    assert len(df) == 21, "Expected 21 rows of historical EOD data"
+    print(f"Historical EOD data for AAPL from {start_date} to {end_date}:")
+    print(df)
+
+
 if __name__ == "__main__":
     # run pytest with verbose output and show prints by disabling output capturing
     pytest.main(["-s", __file__])

@@ -58,7 +58,7 @@ def test_aggregate_prices_simple_case(
     verifying that the function merges and averages correctly.
     """
     # WHEN
-    aggregated_df = aggregate_prices_by_category(product_category_map_df, avg_price_product_df)
+    aggregated_df, _ = aggregate_prices_by_category(product_category_map_df, avg_price_product_df)
 
     # THEN
     # The aggregator should group by (category_id, date) and compute avg over 'productos_precio_lista_avg'
@@ -110,7 +110,7 @@ def test_aggregate_prices_single_category_single_date():
     avg_price_df = PaDataFrame[SepaAvgPriceProductModel](avg_price_df)
 
     # WHEN
-    aggregated_df = aggregate_prices_by_category(category_map_df, avg_price_df)
+    aggregated_df, _ = aggregate_prices_by_category(category_map_df, avg_price_df)
 
     # THEN
     results = aggregated_df.to_dict(orient="records")
@@ -151,7 +151,7 @@ def test_aggregate_prices_multiple_dates_across_multiple_categories():
     avg_price_df = PaDataFrame[SepaAvgPriceProductModel](pd.DataFrame(avg_price_data))
 
     # WHEN
-    aggregated_df = aggregate_prices_by_category(category_map_df, avg_price_df)
+    aggregated_df, _ = aggregate_prices_by_category(category_map_df, avg_price_df)
     results = aggregated_df.to_dict(orient="records")
 
     # THEN
