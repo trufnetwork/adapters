@@ -3,7 +3,6 @@ Task wrappers for Argentina data pipeline.
 """
 
 from datetime import datetime, timedelta
-from typing import Optional
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -15,7 +14,7 @@ from tsn_adapters.common.interfaces.provider import IProviderGetter
 from tsn_adapters.common.interfaces.reconciliation import IReconciliationStrategy
 from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.interfaces.transformer import IDataTransformer
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
 from tsn_adapters.tasks.argentina.provider.factory import create_sepa_processed_provider
 from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
@@ -136,22 +135,18 @@ def task_get_latest_records(client: ITargetClient, stream_id: StreamId, data_pro
 
 
 @task
-def task_insert_data(
-    client: ITargetClient, stream_id: StreamId, data: DataFrame[TnRecordModel], data_provider: Optional[str] = None
-) -> None:
+def task_insert_data(client: ITargetClient, data: DataFrame[TnDataRowModel]) -> None:
     """
     Insert data into the target system.
 
     Args:
         client: The target client to use
-        stream_id: The stream ID to insert data for
         data: The data to insert
-        data_provider: The data provider identifier
     """
     logger = get_run_logger()
-    logger.info(f"Inserting {len(data)} rows for stream: {stream_id}")
+    logger.info(f"Inserting {len(data)} rows")
     try:
-        client.insert_data(stream_id=stream_id, data=data, data_provider=data_provider)
+        client.batch_insert_data(data=data)
         logger.info("Data inserted successfully")
     except Exception as e:
         logger.error(f"Failed to insert data: {e}")

@@ -295,10 +295,10 @@ class TNAccessBlock(Block):
 
         return txHash
 
-    def batch_insert_unix_tn_records(
+    def batch_insert_tn_records(
         self,
         records: DataFrame[TnDataRowModel],
-        data_provider: Optional[str] = None,
+        is_unix: bool = False,
     ) -> Optional[str]:
         """Batch insert records with unix timestamps into multiple streams.
 
@@ -316,12 +316,20 @@ class TNAccessBlock(Block):
         batches = []
         for stream_id in records["stream_id"].unique():
             stream_records = records[records["stream_id"] == stream_id]
-            batch = {
-                "stream_id": stream_id,
-                "inputs": [
-                    {"date": int(row["date"]), "value": float(row["value"])} for _, row in stream_records.iterrows()
-                ],
-            }
+            if is_unix:
+                batch = {
+                    "stream_id": stream_id,
+                    "inputs": [
+                        {"date": int(row["date"]), "value": float(row["value"])} for _, row in stream_records.iterrows()
+                    ],
+                }
+            else:
+                batch = {
+                    "stream_id": stream_id,
+                    "inputs": [
+                        {"date": str(row["date"]), "value": float(row["value"])} for _, row in stream_records.iterrows()
+                    ],
+                }
             batches.append(batch)
 
         if not batches:
@@ -329,12 +337,20 @@ class TNAccessBlock(Block):
 
         with concurrency("tn-write", occupy=1):
             try:
-                results = self.get_client().batch_insert_records_unix(
-                    batches=batches,
-                    helper_contract_stream_id=self.helper_contract_stream_id,
-                    helper_contract_data_provider=self.helper_contract_provider,
-                    wait=False,
-                )
+                if is_unix:
+                    results = self.get_client().batch_insert_records_unix(
+                        batches=batches,
+                        helper_contract_stream_id=self.helper_contract_stream_id,
+                        helper_contract_data_provider=self.helper_contract_provider,
+                        wait=False,
+                    )
+                else:
+                    results = self.get_client().batch_insert_records(
+                        batches=batches,
+                        helper_contract_stream_id=self.helper_contract_stream_id,
+                        helper_contract_data_provider=self.helper_contract_provider,
+                        wait=False,
+                    )
                 return results["tx_hash"]
             except Exception as e:
                 self.logger.error(f"Error in batch insert: {e}")
@@ -357,12 +373,12 @@ class TNAccessBlock(Block):
         with concurrency("tn-write", occupy=1):
             return self.get_client().destroy_stream(stream_id, wait)
 
-    def split_and_insert_records_unix(
+    def split_and_insert_records(
         self,
         records: DataFrame[TnDataRowModel],
-        data_provider: Optional[str] = None,
         max_batch_size: int = 50000,
         wait: bool = True,
+        is_unix: bool = False,
     ) -> Optional[SplitInsertResults]:
         """Split records into batches and insert them into TSN.
 
@@ -370,9 +386,10 @@ class TNAccessBlock(Block):
             records: DataFrame containing records with stream_id column
             data_provider: Optional data provider name
             max_batch_size: Maximum number of records per batch
-            wait: If True, wait for the transactions to be confirmed
+            wait: Whether to wait for transactions to complete
+
         Returns:
-            Results containing successful tx hashes and failed records
+            SplitInsertResults if successful, None if no records to insert
         """
         if len(records) == 0:
             return None
@@ -387,7 +404,7 @@ class TNAccessBlock(Block):
         for i in range(0, len(records), max_batch_size):
             batch = DataFrame[TnDataRowModel](records.iloc[i : i + max_batch_size])
             try:
-                tx_hash = self.batch_insert_unix_tn_records(batch, data_provider)
+                tx_hash = self.batch_insert_tn_records(batch, is_unix=is_unix)
                 if tx_hash:
                     batch_hashes[tx_hash] = batch
                     if not wait:
@@ -510,8 +527,9 @@ def task_insert_unix_tn_records(
     stream_id: str,
     records: DataFrame[TnRecordModel],
     data_provider: Optional[str] = None,
+    is_unix: bool = False,
 ) -> Optional[str]:
-    return block.insert_unix_tn_records(stream_id, records, data_provider)
+    return block.insert_unix_tn_records(stream_id, records, data_provider, is_unix)
 
 
 @task(retries=3, retry_delay_seconds=2)
@@ -574,10 +592,10 @@ def task_insert_unix_and_wait_for_tx(
 
 
 @task()
-def task_batch_insert_unix_tn_records(
+def task_batch_insert_tn_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-    data_provider: Optional[str] = None,
+    is_unix: bool = False,
 ) -> Optional[str]:
     """Batch insert records with unix timestamps into multiple streams.
 
@@ -589,25 +607,25 @@ def task_batch_insert_unix_tn_records(
     Returns:
         Transaction hash if successful, None otherwise
     """
-    return block.batch_insert_unix_tn_records(records, data_provider)
+    return block.batch_insert_tn_records(records, is_unix)
 
 
 @task()
-def task_split_and_insert_records_unix(
+def task_split_and_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-    data_provider: Optional[str] = None,
     max_batch_size: int = 50000,
     wait: bool = True,
+    is_unix: bool = False,
 ) -> Optional[SplitInsertResults]:
-    return block.split_and_insert_records_unix(records, data_provider, max_batch_size, wait)
+    return block.split_and_insert_records(records, max_batch_size, wait, is_unix)
 
 
 @task(retries=5, retry_delay_seconds=10)
-def task_batch_insert_unix_and_wait_for_tx(
+def task_batch_insert_and_wait_for_tx(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-    data_provider: Optional[str] = None,
+    is_unix: bool = False,
 ):
     """Batch insert unix timestamp records into multiple streams and wait for all transactions.
 
@@ -622,7 +640,7 @@ def task_batch_insert_unix_and_wait_for_tx(
     logging = get_run_logger()
 
     logging.info(f"Batch inserting {len(records)} unix records across {len(records['stream_id'].unique())} streams")
-    insertions = task_batch_insert_unix_tn_records(block=block, records=records, data_provider=data_provider)
+    insertions = task_batch_insert_tn_records(block=block, records=records, is_unix=is_unix)
 
     if not insertions:
         return Completed(message="No records to insert")

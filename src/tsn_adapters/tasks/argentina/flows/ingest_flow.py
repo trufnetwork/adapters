@@ -15,7 +15,7 @@ from prefect import flow, transactions
 from prefect.artifacts import create_markdown_artifact
 from prefect_aws import S3Bucket
 
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.target import create_trufnetwork_components
 from tsn_adapters.tasks.argentina.task_wrappers import (
@@ -91,7 +91,7 @@ class IngestFlow(ArgentinaFlowController):
             provider_getter=self.processed_provider,
             target_client=target_client,
             data_provider=self.data_provider,
-        )
+        ).result()
 
         # Step 3: Process each date
         dates_processed: list[DateStr] = []
@@ -123,32 +123,10 @@ class IngestFlow(ArgentinaFlowController):
             typed_all_data = PanderaDataFrame[TnDataRowModel](all_data)
 
             # Process each stream in parallel
-            insert_tasks = []
-            for stream_id, needed_dates in needed_keys.items():
-                # Get data for this stream's dates
-                stream_data = typed_all_data[
-                    (typed_all_data["stream_id"] == stream_id) & (typed_all_data["date"].isin(needed_dates))
-                ]
-
-                if stream_data.empty:
-                    self.logger.warning(f"No records to insert for stream {stream_id}")
-                    continue
-
-                typed_stream_data = PanderaDataFrame[TnRecordModel](stream_data)
-
-                # Insert into target
-                insert_tasks.append(
-                    task_insert_data.submit(
-                        client=target_client,
-                        stream_id=cast(StreamId, stream_id),
-                        data=typed_stream_data,
-                        data_provider=self.data_provider,
-                    )
-                )
-
-            # Wait for all insert tasks to complete
-            for insert_task in insert_tasks:
-                insert_task.result()
+            task_insert_data.submit(
+                client=target_client,
+                data=typed_all_data,
+            )
 
         # Step 4: Create summary
         self.logger.info("Creating processing summary...")
