@@ -2,9 +2,10 @@ import os
 from typing import Optional
 
 import pandas as pd
-from prefect import flow, task
+from prefect import flow, get_run_logger, task
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
+from prefect.concurrency.sync import concurrency
 
 
 @task(tags=["tn", "tn-write"])
@@ -78,13 +79,29 @@ def get_all_tsn_records(
 
 
 @task(tags=["tn", "tn-write"])
-def task_deploy_primitive(stream_id: str, client: tn_client.TNClient):
-    return deploy_primitive(stream_id, client)
+def task_deploy_primitive(stream_id: str, client: tn_client.TNClient, wait: bool = True) -> str:
+    return deploy_primitive(stream_id, client, wait)
 
+def deploy_primitive(stream_id: str, client: tn_client.TNClient, wait: bool = True) -> str:
+    logging = get_run_logger()
+    with concurrency("tn-write", occupy=1):
+        logging.info(f"Deploying stream {stream_id}")
+        # The wait parameter controls whether we block until the transaction is mined.
+        tx_hash = client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=wait)
+        logging.debug(f"Deployed stream {stream_id}")
+        return tx_hash
 
-def deploy_primitive(stream_id: str, client: tn_client.TNClient):
-    client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=True)
+@task(tags=["tn", "tn-write"])
+def task_init_stream(stream_id: str, client: tn_client.TNClient, wait: bool = True) -> str:
+    return init_stream(stream_id, client, wait)
 
+def init_stream(stream_id: str, client: tn_client.TNClient, wait: bool = True) -> str:
+    logging = get_run_logger()
+    with concurrency("tn-write", occupy=1):
+        logging.info(f"Initializing stream {stream_id}")
+        tx_hash = client.init_stream(stream_id, wait=wait)
+        logging.debug(f"Initialized stream {stream_id}")
+        return tx_hash
 
 if __name__ == "__main__":
 
