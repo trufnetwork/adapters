@@ -34,35 +34,47 @@ from tsn_adapters.flows.fmp.historical_flow import (
 # Configure pytest-asyncio
 pytestmark = pytest.mark.asyncio
 
-# --- Helper and Common Assertions ---
+# --- Helper Functions and Common Assertions ---
 
 EXPECTED_TN_DATA_COLUMNS = {"stream_id", "date", "value"}
-
-
-@pytest.fixture(scope="session", autouse=True)
-def include_prefect_in_all_tests(prefect_test_fixture):
-    """Include Prefect test harness in all tests."""
-    yield prefect_test_fixture
 
 def assert_tn_data_schema(df: pd.DataFrame):
     """Helper to assert that a DataFrame has the TN data schema."""
     assert set(df.columns) == EXPECTED_TN_DATA_COLUMNS, f"Got columns: {df.columns}"
 
+def assert_all_records_for_stream(df: pd.DataFrame, stream_id: str):
+    """Helper to assert that all records in a DataFrame belong to a given stream."""
+    assert all(df["stream_id"] == stream_id), f"Not all records are for {stream_id}"
 
-# --- Fixtures and Test Classes ---
+def assert_batch_sizes(batch_sizes: list[int], expected_sizes: list[int]):
+    """Helper to assert that batch sizes match expected sizes."""
+    assert batch_sizes == expected_sizes, f"Expected batch sizes {expected_sizes}, got {batch_sizes}"
 
+class SequenceTracker:
+    """Helper class to track execution sequence of operations."""
+    def __init__(self):
+        self.sequence = []
+        self._counter = 0
+    
+    def next(self, operation: str) -> int:
+        """Record next operation in sequence."""
+        self._counter += 1
+        self.sequence.append((self._counter, operation))
+        return self._counter
+    
+    def get_operations_by_type(self, prefix: str) -> list[tuple[int, str]]:
+        """Get all operations that start with the given prefix."""
+        return [(seq, op) for seq, op in self.sequence if op.startswith(prefix)]
+    
+    def assert_sequential_operations(self, prefix: str):
+        """Assert that operations of a given type occurred in sequence."""
+        operations = self.get_operations_by_type(prefix)
+        for i in range(len(operations) - 1):
+            curr_seq = operations[i][0]
+            next_seq = operations[i + 1][0]
+            assert curr_seq < next_seq, f"{prefix} operations should be sequential, but {curr_seq} came before {next_seq}"
 
-@pytest.fixture
-def sample_eod_data() -> DataFrame[EODData]:
-    """Create a sample EOD data DataFrame."""
-    data = {
-        "date": ["2024-01-01", "2024-01-02"],
-        "symbol": ["AAPL", "AAPL"],
-        "price": [151.0, 152.0],
-        "volume": [1000000, 1100000],
-    }
-    return DataFrame[EODData](pd.DataFrame(data))
-
+# --- Common Mock Blocks ---
 
 class FakeFMPBlock(FMPBlock):
     """Mock FMPBlock that returns predefined data."""
@@ -91,7 +103,6 @@ class FakeFMPBlock(FMPBlock):
             )
         )
 
-
 class FakePrimitiveSourcesDescriptorBlock(PrimitiveSourcesDescriptorBlock):
     """Mock descriptor block that returns predefined mappings."""
 
@@ -103,7 +114,6 @@ class FakePrimitiveSourcesDescriptorBlock(PrimitiveSourcesDescriptorBlock):
             "source_type": ["stock", "stock"],
         }
         return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
-
 
 class FakeTNAccessBlock(TNAccessBlock):
     """Fake TN access block that tracks inserted records."""
@@ -125,7 +135,7 @@ class FakeTNAccessBlock(TNAccessBlock):
         return self._insert_times
 
     @property
-    def batch_sizes(self):
+    def batch_sizes(self) -> list[int]:
         return self._batch_sizes
 
     def batch_insert_unix_tn_records(
@@ -153,49 +163,83 @@ class FakeTNAccessBlock(TNAccessBlock):
         """Mock to prevent real client creation."""
         return None  # type: ignore
 
+# --- Fixtures ---
 
-class ErrorFMPBlock(FMPBlock):
-    """Mock FMPBlock that simulates API errors."""
+@pytest.fixture(scope="session", autouse=True)
+def include_prefect_in_all_tests(prefect_test_fixture):
+    """Include Prefect test harness in all tests."""
+    yield prefect_test_fixture
 
-    def get_historical_eod_data(
-        self, symbol: str, start_date: str | None = None, end_date: str | None = None
-    ) -> DataFrame[EODData]:
-        """Simulate API error."""
-        raise RuntimeError("API Error")
+@pytest.fixture
+def fake_fmp_block() -> FMPBlock:
+    """Fixture for basic FMP block."""
+    return FakeFMPBlock(api_key=SecretStr("fake"))
 
+@pytest.fixture
+def fake_psd_block() -> PrimitiveSourcesDescriptorBlock:
+    """Fixture for basic PSD block."""
+    return FakePrimitiveSourcesDescriptorBlock()
+
+@pytest.fixture
+def fake_tn_block() -> FakeTNAccessBlock:
+    """Fixture for basic TN block."""
+    return FakeTNAccessBlock()
 
 @pytest.fixture
 def error_fmp_block():
     """Fixture for error-raising FMP block."""
+    class ErrorFMPBlock(FMPBlock):
+        def get_historical_eod_data(
+            self, symbol: str, start_date: str | None = None, end_date: str | None = None
+        ) -> DataFrame[EODData]:
+            """Simulate API error."""
+            raise RuntimeError("API Error")
     return ErrorFMPBlock(api_key=SecretStr("fake"))
 
+@pytest.fixture
+def set_test_batch_size(monkeypatch):
+    """Fixture to set test batch size."""
+    def _set_batch_size(size: int):
+        import tsn_adapters.flows.fmp.historical_flow as flow_module
+        monkeypatch.setattr(flow_module, "BATCH_SIZE", size)
+    return _set_batch_size
+
+@pytest.fixture
+def sample_eod_data() -> DataFrame[EODData]:
+    """Create a sample EOD data DataFrame."""
+    data = {
+        "date": ["2024-01-01", "2024-01-02"],
+        "symbol": ["AAPL", "AAPL"],
+        "price": [151.0, 152.0],
+        "volume": [1000000, 1100000],
+    }
+    return DataFrame[EODData](pd.DataFrame(data))
+
+# --- Test Classes ---
 
 class TestHistoricalFlow:
     """Tests for the historical flow functionality."""
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5, func_only=True)
-    async def test_historical_flow_success(self):
+    async def test_historical_flow_success(self, fake_fmp_block, fake_psd_block, fake_tn_block):
         """Test the complete historical flow with mock blocks."""
-        fmp_block = FakeFMPBlock(api_key=SecretStr("fake"))
-        psd_block = FakePrimitiveSourcesDescriptorBlock()
-        tn_block = FakeTNAccessBlock()
-
-        await historical_flow(fmp_block=fmp_block, psd_block=psd_block, tn_block=tn_block)
+        await historical_flow(
+            fmp_block=fake_fmp_block,
+            psd_block=fake_psd_block,
+            tn_block=fake_tn_block
+        )
 
         # Verify that data was processed and inserted
-        assert len(tn_block.inserted_records) > 0
-        inserted_df = tn_block.inserted_records[0]
+        assert len(fake_tn_block.inserted_records) > 0
+        inserted_df = fake_tn_block.inserted_records[0]
         assert_tn_data_schema(inserted_df)
         assert "stream_aapl" in inserted_df["stream_id"].values
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(15, func_only=True)
-    async def test_historical_flow_api_error(self, error_fmp_block, monkeypatch, mocker):
+    async def test_historical_flow_api_error(self, error_fmp_block, fake_psd_block, fake_tn_block, mocker):
         """Test the flow's behavior when FMP API calls fail."""
-        psd_block = FakePrimitiveSourcesDescriptorBlock()
-        tn_block = FakeTNAccessBlock()
-
         # Mock the tasks with no retries
         mocker.patch(
             "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
@@ -209,105 +253,96 @@ class TestHistoricalFlow:
         # Flow should complete without raising an exception
         await historical_flow(
             fmp_block=error_fmp_block,
-            psd_block=psd_block,
-            tn_block=tn_block,
+            psd_block=fake_psd_block,
+            tn_block=fake_tn_block,
         )
 
         # Verify that no records were inserted for the failed ticker
-        assert len(tn_block.inserted_records) == 0
-
+        assert len(fake_tn_block.inserted_records) == 0
 
 class TestDataProcessing:
     """Tests for data processing functionality."""
 
     @pytest.mark.timeout(5, func_only=True)
-    def test_get_earliest_data_date(self):
+    @pytest.mark.parametrize(
+        "stream_id, should_raise",
+        [
+            ("stream_aapl", False),
+            ("unknown", True),
+        ]
+    )
+    def test_get_earliest_data_date(self, fake_tn_block, stream_id, should_raise):
         """Test getting earliest data date for different tickers."""
-        tn = FakeTNAccessBlock()
-        res = get_earliest_data_date(tn_block=tn, stream_id="stream_aapl")
-        assert isinstance(res, datetime.datetime)
-        with pytest.raises(TNAccessBlock.StreamNotFoundError):
-            get_earliest_data_date(tn_block=tn, stream_id="unknown")
+        if should_raise:
+            with pytest.raises(TNAccessBlock.StreamNotFoundError):
+                get_earliest_data_date(tn_block=fake_tn_block, stream_id=stream_id)
+        else:
+            res = get_earliest_data_date(tn_block=fake_tn_block, stream_id=stream_id)
+            assert isinstance(res, datetime.datetime)
 
     @pytest.mark.timeout(5, func_only=True)
-    def test_fetch_historical_data_success(self, sample_eod_data):
-        """Test successful historical data fetching."""
-        fmp_block = FakeFMPBlock(api_key=SecretStr("fake"))
+    @pytest.mark.parametrize(
+        "symbol, expected_length",
+        [
+            ("AAPL", 2),     # returns two rows
+            ("UNKNOWN", 0),  # returns an empty DataFrame
+        ]
+    )
+    def test_fetch_historical_data(self, fake_fmp_block, symbol, expected_length):
+        """Test historical data fetching for different scenarios."""
         start_date = "2024-01-01"
         end_date = "2024-01-02"
 
         result = fetch_historical_data(
-            fmp_block=fmp_block,
-            symbol="AAPL",
+            fmp_block=fake_fmp_block,
+            symbol=symbol,
             start_date=start_date,
             end_date=end_date,
         )
         assert isinstance(result, DataFrame)
-        assert len(result) > 0
-        assert all(col in result.columns for col in ["date", "symbol", "price", "volume"])
-
-    @pytest.mark.timeout(5, func_only=True)
-    def test_fetch_historical_data_empty(self):
-        """Test fetching historical data for a symbol with no data."""
-        fmp_block = FakeFMPBlock(api_key=SecretStr("fake"))
-        start_date = "2024-01-01"
-        end_date = "2024-01-02"
-
-        result = fetch_historical_data(
-            fmp_block=fmp_block,
-            symbol="UNKNOWN",
-            start_date=start_date,
-            end_date=end_date,
-        )
-        assert isinstance(result, DataFrame)
-        assert len(result) == 0
+        assert len(result) == expected_length
+        if expected_length > 0:
+            assert all(col in result.columns for col in ["date", "symbol", "price", "volume"])
 
     @pytest.mark.timeout(5, func_only=True)
     def test_convert_eod_to_tn_data(self, sample_eod_data):
         """Test conversion from EOD data to TN format."""
-        result = convert_eod_to_tn_df(sample_eod_data, "stream_aapl")
+        stream_id = "stream_aapl"
+        result = convert_eod_to_tn_df(sample_eod_data, stream_id)
         # Convert list of records to DataFrame
         result_df = pd.DataFrame(result)
         assert_tn_data_schema(result_df)
         assert len(result) == len(sample_eod_data)
-        # Check stream_id and value directly from DataFrame
-        assert all(result_df["stream_id"] == "stream_aapl")
+        assert_all_records_for_stream(result_df, stream_id)
         assert all(result_df["value"].astype(float) > 0)  # Values should be positive prices
-
 
 class TestHistoricalFlowAdvanced:
     """Advanced tests for historical flow focusing on async behavior and batching."""
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5, func_only=True)
-    async def test_historical_flow_async(self):
+    async def test_historical_flow_async(self, fake_fmp_block, fake_psd_block, fake_tn_block):
         """Test that the historical flow works correctly in async context."""
-        fmp_block = FakeFMPBlock(api_key=SecretStr("fake"))
-        psd_block = FakePrimitiveSourcesDescriptorBlock()
-        tn_block = FakeTNAccessBlock()
-
         await historical_flow(
-            fmp_block=fmp_block,
-            psd_block=psd_block,
-            tn_block=tn_block,
+            fmp_block=fake_fmp_block,
+            psd_block=fake_psd_block,
+            tn_block=fake_tn_block,
             min_fetch_date=datetime.datetime(2023, 1, 1),
         )
 
         # Verify that data was processed and inserted
-        assert len(tn_block.inserted_records) > 0
-        inserted_df = tn_block.inserted_records[0]
+        assert len(fake_tn_block.inserted_records) > 0
+        inserted_df = fake_tn_block.inserted_records[0]
         assert_tn_data_schema(inserted_df)
-        assert "stream_aapl" in inserted_df["stream_id"].values
+        assert_all_records_for_stream(inserted_df, "stream_aapl")
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(15, func_only=True)
-    async def test_historical_flow_batch_processing(self, monkeypatch):
+    async def test_historical_flow_batch_processing(self, set_test_batch_size, monkeypatch):
         """Test that the flow correctly handles batch processing of records."""
-        # Mock a smaller batch size for testing
-        import tsn_adapters.flows.fmp.historical_flow as flow_module
-
+        # Set a smaller batch size for testing
         TEST_BATCH_SIZE = 2
-        monkeypatch.setattr(flow_module, "BATCH_SIZE", TEST_BATCH_SIZE)
+        set_test_batch_size(TEST_BATCH_SIZE)
 
         # Create a mock FMP block that returns a small dataset
         class SmallBatchFMPBlock(FakeFMPBlock):
@@ -328,7 +363,7 @@ class TestHistoricalFlowAdvanced:
                     )
 
                 # Generate 5 records (2.5x TEST_BATCH_SIZE)
-                dates = pd.date_range("2023-01-01", periods=5, freq="h")  # Use 'h' instead of 'H'
+                dates = pd.date_range("2023-01-01", periods=5, freq="h")
                 data = {
                     "date": dates,
                     "symbol": ["AAPL"] * len(dates),
@@ -355,19 +390,15 @@ class TestHistoricalFlowAdvanced:
 
         # Verify batch size
         assert len(tn_block.inserted_records[0]) == 5  # All records in one batch
-        assert all(tn_block.inserted_records[0]["stream_id"] == "stream_aapl"), "All records should be from AAPL"
+        assert_all_records_for_stream(tn_block.inserted_records[0], "stream_aapl")
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(15, func_only=True)
-    async def test_historical_flow_sequential_processing(self, monkeypatch, mocker):
+    async def test_historical_flow_sequential_processing(self, set_test_batch_size, monkeypatch, mocker):
         """Test that ticker processing is sequential and waits for TN insertion."""
-        import time
-
-        import tsn_adapters.flows.fmp.historical_flow as flow_module
-
-        # Mock a smaller batch size
+        # Set a smaller batch size
         TEST_BATCH_SIZE = 2
-        monkeypatch.setattr(flow_module, "BATCH_SIZE", TEST_BATCH_SIZE)
+        set_test_batch_size(TEST_BATCH_SIZE)
 
         # Mock the tasks with no retries
         mocker.patch(
@@ -376,52 +407,56 @@ class TestHistoricalFlowAdvanced:
         )
         mocker.patch(
             "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
-            side_effect=get_earliest_data_date.with_options(retries=0),
+            return_value=datetime.datetime(2020, 1, 1),  # Return a fixed date to avoid complexity
         )
 
+        # Create a sequence tracker
+        sequence = SequenceTracker()
+
         class TimingFMPBlock(FakeFMPBlock):
-            def __init__(self, *args, **kwargs):
+            def __init__(self, sequence_tracker: SequenceTracker, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                self.fetch_times = {}  # Track when each symbol's data is fetched
+                self.sequence = sequence_tracker
 
             def get_historical_eod_data(
                 self, symbol: str, start_date: str | None = None, end_date: str | None = None
             ) -> DataFrame[EODData]:
-                """Track when each symbol's data is fetched."""
-                self.fetch_times[symbol] = time.time()
-                # Add a small delay to make timing more obvious
-                time.sleep(0.1)
-                return super().get_historical_eod_data(symbol, start_date, end_date)
+                """Track when each symbol's data is fetched and return a single record."""
+                self.sequence.next(f"fetch_{symbol}")
+                # Return a single record for each symbol to make batch counting predictable
+                data = {
+                    "date": ["2024-01-01"],
+                    "symbol": [symbol],
+                    "price": [150.0],
+                    "volume": [1000000],
+                }
+                return DataFrame[EODData](pd.DataFrame(data))
 
         class TimingTNAccessBlock(FakeTNAccessBlock):
-            def __init__(self):
+            def __init__(self, sequence_tracker: SequenceTracker):
                 super().__init__()
-                self._insert_times = []
+                self.sequence = sequence_tracker
 
             def batch_insert_unix_tn_records(
                 self, records: DataFrame[TnDataRowModel], data_provider: str | None = None
             ) -> Optional[str]:
-                time.sleep(0.05)
-                self._insert_times.append(time.time())
+                """Track batch insertions with sequence information."""
+                seq_num = self.sequence.next(f"insert_batch_{len(records)}")
                 return super().batch_insert_unix_tn_records(records, data_provider)
 
-            def get_earliest_date(self, stream_id: str, data_provider: str | None = None) -> datetime.datetime:
-                return datetime.datetime(2024, 1, 1)
-
-            def wait_for_tx(self, tx_hash: str) -> None:
-                time.sleep(0.02)
-
         # Create blocks with timing tracking
-        fmp_block = TimingFMPBlock(api_key=SecretStr("fake"))
-        tn_block = TimingTNAccessBlock()
+        fmp_block = TimingFMPBlock(sequence_tracker=sequence, api_key=SecretStr("fake"))
+        tn_block = TimingTNAccessBlock(sequence_tracker=sequence)
 
-        # Create a descriptor block with multiple tickers that will generate enough data for batching
+        # Create a descriptor block with multiple tickers
         class MultiTickerDescriptorBlock(PrimitiveSourcesDescriptorBlock):
             def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
+                # Create 4 tickers - should result in two batches (2 records each)
+                tickers = [f"TICK{i}" for i in range(4)]
                 data = {
-                    "source_id": ["AAPL", "AAPL", "AAPL", "AAPL"],  # Multiple entries to generate more data
-                    "stream_id": ["stream_aapl"] * 4,
-                    "source_type": ["stock"] * 4,
+                    "source_id": tickers,
+                    "stream_id": [f"stream_{t.lower()}" for t in tickers],
+                    "source_type": ["stock"] * len(tickers),
                 }
                 return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
 
@@ -435,190 +470,47 @@ class TestHistoricalFlowAdvanced:
             min_fetch_date=datetime.datetime(2023, 1, 1),
         )
 
-        # Verify sequential processing
-        fetch_times = list(fmp_block.fetch_times.values())
-        insert_times = tn_block.insert_times
-
-        # We should have at least two batches
-        assert len(insert_times) >= 2, "Expected at least two batch insertions"
-
-        # For each batch insertion except the last one, verify that the next fetch happened after the insertion
-        for i in range(len(insert_times) - 1):
-            batch_insert_time = insert_times[i]
-            next_fetch_index = (i + 1) * TEST_BATCH_SIZE
-            if next_fetch_index < len(fetch_times):
-                next_fetch_time = fetch_times[next_fetch_index]
-                assert next_fetch_time > batch_insert_time, (
-                    f"Fetch {next_fetch_index} (at {next_fetch_time}) should happen after "
-                    f"batch {i} insertion (at {batch_insert_time})"
-                )
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(15, func_only=True)
-    async def test_historical_flow_batch_accumulation(self, monkeypatch, mocker):
-        """
-        Test that the flow properly handles backpressure by controlling data accumulation and processing.
-
-        This test verifies that:
-        1. Records are accumulated until reaching the batch size
-        2. Each batch is inserted only after it reaches the target size
-        3. Records are processed sequentially
-        4. Memory pressure is controlled by not accumulating too much data at once
-
-        The test uses 7 tickers that each produce 1 record:
-        - First 4 records form a complete batch
-        - Remaining 3 records form a partial batch
-        """
-        import tsn_adapters.flows.fmp.historical_flow as flow_module
-
-        # Mock a smaller batch size
-        TEST_BATCH_SIZE = 4  # We'll make each ticker return 1 record, so need 4 tickers for a batch
-        monkeypatch.setattr(flow_module, "BATCH_SIZE", TEST_BATCH_SIZE)
-
-        # Mock the tasks with no retries and return past date
-        mocker.patch(
-            "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
-            side_effect=fetch_historical_data.with_options(retries=0),
-        )
-        mocker.patch(
-            "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
-            return_value=datetime.datetime(2020, 1, 1),
-        )
-
-        # Create a sequence tracker to monitor execution order
-        class SequenceTracker:
-            def __init__(self):
-                self.sequence = []
-                self._counter = 0
-            
-            def next(self, operation: str) -> int:
-                self._counter += 1
-                self.sequence.append((self._counter, operation))
-                return self._counter
-
-        sequence = SequenceTracker()
-
-        class SequencedFMPBlock(FakeFMPBlock):
-            def __init__(self, sequence_tracker: SequenceTracker, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.sequence = sequence_tracker
-                self.fetch_order = {}
-
-            def get_historical_eod_data(
-                self, symbol: str, start_date: str | None = None, end_date: str | None = None
-            ) -> DataFrame[EODData]:
-                """Return single record per symbol and track fetch sequence."""
-                seq_num = self.sequence.next(f"fetch_{symbol}")
-                self.fetch_order[symbol] = seq_num
-                # Return just one record per symbol
-                data = {
-                    "date": ["2024-01-01"],
-                    "symbol": [symbol],
-                    "price": [150.0],
-                    "volume": [1000000],
-                }
-                return DataFrame[EODData](pd.DataFrame(data))
-
-        class SequencedTNAccessBlock(FakeTNAccessBlock):
-            def __init__(self, sequence_tracker: SequenceTracker):
-                super().__init__()
-                self.sequence = sequence_tracker
-                self.insert_order = []
-                self._batch_sizes: list[int] = []
-
-            @property
-            def batch_sizes(self) -> list[int]:
-                return self._batch_sizes
-
-            def batch_insert_unix_tn_records(
-                self, records: DataFrame[TnDataRowModel], data_provider: str | None = None
-            ) -> Optional[str]:
-                """Track inserted records with sequence information."""
-                seq_num = self.sequence.next(f"insert_batch_{len(records)}")
-                self.insert_order.append(seq_num)
-                self._batch_sizes.append(len(records))
-                self._inserted_records.append(records)
-                return "fake_tx_hash"
-
-            def get_earliest_date(self, stream_id: str, data_provider: str | None = None) -> datetime.datetime:
-                return datetime.datetime(2024, 1, 1)
-
-        # Create blocks with sequence tracking
-        fmp_block = SequencedFMPBlock(sequence_tracker=sequence, api_key=SecretStr("fake"))
-        tn_block = SequencedTNAccessBlock(sequence_tracker=sequence)
-
-        # Create a descriptor block with enough tickers to create multiple batches
-        class SequencedDescriptorBlock(PrimitiveSourcesDescriptorBlock):
-            def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
-                # Create 7 tickers - should result in one full batch of 4 and partial batch of 3
-                tickers = [f"TICK{i}" for i in range(7)]
-                data = {
-                    "source_id": tickers,
-                    "stream_id": [f"stream_{t.lower()}" for t in tickers],
-                    "source_type": ["stock"] * len(tickers),
-                }
-                return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
-
-        psd_block = SequencedDescriptorBlock()
-
-        # Run the flow
-        await historical_flow(
-            fmp_block=fmp_block,
-            psd_block=psd_block,
-            tn_block=tn_block,
-            min_fetch_date=datetime.datetime(2023, 1, 1),
-        )
-
-        # Verify we got the expected number of batches with correct sizes
-        assert tn_block.batch_sizes == [TEST_BATCH_SIZE, 3], "Expected one full batch and one partial batch"
-
-        # Get sequence information
-        all_operations = sequence.sequence
-        
         # Verify operations are sequential
-        fetch_operations = [(seq, op) for seq, op in all_operations if op.startswith("fetch_")]
-        insert_operations = [(seq, op) for seq, op in all_operations if op.startswith("insert_batch_")]
+        fetch_operations = sequence.get_operations_by_type("fetch_")
+        insert_operations = sequence.get_operations_by_type("insert_batch_")
         
         # Verify we have the right number of operations
-        assert len(fetch_operations) == 7, "Should have 7 fetch operations"
+        assert len(fetch_operations) == 4, "Should have 4 fetch operations"
         assert len(insert_operations) == 2, "Should have 2 insert operations"
         
         # Verify fetches are sequential
-        for i in range(len(fetch_operations) - 1):
-            curr_seq = fetch_operations[i][0]
-            next_seq = fetch_operations[i + 1][0]
-            assert curr_seq < next_seq, f"Fetch operations should be sequential, but {curr_seq} came before {next_seq}"
+        sequence.assert_sequential_operations("fetch_")
         
-        # Verify first batch insert happens after 4 fetches
+        # Verify batch insertions happen at the right time
         first_insert_seq = insert_operations[0][0]
-        fetches_before_first_insert = len([seq for seq, _ in fetch_operations if seq < first_insert_seq])
-        assert fetches_before_first_insert == TEST_BATCH_SIZE, "First batch should be inserted after 4 fetches"
-        
-        # Verify second batch insert happens after all fetches
         second_insert_seq = insert_operations[1][0]
-        fetches_before_second_insert = len([seq for seq, _ in fetch_operations if seq < second_insert_seq])
-        assert fetches_before_second_insert == 7, "Second batch should be inserted after all fetches"
         
-        # Verify batch sizes are correct
-        assert insert_operations[0][1] == f"insert_batch_{TEST_BATCH_SIZE}", "First batch should have TEST_BATCH_SIZE records"
-        assert insert_operations[1][1] == "insert_batch_3", "Second batch should have 3 records"
+        # Count fetches before each insert
+        fetches_before_first = len([seq for seq, _ in fetch_operations if seq < first_insert_seq])
+        fetches_before_second = len([seq for seq, _ in fetch_operations if seq < second_insert_seq])
+        
+        # First batch should be inserted after TEST_BATCH_SIZE fetches
+        assert fetches_before_first == TEST_BATCH_SIZE, (
+            f"First batch should be inserted after {TEST_BATCH_SIZE} fetches, "
+            f"but was inserted after {fetches_before_first}"
+        )
+        
+        # Second batch should be inserted after all fetches
+        assert fetches_before_second == 4, (
+            "Second batch should be inserted after all fetches, "
+            f"but was inserted after {fetches_before_second}"
+        )
+        
+        # Verify batch sizes
+        assert_batch_sizes(tn_block.batch_sizes, [2, 2])
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(15, func_only=True)
-    async def test_historical_flow_large_fetch(self, monkeypatch, mocker):
-        """
-        Test that the flow correctly handles fetches larger than batch size.
-
-        The flow should:
-        1. Accumulate records until exceeding BATCH_SIZE
-        2. When exceeded, process ALL accumulated records at once via split_and_insert_records_unix
-        3. Start fresh accumulation for next records
-        """
-        import tsn_adapters.flows.fmp.historical_flow as flow_module
-
-        # Mock a smaller batch size
+    async def test_historical_flow_large_fetch(self, set_test_batch_size, monkeypatch, mocker):
+        """Test that the flow correctly handles fetches larger than batch size."""
+        # Set a smaller batch size
         TEST_BATCH_SIZE = 3
-        monkeypatch.setattr(flow_module, "BATCH_SIZE", TEST_BATCH_SIZE)
+        set_test_batch_size(TEST_BATCH_SIZE)
 
         # Create a mock FMP block that returns a large dataset for one ticker
         class LargeFetchFMPBlock(FakeFMPBlock):
@@ -684,21 +576,17 @@ class TestHistoricalFlowAdvanced:
         )
 
         # Verify batch handling
-        batch_sizes = tn_block.batch_sizes
-        assert len(batch_sizes) == 2, "Expected 2 batches: one for TICK0's 8 records, one for TICK1's 2 records"
+        assert_batch_sizes(tn_block.batch_sizes, [8, 2])
         
         # First batch should contain all TICK0 records (processed when exceeding BATCH_SIZE)
-        assert batch_sizes[0] == 8, "First batch should contain all TICK0 records"
-        assert all(tn_block.inserted_records[0]["stream_id"] == "stream_tick0"), "First batch should be all TICK0"
+        assert_all_records_for_stream(tn_block.inserted_records[0], "stream_tick0")
         
         # Second batch should contain TICK1 records (processed at end of pipeline)
-        assert batch_sizes[1] == 2, "Second batch should contain TICK1 records"
-        assert all(tn_block.inserted_records[1]["stream_id"] == "stream_tick1"), "Second batch should be all TICK1"
+        assert_all_records_for_stream(tn_block.inserted_records[1], "stream_tick1")
 
         # Verify total records
-        total_records = sum(batch_sizes)
+        total_records = sum(tn_block.batch_sizes)
         assert total_records == 10, "Expected 10 total records (8 from TICK0 + 2 from TICK1)"
-
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
