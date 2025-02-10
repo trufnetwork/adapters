@@ -104,7 +104,7 @@ class FakeTNAccessBlock(TNAccessBlock):
         super().__init__(tn_provider="fake", tn_private_key=SecretStr("fake"))
         self.inserted_records = []
 
-    def batch_insert_unix_tn_records(
+    def batch_insert_tn_records(
         self, records: DataFrame[TnDataRowModel], data_provider: str | None = None
     ) -> Optional[str]:
         """Track inserted records and return a fake BatchInsertResults."""
