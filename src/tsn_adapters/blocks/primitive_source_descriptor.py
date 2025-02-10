@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+import gzip
+from io import BytesIO
 from typing import cast
 
 import pandas as pd
@@ -12,6 +14,7 @@ from prefect_aws import S3Bucket
 from pydantic import ConfigDict
 
 from tsn_adapters.blocks.github_access import GithubAccess
+from tsn_adapters.utils.deroutine import deroutine
 
 
 class PrimitiveSourceDataModel(DataFrameModel):
@@ -89,17 +92,29 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
         try:
-            raw_df = pd.read_csv(self.file_path, compression="gzip")
-            return DataFrame[PrimitiveSourceDataModel](raw_df)
+            file_content = deroutine(self.s3_bucket.read_path(self.file_path))
+            buffer = BytesIO(file_content)
+            df = pd.read_csv(
+                buffer,
+                compression="gzip",
+                encoding="utf-8",
+                dtype={"stream_id": str, "source_id": str, "source_type": str},
+                keep_default_na=False,
+                na_values=[],
+            )
+            df.iloc[27840:27850]
+            return DataFrame[PrimitiveSourceDataModel](df)
         except Exception as e:
             self.logger.error(f"Error reading file {self.file_path}: {e}")
             empty_df = pd.DataFrame(columns=list(PrimitiveSourceDataModel.__fields__.keys()))
             return cast(DataFrame[PrimitiveSourceDataModel], empty_df)
 
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
+        csv_bytes = descriptor.to_csv(index=False, encoding="utf-8").encode("utf-8")
+        compressed_bytes = gzip.compress(csv_bytes)
         self.s3_bucket.write_path(
             path=self.file_path,
-            content=descriptor.to_csv(index=False, encoding="utf-8", compression="gzip").encode("utf-8"),
+            content=compressed_bytes,
         )
 
 
