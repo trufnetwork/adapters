@@ -3,13 +3,23 @@ TrufNetwork target system implementation.
 """
 
 import logging
+from typing import Optional
+import warnings
 
 import pandas as pd
+from pandera.typing import DataFrame
 from prefect import get_run_logger
 from prefect.utilities.asyncutils import sync_compatible
 
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_insert_and_wait_for_tx, task_read_records
+from tsn_adapters.blocks.tn_access import (
+    TNAccessBlock,
+    task_insert_and_wait_for_tx,
+    task_read_records,
+    task_split_and_insert_records,
+    task_wait_for_tx,
+)
 from tsn_adapters.common.interfaces.target import ITargetClient
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.types import StreamId
 
 logger = logging.getLogger(__name__)
@@ -73,7 +83,33 @@ class TrufNetworkClient(ITargetClient[StreamId]):
         logger.debug("Found existing record for stream %s", stream_id)
         return df
 
-    def insert_data(self, stream_id: StreamId, data: pd.DataFrame, data_provider: str) -> None:
+    def batch_insert_data(self, data: DataFrame[TnDataRowModel]) -> None:
+        """
+        Batch insert data into TrufNetwork.
+        """
+        logger = get_run_logger()
+        logger.info(f"Inserting {len(data)} records into TrufNetwork")
+
+        tx = task_split_and_insert_records(
+            block=self.block,
+            records=data,
+            is_unix=False,
+        )
+
+        if tx is None:
+            raise ValueError("Failed to insert data into TrufNetwork")
+
+        for tx_hash in tx:
+            try:
+                task_wait_for_tx(
+                    block=self.block,
+                    tx_hash=tx_hash,
+                )
+            except Exception as e:
+                logger.error("Failed to wait for transaction %s: %s", tx_hash, e)
+                raise
+
+    def insert_data(self, stream_id: StreamId, data: pd.DataFrame, data_provider: Optional[str] = None) -> None:
         """
         Insert data into TrufNetwork.
 
@@ -81,7 +117,10 @@ class TrufNetworkClient(ITargetClient[StreamId]):
             stream_id: The stream ID to insert data for
             data: The data to insert
             data_provider: The data provider identifier
+
+        Deprecated: Use batch_insert_data instead.
         """
+        warnings.warn("insert_data is deprecated. Use batch_insert_data instead.", DeprecationWarning)
         logger = get_run_logger()
         logger.info(f"Inserting {len(data)} records for stream {stream_id} into TrufNetwork")
 

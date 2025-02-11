@@ -6,6 +6,9 @@ from abc import ABC, abstractmethod
 from typing import Generic, Optional, TypeVar
 
 import pandas as pd
+from pandera.typing import DataFrame
+
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 
 S = TypeVar("S")  # For stream ID types (e.g. StreamId)
 
@@ -24,6 +27,13 @@ class ITargetClient(ABC, Generic[S]):
 
         Returns:
             pd.DataFrame: The existing data in the target system
+        """
+        pass
+
+    @abstractmethod
+    def batch_insert_data(self, data: DataFrame[TnDataRowModel]) -> None:
+        """
+        Batch insert data into the target system.
         """
         pass
 
