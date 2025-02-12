@@ -438,6 +438,8 @@ class TestPreprocessFlowCreateSummary:
 
 class TestPreprocessFlowTopLevel:
     """Tests for the top-level preprocess_flow function."""
+    
+    pytestmark = pytest.mark.usefixtures("prefect_test_fixture")
 
     def test_preprocess_flow_happy_path(self, mocker: MockerFixture):
         """Test the top-level preprocess_flow function's happy path."""
