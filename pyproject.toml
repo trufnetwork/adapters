@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A collection of prefect tasks and examples ingesting data into TSN"
 readme = "README.md"
 dependencies = [
-    "prefect-client>=3.0.0",
+    "prefect-client==3.2.1",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
     "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@e0b02e58708bf708bc33d6734f673c2efcaea9b8",
     "PyGithub",
