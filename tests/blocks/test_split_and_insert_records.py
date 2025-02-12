@@ -20,7 +20,7 @@ from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 @pytest.fixture(scope="session")
 def helper_contract_id(tn_block: TNAccessBlock) -> Generator[str, None, None]:
     """Create and manage the helper contract."""
-    helper_stream_id = tn_block.helper_contract_stream_id
+    helper_stream_id = tn_block.helper_contract_stream_name
     client = tn_block.get_client()
 
     # Try to deploy helper contract
