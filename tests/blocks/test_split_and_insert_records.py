@@ -13,11 +13,8 @@ import pytest
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 from trufnetwork_sdk_py.utils import generate_stream_id
 
-from tsn_adapters.blocks.tn_access import TNAccessBlock
+from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
-
-# Default private key for testing
-DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1
 
 
 @pytest.fixture(scope="session")
@@ -93,7 +90,9 @@ class TestSplitAndInsertRecords:
     def test_split_and_insert_small_batches(self, tn_block: TNAccessBlock, sample_records: DataFrame[TnDataRowModel]):
         """Test splitting and inserting records with small batch size."""
         # Split into very small batches (2 records each)
-        results = tn_block.split_and_insert_records_unix(sample_records, max_batch_size=2)
+        results = task_split_and_insert_records(
+            tn_block, sample_records, max_batch_size=2, is_unix=True, filter_deployed_streams=False, wait=False
+        )
 
         assert results is not None
         assert len(results["success_tx_hashes"]) > 0
@@ -112,7 +111,9 @@ class TestSplitAndInsertRecords:
     def test_split_and_insert_single_batch(self, tn_block: TNAccessBlock, sample_records: DataFrame[TnDataRowModel]):
         """Test inserting all records in a single batch."""
         # Use batch size larger than total records
-        results = tn_block.split_and_insert_records_unix(sample_records, max_batch_size=100)
+        results = task_split_and_insert_records(
+            tn_block, sample_records, max_batch_size=100, is_unix=True, filter_deployed_streams=False, wait=False
+        )
 
         assert results is not None
         assert len(results["success_tx_hashes"]) == 1  # Should be single batch
@@ -131,9 +132,15 @@ class TestSplitAndInsertRecords:
     def test_split_and_insert_empty_records(self, tn_block: TNAccessBlock):
         """Test handling of empty records DataFrame."""
         empty_records = DataFrame[TnDataRowModel](pd.DataFrame(columns=["stream_id", "date", "value"]))
-        results = tn_block.split_and_insert_records_unix(empty_records)
+        results = task_split_and_insert_records(
+            tn_block, empty_records, is_unix=True, filter_deployed_streams=False, wait=False
+        )
 
-        assert results is None  # Should return None for empty records
+        if results is None:
+            pytest.fail("Results should not be None")
+
+        assert results["success_tx_hashes"] == []
+        assert results["failed_records"].empty
 
     def test_split_and_insert_with_failures(self, tn_block: TNAccessBlock, sample_records: DataFrame[TnDataRowModel]):
         """Test handling of insertion failures."""
@@ -150,9 +157,70 @@ class TestSplitAndInsertRecords:
         mixed_records = pd.concat([sample_records, invalid_records])
         mixed_records = DataFrame[TnDataRowModel](mixed_records)
 
-        results = tn_block.split_and_insert_records_unix(mixed_records, max_batch_size=5)
+        results = task_split_and_insert_records(
+            tn_block, mixed_records, is_unix=True, filter_deployed_streams=False, wait=True
+        )
 
         assert results is not None
-        assert len(results["success_tx_hashes"]) > 0
+        assert len(results["success_tx_hashes"]) == 0
         assert len(results["failed_records"]) > 0
         assert "invalid_stream_id" in results["failed_records"]["stream_id"].values
+        assert any("invalid stream id" in reason for reason in results["failed_reasons"])
+
+    def test_filter_deployed_streams(self, tn_block: TNAccessBlock, test_stream_ids: list[str]):
+        """Test that filter_deployed_streams correctly filters out non-deployed streams."""
+        base_timestamp = int(datetime.now().timestamp())
+        
+        # Create records for both deployed and non-deployed streams
+        deployed_records = []
+        for stream_id in test_stream_ids:
+            deployed_records.append({
+                "stream_id": stream_id,
+                "date": base_timestamp,
+                "value": 100.0,
+            })
+            
+        non_deployed_stream_id = generate_stream_id("non_deployed_test_stream")
+        non_deployed_records = [{
+            "stream_id": non_deployed_stream_id,
+            "date": base_timestamp,
+            "value": 200.0,
+        }]
+        
+        # Combine all records
+        all_records = pd.DataFrame(deployed_records + non_deployed_records)
+        all_records = DataFrame[TnDataRowModel](all_records)
+        
+        # Test with filter_deployed_streams=True
+        results = task_split_and_insert_records(
+            tn_block,
+            all_records,
+            is_unix=True,
+            filter_deployed_streams=True,
+            wait=True
+        )
+        
+        assert results is not None
+        # Should have successfully processed only the deployed streams
+        assert len(results["success_tx_hashes"]) > 0
+        # No failed records since non-deployed streams were filtered out
+        assert len(results["failed_records"]) == 0
+        
+        # Verify only deployed streams were processed
+        for stream_id in test_stream_ids:
+            records = tn_block.read_records(stream_id, is_unix=True, date_from=base_timestamp)
+            assert len(records) == 1
+            
+        # Test with filter_deployed_streams=False
+        results_no_filter = task_split_and_insert_records(
+            tn_block,
+            all_records,
+            is_unix=True,
+            filter_deployed_streams=False,
+            wait=True
+        )
+        
+        assert results_no_filter is not None
+        # Should have some failed records (the non-deployed stream)
+        assert len(results_no_filter["failed_records"]) > 0
+        assert non_deployed_stream_id in results_no_filter["failed_records"]["stream_id"].values

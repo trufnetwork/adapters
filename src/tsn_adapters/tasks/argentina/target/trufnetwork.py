@@ -90,24 +90,15 @@ class TrufNetworkClient(ITargetClient[StreamId]):
         logger = get_run_logger()
         logger.info(f"Inserting {len(data)} records into TrufNetwork")
 
-        tx = task_split_and_insert_records(
+        results = task_split_and_insert_records(
             block=self.block,
             records=data,
             is_unix=False,
+            wait=True,
         )
 
-        if tx is None:
+        if results["failed_records"] is not None and not results["failed_records"].empty:
             raise ValueError("Failed to insert data into TrufNetwork")
-
-        for tx_hash in tx:
-            try:
-                task_wait_for_tx(
-                    block=self.block,
-                    tx_hash=tx_hash,
-                )
-            except Exception as e:
-                logger.error("Failed to wait for transaction %s: %s", tx_hash, e)
-                raise
 
     def insert_data(self, stream_id: StreamId, data: pd.DataFrame, data_provider: Optional[str] = None) -> None:
         """

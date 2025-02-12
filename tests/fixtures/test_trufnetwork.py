@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import time
 from typing import Optional
@@ -64,13 +65,13 @@ TSN_DB_CONTAINER = ContainerSpec(
         "--chain.p2p.external-address",
         "http://test-tsn-db:26656",
         "--chain.consensus.timeout-propose",
-        "100ms",
+        "300ms",
         "--chain.consensus.timeout-prevote",
-        "100ms",
+        "200ms",
         "--chain.consensus.timeout-precommit",
-        "100ms",
+        "200ms",
         "--chain.consensus.timeout-commit",
-        "100ms",
+        "600ms",
     ],
     env_vars=[
         "CONFIG_PATH=/root/.kwild",
@@ -396,11 +397,50 @@ class TestTrufNetworkFixtures:
         assert tn_provider.api_endpoint.startswith("http://")
         assert tn_provider.get_provider() is tn_provider
 
+@pytest.fixture(scope='session', autouse=True)
+def term_handler():
+    """
+    Fixture to transform SIGTERM into SIGINT. This permit us to gracefully stop the suite uppon SIGTERM.
+    """
+    orig = signal.signal(signal.SIGTERM, signal.getsignal(signal.SIGINT))
+    yield
+    signal.signal(signal.SIGTERM, orig)
+
+@pytest.fixture(scope='session', autouse=True)
+def disable_prefect_retries():
+    from unittest.mock import patch
+    from prefect import task as original_task
+
+    def mock_task(*args, **kwargs):
+        kwargs['retries'] = 0
+        return original_task(*args, **kwargs)
+    
+    with patch('prefect.task', side_effect=mock_task), \
+         patch('prefect.Task', side_effect=mock_task):
+        yield
 
 @pytest.fixture(scope="session", autouse=False)
 def prefect_test_fixture():
-    with prefect_test_harness():
+    with prefect_test_harness(server_startup_timeout=120):
         yield
+
+
+def test_if_retry_disabled(prefect_test_fixture):
+    from prefect import task
+
+    counter = 0
+    
+    @task(retries=2, retry_delay_seconds=0)
+    def test_task():
+        nonlocal counter
+        counter += 1
+        raise Exception("Test exception")
+
+    try:
+        test_task()
+    except Exception as e:
+        pass
+    assert counter == 1
 
 
 DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1

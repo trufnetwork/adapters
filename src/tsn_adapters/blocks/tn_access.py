@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import decimal
 from typing import Any, Literal, Optional, TypedDict, Union, cast, overload
 
@@ -12,7 +12,7 @@ from pydantic import ConfigDict, Field, SecretStr
 import trufnetwork_sdk_py.client as tn_client
 from trufnetwork_sdk_py.utils import generate_stream_id
 
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecord, TnRecordModel
+from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
 from tsn_adapters.utils.logging import get_logger_safe
 
@@ -22,6 +22,7 @@ class SplitInsertResults(TypedDict):
 
     success_tx_hashes: list[str]
     failed_records: DataFrame[TnDataRowModel]
+    failed_reasons: list[str]
 
 
 class TNAccessBlock(Block):
@@ -88,6 +89,11 @@ class TNAccessBlock(Block):
         deprecated: Use client property instead
         """
         return self.client
+
+    def stream_exists(self, data_provider: str, stream_id: str) -> bool:
+        """Check if a stream exists"""
+        return self.get_client().stream_exists(stream_id=stream_id, data_provider=data_provider)
+
 
     def get_earliest_date(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[datetime]:
         """
@@ -314,18 +320,27 @@ class TNAccessBlock(Block):
 
         # Convert DataFrame to format expected by client
         batches = []
-        for stream_id in records["stream_id"].unique():
-            stream_records = records[records["stream_id"] == stream_id]
+        stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
+        for _, row in stream_locators.iterrows():
+            stream_records = records[
+                (records["stream_id"] == row["stream_id"]) & 
+                (records["data_provider"].fillna('') == ( row["data_provider"] or ''))
+            ]
             if is_unix:
                 batch = {
-                    "stream_id": stream_id,
+                    "stream_id": row["stream_id"],
+                    # TODO: support data provider on sdk insertion
+                    # "data_provider": row["data_provider"],
                     "inputs": [
-                        {"date": int(row["date"]), "value": float(row["value"])} for _, row in stream_records.iterrows()
+                        {"date": int(record["date"]), "value": float(record["value"])}
+                        for record in stream_records.to_dict(orient="records")
                     ],
                 }
             else:
                 batch = {
-                    "stream_id": stream_id,
+                    "stream_id": row["stream_id"],
+                    # TODO: support data provider on sdk insertion
+                    # "data_provider": row["data_provider"],
                     "inputs": [
                         {"date": str(row["date"]), "value": float(row["value"])} for _, row in stream_records.iterrows()
                     ],
@@ -336,25 +351,21 @@ class TNAccessBlock(Block):
             return None
 
         with concurrency("tn-write", occupy=1):
-            try:
-                if is_unix:
-                    results = self.get_client().batch_insert_records_unix(
-                        batches=batches,
-                        helper_contract_stream_id=self.helper_contract_stream_id,
-                        helper_contract_data_provider=self.helper_contract_provider,
-                        wait=False,
-                    )
-                else:
-                    results = self.get_client().batch_insert_records(
-                        batches=batches,
-                        helper_contract_stream_id=self.helper_contract_stream_id,
-                        helper_contract_data_provider=self.helper_contract_provider,
-                        wait=False,
-                    )
-                return results["tx_hash"]
-            except Exception as e:
-                self.logger.error(f"Error in batch insert: {e}")
-                return None
+            if is_unix:
+                results = self.get_client().batch_insert_records_unix(
+                    batches=batches,
+                    helper_contract_stream_id=self.helper_contract_stream_id,
+                    helper_contract_data_provider=self.helper_contract_provider,
+                    wait=False,
+                )
+            else:
+                results = self.get_client().batch_insert_records(
+                    batches=batches,
+                    helper_contract_stream_id=self.helper_contract_stream_id,
+                    helper_contract_data_provider=self.helper_contract_provider,
+                    wait=False,
+                )
+            return results["tx_hash"]
 
     def wait_for_tx(self, tx_hash: str) -> None:
         with concurrency("tn-read", occupy=1):
@@ -373,65 +384,16 @@ class TNAccessBlock(Block):
         with concurrency("tn-write", occupy=1):
             return self.get_client().destroy_stream(stream_id, wait)
 
-    def split_and_insert_records(
-        self,
+    @staticmethod
+    def split_records(
         records: DataFrame[TnDataRowModel],
         max_batch_size: int = 50000,
-        wait: bool = True,
-        is_unix: bool = False,
-    ) -> Optional[SplitInsertResults]:
-        """Split records into batches and insert them into TSN.
+    ) -> list[DataFrame[TnDataRowModel]]:
+        return [
+            DataFrame[TnDataRowModel](records.iloc[i : i + max_batch_size])
+            for i in range(0, len(records), max_batch_size)
+        ]
 
-        Args:
-            records: DataFrame containing records with stream_id column
-            data_provider: Optional data provider name
-            max_batch_size: Maximum number of records per batch
-            wait: Whether to wait for transactions to complete
-
-        Returns:
-            SplitInsertResults if successful, None if no records to insert
-        """
-        if len(records) == 0:
-            return None
-
-        # Split records into batches
-        success_tx_hashes = []
-        all_failed_records = []
-
-        batch_hashes: dict[str, DataFrame[TnDataRowModel]] = {}
-
-        # Split records into batches
-        for i in range(0, len(records), max_batch_size):
-            batch = DataFrame[TnDataRowModel](records.iloc[i : i + max_batch_size])
-            try:
-                tx_hash = self.batch_insert_tn_records(batch, is_unix=is_unix)
-                if tx_hash:
-                    batch_hashes[tx_hash] = batch
-                    if not wait:
-                        success_tx_hashes.append(tx_hash)
-                else:
-                    all_failed_records.append(batch)
-            except Exception as e:
-                self.logger.error(f"Error inserting batch: {e}")
-                all_failed_records.append(batch)
-
-        if wait:
-            for tx_hash in success_tx_hashes:
-                try:
-                    self.wait_for_tx(tx_hash)
-                    success_tx_hashes.append(tx_hash)
-                except Exception as e:
-                    self.logger.error(f"Error waiting for tx: {e}")
-                    all_failed_records.append(batch_hashes[tx_hash])
-
-        # Combine all failed records
-        failed_records_df = DataFrame[TnDataRowModel](
-            pd.concat(all_failed_records)
-            if all_failed_records
-            else pd.DataFrame(columns=["stream_id", "date", "value"])
-        )
-
-        return SplitInsertResults(success_tx_hashes=success_tx_hashes, failed_records=failed_records_df)
 
 
 # --- Top Level Task Functions ---
@@ -527,9 +489,8 @@ def task_insert_unix_tn_records(
     stream_id: str,
     records: DataFrame[TnRecordModel],
     data_provider: Optional[str] = None,
-    is_unix: bool = False,
 ) -> Optional[str]:
-    return block.insert_unix_tn_records(stream_id, records, data_provider, is_unix)
+    return block.insert_unix_tn_records(stream_id, records, data_provider)
 
 
 @task(retries=3, retry_delay_seconds=2)
@@ -590,49 +551,31 @@ def task_insert_unix_and_wait_for_tx(
             raise e
     return insertion
 
-
-@task()
-def task_batch_insert_tn_records(
+@task(retries=5, retry_delay_seconds=10)
+def _task_only_batch_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     is_unix: bool = False,
 ) -> Optional[str]:
-    """Batch insert records with unix timestamps into multiple streams.
+    """Insert records into TSN without waiting for transaction confirmation"""
+    return block.batch_insert_tn_records(records=records, is_unix=is_unix)
+
+
+# we don't use retries here because their individual tasks already have retries
+@task
+def task_batch_insert_tn_records(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    is_unix: bool = False,
+    wait: bool = False,
+) -> Optional[str]:
+    """Batch insert records into multiple streams
 
     Args:
         block: The TNAccessBlock instance
         records: DataFrame containing records with stream_id column
         data_provider: Optional data provider name
-
-    Returns:
-        Transaction hash if successful, None otherwise
-    """
-    return block.batch_insert_tn_records(records, is_unix)
-
-
-@task()
-def task_split_and_insert_records(
-    block: TNAccessBlock,
-    records: DataFrame[TnDataRowModel],
-    max_batch_size: int = 50000,
-    wait: bool = True,
-    is_unix: bool = False,
-) -> Optional[SplitInsertResults]:
-    return block.split_and_insert_records(records, max_batch_size, wait, is_unix)
-
-
-@task(retries=5, retry_delay_seconds=10)
-def task_batch_insert_and_wait_for_tx(
-    block: TNAccessBlock,
-    records: DataFrame[TnDataRowModel],
-    is_unix: bool = False,
-):
-    """Batch insert unix timestamp records into multiple streams and wait for all transactions.
-
-    Args:
-        block: The TNAccessBlock instance
-        records: DataFrame containing records with stream_id column
-        data_provider: Optional data provider name
+        wait: Whether to wait for transactions to complete
 
     Returns:
         List of transaction hashes for completed inserts
@@ -640,22 +583,109 @@ def task_batch_insert_and_wait_for_tx(
     logging = get_run_logger()
 
     logging.info(f"Batch inserting {len(records)} unix records across {len(records['stream_id'].unique())} streams")
-    insertions = task_batch_insert_tn_records(block=block, records=records, is_unix=is_unix)
+    # we use task so it may retry on network or nonce errors
+    tx_or_none = _task_only_batch_insert_records(block=block, records=records, is_unix=is_unix)
 
-    if not insertions:
-        return Completed(message="No records to insert")
+    if wait and tx_or_none is not None:
+        # we need to use task so it may retry on network errors
+        task_wait_for_tx(block=block, tx_hash=tx_or_none)
 
-    for tx_hash in insertions:
-        if tx_hash:  # Skip None values
-            try:
-                task_wait_for_tx(block=block, tx_hash=tx_hash)
-            except Exception as e:
-                if "duplicate key value violates unique constraint" in str(e):
-                    logging.warning(f"Continuing after duplicate key value violation: {e}")
-                else:
-                    raise e
+    return tx_or_none
 
-    return insertions
+
+def hash_record_stream_id(records: DataFrame[TnDataRowModel]) -> str:
+    """Hash records to check for duplicates"""
+    unique_stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
+    unique_stream_locators.sort_values(by=["data_provider", "stream_id"], inplace=True)
+    intval = pd.util.hash_pandas_object(unique_stream_locators).sum()
+    return str(intval)
+
+
+class FilterStreamsResults(TypedDict):
+    existent_streams: DataFrame[StreamLocatorModel]
+    missing_streams: DataFrame[StreamLocatorModel]
+
+
+@task(cache_key_fn=lambda _, args: hash_record_stream_id(args["records"]))
+def task_filter_deployed_streams(block: TNAccessBlock, records: DataFrame[TnDataRowModel]) -> FilterStreamsResults:
+    """Filter records to only include deployed streams"""
+
+    # data frame with unique stream locator (stream_id, data_provider)
+    unique_stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
+    existent_streams = pd.DataFrame(columns=["data_provider", "stream_id"])
+    missing_streams = pd.DataFrame(columns=["data_provider", "stream_id"])
+    for _, row in unique_stream_locators.iterrows():
+        if block.stream_exists(data_provider=row["data_provider"], stream_id=row["stream_id"]):
+            existent_streams = pd.concat([existent_streams, pd.DataFrame([row])])
+        else:
+            missing_streams = pd.concat([missing_streams, pd.DataFrame([row])])
+
+    return FilterStreamsResults(
+        existent_streams=DataFrame[StreamLocatorModel](existent_streams),
+        missing_streams=DataFrame[StreamLocatorModel](missing_streams),
+    )
+
+
+@task(retries=5, retry_delay_seconds=10)
+def task_split_and_insert_records(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    max_batch_size: int = 50000,
+    wait: bool = True,
+    is_unix: bool = False,
+    fail_on_batch_error: bool = False,
+    filter_deployed_streams: bool = True,
+    filter_cache_duration: timedelta = timedelta(days=1),
+) -> SplitInsertResults:
+    """Split records into batches and insert them into TSN.
+
+    Args:
+        block: The TNAccessBlock instance
+        records: DataFrame containing records with stream_id column
+        max_batch_size: Maximum number of records per batch
+        wait: Whether to wait for transactions to complete
+        is_unix: If True, insert unix timestamp records
+
+    Returns:
+        SplitInsertResults if successful, None if no records to insert
+    """
+    logger = get_logger_safe(__name__)
+    failed_reasons = []
+    if filter_deployed_streams:
+        filter_with_cache = task_filter_deployed_streams.with_options(cache_expiration=filter_cache_duration)
+        filter_results = filter_with_cache(block=block, records=records)
+        if len(filter_results["missing_streams"]) > 0:
+            logger.warning(f"Total missing streams: {len(filter_results['missing_streams'])}")
+
+        filtered_records = records[
+            records["stream_id"].isin(filter_results["existent_streams"]["stream_id"])
+            & records["data_provider"].isin(filter_results["existent_streams"]["data_provider"])
+        ]
+        records = DataFrame[TnDataRowModel](filtered_records)
+
+    split_records = block.split_records(records, max_batch_size)
+    if len(split_records) == 0:
+        logger.warning("No records to insert")
+        failed_records = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+        return SplitInsertResults(success_tx_hashes=[], failed_records=failed_records, failed_reasons=failed_reasons)
+
+    tx_hashes = []
+    failed_records = []
+    for batch in split_records:
+        tx_hash_state = task_batch_insert_tn_records(block=block, records=batch, is_unix=is_unix, wait=wait, return_state=True)
+        try:
+            tx_hash = tx_hash_state.result(raise_on_failure=True)
+            if tx_hash:
+                tx_hashes.append(tx_hash)
+        except Exception as e:
+            failed_records.append(batch)
+            failed_reasons.append(str(e))
+    if len(failed_records) > 0:
+        failed_records_typed = DataFrame[TnDataRowModel](pd.concat(failed_records))
+    else:
+        failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+
+    return SplitInsertResults(success_tx_hashes=tx_hashes, failed_records=failed_records_typed, failed_reasons=failed_reasons)
 
 
 @task()

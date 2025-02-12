@@ -1,4 +1,4 @@
-from typing import TypeVar
+from typing import Optional, TypeVar
 
 import pandera as pa
 from pandera.typing import DataFrame, Series
@@ -28,6 +28,18 @@ class TnRecordModel(pa.DataFrameModel):
         coerce = True
         strict = "filter"
 
+class StreamLocatorModel(pa.DataFrameModel):
+    stream_id: Series[str]
+    data_provider: Series[pa.String] = pa.Field(
+        nullable=True,
+        description="The data provider of the stream",
+    )
+
+    class Config(pa.DataFrameModel.Config):
+        coerce = True
+        add_missing_columns = True
+        strict = "filter"
+
 
 class TnDataRowModel(TnRecordModel):
     """
@@ -35,9 +47,14 @@ class TnDataRowModel(TnRecordModel):
     """
 
     stream_id: Series[str]
+    data_provider: Series[pa.String] = pa.Field(
+        nullable=True,
+        description="The data provider of the stream",
+    )
 
     class Config(TnRecordModel.Config):
         coerce = True
+        add_missing_columns = True
         strict = "filter"
 
 
