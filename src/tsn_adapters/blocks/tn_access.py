@@ -54,7 +54,7 @@ class TNAccessBlock(Block):
 
     tn_provider: str
     tn_private_key: SecretStr
-    helper_contract_name: str = Field(default="", description="Name of the helper contract. Name != ID.")
+    helper_contract_id: str = Field(default="", description="Stream ID of the helper contract.")
     helper_contract_deployer: Optional[str] = Field(
         default=None,
         description="Address of the deployer of the helper contract. If not provided, will use the current wallet.",
@@ -72,9 +72,9 @@ class TNAccessBlock(Block):
 
     @property
     def helper_contract_stream_id(self):
-        if not self.helper_contract_name:
+        if not self.helper_contract_id:
             raise self.Error("Helper contract name is not set")
-        return self.helper_contract_name
+        return self.helper_contract_id
 
     @property
     def helper_contract_provider(self):
