@@ -32,7 +32,7 @@ from tsn_adapters.blocks.tn_access import TNAccessBlock, task_wait_for_tx
 
 @task(tags=["tn", "tn-write"], retries=3, retry_delay_seconds=5)
 def check_and_deploy_stream(
-    stream_id: str, tn_client: tn_client.TNClient, tna_block: TNAccessBlock
+    stream_id: str, tn_client: tn_client.TNClient, tna_block: TNAccessBlock, is_unix: bool = False
 ) -> str:
     """
     Checks if a stream exists using the SDK's stream_exists function.
@@ -47,7 +47,7 @@ def check_and_deploy_stream(
     else:
         # Create the deployment transaction without waiting.
         logger.info(f"Deploying stream {stream_id}.")
-        tx_deploy = task_deploy_primitive(stream_id=stream_id, client=tn_client, wait=False)
+        tx_deploy = task_deploy_primitive(stream_id=stream_id, client=tn_client, wait=False, is_unix=is_unix)
         # Wait for deployment confirmation using the TNAccessBlock (tn-read concurrency).
         task_wait_for_tx(block=tna_block, tx_hash=tx_deploy)
         logger.debug(f"Deployed stream {stream_id}.")
