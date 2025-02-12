@@ -74,7 +74,7 @@ class TNAccessBlock(Block):
     def helper_contract_stream_id(self):
         if not self.helper_contract_name:
             raise self.Error("Helper contract name is not set")
-        return generate_stream_id(self.helper_contract_name)
+        return self.helper_contract_name
 
     @property
     def helper_contract_provider(self):

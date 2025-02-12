@@ -79,15 +79,18 @@ def get_all_tsn_records(
 
 
 @task(tags=["tn", "tn-write"])
-def task_deploy_primitive(stream_id: str, client: tn_client.TNClient, wait: bool = True) -> str:
-    return deploy_primitive(stream_id, client, wait)
+def task_deploy_primitive(stream_id: str, client: tn_client.TNClient, wait: bool = True, is_unix: bool = False) -> str:
+    return deploy_primitive(stream_id, client, wait, is_unix)
 
-def deploy_primitive(stream_id: str, client: tn_client.TNClient, wait: bool = True) -> str:
+def deploy_primitive(stream_id: str, client: tn_client.TNClient, wait: bool = True, is_unix: bool = False) -> str:
     logging = get_run_logger()
     with concurrency("tn-write", occupy=1):
         logging.info(f"Deploying stream {stream_id}")
         # The wait parameter controls whether we block until the transaction is mined.
-        tx_hash = client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=wait)
+        if is_unix:
+            tx_hash = client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitiveUnix, wait=wait)
+        else:
+            tx_hash = client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=wait)
         logging.debug(f"Deployed stream {stream_id}")
         return tx_hash
 
