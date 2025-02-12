@@ -71,7 +71,7 @@ class TNAccessBlock(Block):
         return self._client
 
     @property
-    def helper_contract_stream_id(self):
+    def helper_contract_stream_name(self):
         if not self.helper_contract_name:
             raise self.Error("Helper contract name is not set")
         return self.helper_contract_name
@@ -354,14 +354,14 @@ class TNAccessBlock(Block):
             if is_unix:
                 results = self.get_client().batch_insert_records_unix(
                     batches=batches,
-                    helper_contract_stream_id=self.helper_contract_stream_id,
+                    helper_contract_stream_id=self.helper_contract_stream_name,
                     helper_contract_data_provider=self.helper_contract_provider,
                     wait=False,
                 )
             else:
                 results = self.get_client().batch_insert_records(
                     batches=batches,
-                    helper_contract_stream_id=self.helper_contract_stream_id,
+                    helper_contract_stream_id=self.helper_contract_stream_name,
                     helper_contract_data_provider=self.helper_contract_provider,
                     wait=False,
                 )
