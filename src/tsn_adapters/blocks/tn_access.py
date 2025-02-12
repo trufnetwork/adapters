@@ -569,7 +569,7 @@ def task_batch_insert_tn_records(
     is_unix: bool = False,
     wait: bool = False,
 ) -> Optional[str]:
-    """Batch insert unix timestamp records into multiple streams
+    """Batch insert records into multiple streams
 
     Args:
         block: The TNAccessBlock instance
