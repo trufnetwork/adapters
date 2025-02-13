@@ -320,24 +320,25 @@ class TNAccessBlock(Block):
         created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         fallback_data_provider = self.client.get_current_account()
 
-        args = []
+        data_providers = []
+        stream_ids = []
+        date_values = []
+        values = []
+        external_created_at = []
+
         for batch in batches:
             for record in batch["inputs"]:
                 # expected: $data_providers text[], $stream_ids text[], $date_values text[], $values decimal(36,18)[], $external_created_at text[]
-                args.append(
-                    [
-                        batch.get("data_provider", fallback_data_provider),
-                        batch["stream_id"],
-                        record["date"],
-                        str(record["value"]),
-                        created_at,
-                    ]
-                )
+                data_providers.append(batch.get("data_provider", fallback_data_provider))
+                stream_ids.append(batch["stream_id"])
+                date_values.append(record["date"])
+                values.append(str(record["value"]))
+                external_created_at.append(created_at)
 
         tx_hash = self.get_client().execute_procedure(
             stream_id=helper_contract_stream_id,
             procedure="insert_records_truflation",
-            args=args,
+            args=[ [data_providers, stream_ids, date_values, values, external_created_at] ],
             wait=wait,
             data_provider=helper_contract_provider,
         )
