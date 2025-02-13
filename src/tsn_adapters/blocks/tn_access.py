@@ -597,9 +597,10 @@ def _task_only_batch_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     is_unix: bool = False,
+    has_external_created_at: bool = False,
 ) -> Optional[str]:
     """Insert records into TSN without waiting for transaction confirmation"""
-    return block.batch_insert_tn_records(records=records, is_unix=is_unix)
+    return block.batch_insert_tn_records(records=records, is_unix=is_unix, has_external_created_at=has_external_created_at)
 
 
 # we don't use retries here because their individual tasks already have retries
@@ -609,6 +610,7 @@ def task_batch_insert_tn_records(
     records: DataFrame[TnDataRowModel],
     is_unix: bool = False,
     wait: bool = False,
+    has_external_created_at: bool = False,
 ) -> Optional[str]:
     """Batch insert records into multiple streams
 
@@ -625,7 +627,7 @@ def task_batch_insert_tn_records(
 
     logging.info(f"Batch inserting {len(records)} unix records across {len(records['stream_id'].unique())} streams")
     # we use task so it may retry on network or nonce errors
-    tx_or_none = _task_only_batch_insert_records(block=block, records=records, is_unix=is_unix)
+    tx_or_none = _task_only_batch_insert_records(block=block, records=records, is_unix=is_unix, has_external_created_at=has_external_created_at)
 
     if wait and tx_or_none is not None:
         # we need to use task so it may retry on network errors
