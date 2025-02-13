@@ -439,7 +439,7 @@ class TNAccessBlock(Block):
     @staticmethod
     def split_records(
         records: DataFrame[TnDataRowModel],
-        max_batch_size: int = 50000,
+        max_batch_size: int = 25000,
     ) -> list[DataFrame[TnDataRowModel]]:
         return [
             DataFrame[TnDataRowModel](records.iloc[i : i + max_batch_size])
@@ -688,7 +688,7 @@ def task_filter_deployed_streams(block: TNAccessBlock, records: DataFrame[TnData
 def task_split_and_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-    max_batch_size: int = 50000,
+    max_batch_size: int = 25000,
     wait: bool = True,
     is_unix: bool = False,
     fail_on_batch_error: bool = False,
