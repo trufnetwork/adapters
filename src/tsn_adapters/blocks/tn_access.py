@@ -350,11 +350,12 @@ class TNAccessBlock(Block):
         is_unix: bool = False,
         has_external_created_at: bool = False,
     ) -> Optional[str]:
-        """Batch insert records with unix timestamps into multiple streams.
+        """Batch insert records into multiple streams.
 
         Args:
             records: DataFrame containing records with stream_id column
-            data_provider: Optional data provider name
+            is_unix: If True, insert records with unix timestamps
+            has_external_created_at: If True, insert records with an external created_at timestamp
 
         Returns:
             Transaction hash if successful, None otherwise
@@ -637,7 +638,7 @@ def task_batch_insert_tn_records(
     """
     logging = get_run_logger()
 
-    logging.info(f"Batch inserting {len(records)} unix records across {len(records['stream_id'].unique())} streams")
+    logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
     # we use task so it may retry on network or nonce errors
     tx_or_none = _task_only_batch_insert_records(
         block=block, records=records, is_unix=is_unix, has_external_created_at=has_external_created_at
