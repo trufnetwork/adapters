@@ -94,7 +94,6 @@ class TNAccessBlock(Block):
         """Check if a stream exists"""
         return self.get_client().stream_exists(stream_id=stream_id, data_provider=data_provider)
 
-
     def get_earliest_date(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[datetime]:
         """
         Get the earliest date available for a stream.
@@ -301,16 +300,62 @@ class TNAccessBlock(Block):
 
         return txHash
 
+    def batch_insert_records_with_external_created_at(
+        self,
+        batches: list[dict[str, Any]],
+        helper_contract_stream_id: str,
+        helper_contract_provider: str,
+        wait: bool = False,
+    ) -> tn_client.BatchInsertResults:
+        """
+        created for compatibility with truflation's streams which take an additional
+        created_at column
+
+        TODO: move this to data-provider specific code
+        """
+        if len(batches) == 0:
+            raise ValueError("No batches to insert")
+
+        # format yyyy-mm-ddTHH:MM:SSZ
+        created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fallback_data_provider = self.client.get_current_account()
+
+        data_providers = []
+        stream_ids = []
+        date_values = []
+        values = []
+        external_created_at = []
+
+        for batch in batches:
+            for record in batch["inputs"]:
+                # expected: $data_providers text[], $stream_ids text[], $date_values text[], $values decimal(36,18)[], $external_created_at text[]
+                data_providers.append(batch.get("data_provider", fallback_data_provider))
+                stream_ids.append(batch["stream_id"])
+                date_values.append(record["date"])
+                values.append(str(record["value"]))
+                external_created_at.append(created_at)
+
+        tx_hash = self.get_client().execute_procedure(
+            stream_id=helper_contract_stream_id,
+            procedure="insert_records_truflation",
+            args=[ [data_providers, stream_ids, date_values, values, external_created_at] ],
+            wait=wait,
+            data_provider=helper_contract_provider,
+        )
+        return {"tx_hash": tx_hash}
+
     def batch_insert_tn_records(
         self,
         records: DataFrame[TnDataRowModel],
         is_unix: bool = False,
+        has_external_created_at: bool = False,
     ) -> Optional[str]:
-        """Batch insert records with unix timestamps into multiple streams.
+        """Batch insert records into multiple streams.
 
         Args:
             records: DataFrame containing records with stream_id column
-            data_provider: Optional data provider name
+            is_unix: If True, insert records with unix timestamps
+            has_external_created_at: If True, insert records with an external created_at timestamp
 
         Returns:
             Transaction hash if successful, None otherwise
@@ -323,8 +368,8 @@ class TNAccessBlock(Block):
         stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
         for _, row in stream_locators.iterrows():
             stream_records = records[
-                (records["stream_id"] == row["stream_id"]) & 
-                (records["data_provider"].fillna('') == ( row["data_provider"] or ''))
+                (records["stream_id"] == row["stream_id"])
+                & (records["data_provider"].fillna("") == (row["data_provider"] or ""))
             ]
             if is_unix:
                 batch = {
@@ -351,7 +396,14 @@ class TNAccessBlock(Block):
             return None
 
         with concurrency("tn-write", occupy=1):
-            if is_unix:
+            if has_external_created_at:
+                results = self.batch_insert_records_with_external_created_at(
+                    batches=batches,
+                    helper_contract_stream_id=self.helper_contract_stream_name,
+                    helper_contract_provider=self.helper_contract_provider,
+                    wait=False,
+                )
+            elif is_unix:
                 results = self.get_client().batch_insert_records_unix(
                     batches=batches,
                     helper_contract_stream_id=self.helper_contract_stream_name,
@@ -387,13 +439,12 @@ class TNAccessBlock(Block):
     @staticmethod
     def split_records(
         records: DataFrame[TnDataRowModel],
-        max_batch_size: int = 50000,
+        max_batch_size: int = 25000,
     ) -> list[DataFrame[TnDataRowModel]]:
         return [
             DataFrame[TnDataRowModel](records.iloc[i : i + max_batch_size])
             for i in range(0, len(records), max_batch_size)
         ]
-
 
 
 # --- Top Level Task Functions ---
@@ -551,14 +602,18 @@ def task_insert_unix_and_wait_for_tx(
             raise e
     return insertion
 
+
 @task(retries=5, retry_delay_seconds=10)
 def _task_only_batch_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     is_unix: bool = False,
+    has_external_created_at: bool = False,
 ) -> Optional[str]:
     """Insert records into TSN without waiting for transaction confirmation"""
-    return block.batch_insert_tn_records(records=records, is_unix=is_unix)
+    return block.batch_insert_tn_records(
+        records=records, is_unix=is_unix, has_external_created_at=has_external_created_at
+    )
 
 
 # we don't use retries here because their individual tasks already have retries
@@ -568,6 +623,7 @@ def task_batch_insert_tn_records(
     records: DataFrame[TnDataRowModel],
     is_unix: bool = False,
     wait: bool = False,
+    has_external_created_at: bool = False,
 ) -> Optional[str]:
     """Batch insert records into multiple streams
 
@@ -582,9 +638,11 @@ def task_batch_insert_tn_records(
     """
     logging = get_run_logger()
 
-    logging.info(f"Batch inserting {len(records)} unix records across {len(records['stream_id'].unique())} streams")
+    logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
     # we use task so it may retry on network or nonce errors
-    tx_or_none = _task_only_batch_insert_records(block=block, records=records, is_unix=is_unix)
+    tx_or_none = _task_only_batch_insert_records(
+        block=block, records=records, is_unix=is_unix, has_external_created_at=has_external_created_at
+    )
 
     if wait and tx_or_none is not None:
         # we need to use task so it may retry on network errors
@@ -630,12 +688,14 @@ def task_filter_deployed_streams(block: TNAccessBlock, records: DataFrame[TnData
 def task_split_and_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-    max_batch_size: int = 50000,
+    max_batch_size: int = 25000,
     wait: bool = True,
     is_unix: bool = False,
     fail_on_batch_error: bool = False,
     filter_deployed_streams: bool = True,
     filter_cache_duration: timedelta = timedelta(days=1),
+    # this is used only by truflation's data adapter streams
+    has_external_created_at: bool = False,
 ) -> SplitInsertResults:
     """Split records into batches and insert them into TSN.
 
@@ -672,7 +732,14 @@ def task_split_and_insert_records(
     tx_hashes = []
     failed_records = []
     for batch in split_records:
-        tx_hash_state = task_batch_insert_tn_records(block=block, records=batch, is_unix=is_unix, wait=wait, return_state=True)
+        tx_hash_state = task_batch_insert_tn_records(
+            block=block,
+            records=batch,
+            is_unix=is_unix,
+            wait=wait,
+            return_state=True,
+            has_external_created_at=has_external_created_at,
+        )
         try:
             tx_hash = tx_hash_state.result(raise_on_failure=True)
             if tx_hash:
@@ -685,7 +752,9 @@ def task_split_and_insert_records(
     else:
         failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
 
-    return SplitInsertResults(success_tx_hashes=tx_hashes, failed_records=failed_records_typed, failed_reasons=failed_reasons)
+    return SplitInsertResults(
+        success_tx_hashes=tx_hashes, failed_records=failed_records_typed, failed_reasons=failed_reasons
+    )
 
 
 @task()

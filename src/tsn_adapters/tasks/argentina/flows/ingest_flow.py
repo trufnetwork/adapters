@@ -91,6 +91,7 @@ class IngestFlow(ArgentinaFlowController):
             provider_getter=self.processed_provider,
             target_client=target_client,
             data_provider=self.data_provider,
+            return_state=True,
         ).result()
 
         # Step 3: Process each date
