@@ -324,7 +324,15 @@ class TNAccessBlock(Block):
         for batch in batches:
             for record in batch["inputs"]:
                 # expected: $data_provider text, $stream_id text, $date_values text[], $values decimal(36,18)[], $external_created_at text[]
-                args.append([batch.get("data_provider", fallback_data_provider), batch["stream_id"], record["date"], record["value"], created_at])
+                args.append(
+                    [
+                        batch.get("data_provider", fallback_data_provider),
+                        batch["stream_id"],
+                        record["date"],
+                        str( record["value"] ),
+                        created_at,
+                    ]
+                )
 
         tx_hash = self.get_client().execute_procedure(
             stream_id=helper_contract_stream_id,
