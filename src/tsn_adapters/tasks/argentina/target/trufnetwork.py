@@ -95,6 +95,7 @@ class TrufNetworkClient(ITargetClient[StreamId]):
             records=data,
             is_unix=False,
             wait=True,
+            has_external_created_at=True,
         )
 
         if results["failed_records"] is not None and not results["failed_records"].empty:
