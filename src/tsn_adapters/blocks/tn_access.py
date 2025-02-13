@@ -329,7 +329,7 @@ class TNAccessBlock(Block):
                         batch.get("data_provider", fallback_data_provider),
                         batch["stream_id"],
                         record["date"],
-                        str( record["value"] ),
+                        str(record["value"]),
                         created_at,
                     ]
                 )
@@ -337,7 +337,7 @@ class TNAccessBlock(Block):
         tx_hash = self.get_client().execute_procedure(
             stream_id=helper_contract_stream_id,
             procedure="insert_records_truflation",
-            args=[args],
+            args=args,
             wait=wait,
             data_provider=helper_contract_provider,
         )
