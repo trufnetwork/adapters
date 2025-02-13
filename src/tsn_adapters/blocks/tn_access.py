@@ -318,12 +318,13 @@ class TNAccessBlock(Block):
 
         # format yyyy-mm-ddTHH:MM:SSZ
         created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        data_provider = self.client.get_current_account()
 
         args = []
         for batch in batches:
             for record in batch["inputs"]:
                 # expected: $data_provider text, $stream_id text, $date_values text[], $values decimal(36,18)[], $external_created_at text[]
-                args.append([batch["data_provider"], batch["stream_id"], record["date"], record["value"], created_at])
+                args.append([data_provider, batch["stream_id"], record["date"], record["value"], created_at])
 
         tx_hash = self.get_client().execute_procedure(
             stream_id=helper_contract_stream_id,
@@ -600,7 +601,9 @@ def _task_only_batch_insert_records(
     has_external_created_at: bool = False,
 ) -> Optional[str]:
     """Insert records into TSN without waiting for transaction confirmation"""
-    return block.batch_insert_tn_records(records=records, is_unix=is_unix, has_external_created_at=has_external_created_at)
+    return block.batch_insert_tn_records(
+        records=records, is_unix=is_unix, has_external_created_at=has_external_created_at
+    )
 
 
 # we don't use retries here because their individual tasks already have retries
@@ -627,7 +630,9 @@ def task_batch_insert_tn_records(
 
     logging.info(f"Batch inserting {len(records)} unix records across {len(records['stream_id'].unique())} streams")
     # we use task so it may retry on network or nonce errors
-    tx_or_none = _task_only_batch_insert_records(block=block, records=records, is_unix=is_unix, has_external_created_at=has_external_created_at)
+    tx_or_none = _task_only_batch_insert_records(
+        block=block, records=records, is_unix=is_unix, has_external_created_at=has_external_created_at
+    )
 
     if wait and tx_or_none is not None:
         # we need to use task so it may retry on network errors
