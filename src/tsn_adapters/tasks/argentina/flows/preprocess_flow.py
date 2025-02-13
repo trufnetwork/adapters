@@ -115,7 +115,12 @@ class PreprocessFlow(ArgentinaFlowController):
 
         # Process the data
         logger.info("Processing data")
-        processed_data, uncategorized = process_raw_data(raw_data=raw_data, category_map_df=category_map_df)
+        processed_data, uncategorized = process_raw_data(
+            raw_data=raw_data,
+            category_map_df=category_map_df,
+            date=date,
+            return_state=True,
+        ).result()
 
         # Save to S3
         logger.info("Saving processed data")
