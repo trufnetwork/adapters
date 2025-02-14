@@ -1,4 +1,4 @@
-from typing import Optional, TypeVar
+from typing import TypeVar
 
 import pandera as pa
 from pandera.typing import DataFrame, Series

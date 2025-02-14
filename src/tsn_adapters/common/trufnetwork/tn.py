@@ -2,10 +2,11 @@ import os
 from typing import Optional
 
 import pandas as pd
-from prefect import flow, get_run_logger, task
+from prefect import flow, task
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
-from prefect.concurrency.sync import concurrency
+
+from tsn_adapters.blocks.tn_access import TNAccessBlock
 
 
 @task(tags=["tn", "tn-write"])
@@ -79,32 +80,19 @@ def get_all_tsn_records(
 
 
 @task(tags=["tn", "tn-write"])
-def task_deploy_primitive(stream_id: str, client: tn_client.TNClient, wait: bool = True, is_unix: bool = False) -> str:
-    return deploy_primitive(stream_id, client, wait, is_unix)
+def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = True, is_unix: bool = False) -> str:
+    stream_type = truf_sdk.StreamTypePrimitive if not is_unix else truf_sdk.StreamTypePrimitiveUnix
+    return block.deploy_stream(
+        stream_id=stream_id,
+        wait=wait,
+        stream_type=stream_type,
+    )
 
-def deploy_primitive(stream_id: str, client: tn_client.TNClient, wait: bool = True, is_unix: bool = False) -> str:
-    logging = get_run_logger()
-    with concurrency("tn-write", occupy=1):
-        logging.info(f"Deploying stream {stream_id}")
-        # The wait parameter controls whether we block until the transaction is mined.
-        if is_unix:
-            tx_hash = client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitiveUnix, wait=wait)
-        else:
-            tx_hash = client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=wait)
-        logging.debug(f"Deployed stream {stream_id}")
-        return tx_hash
 
 @task(tags=["tn", "tn-write"])
-def task_init_stream(stream_id: str, client: tn_client.TNClient, wait: bool = True) -> str:
-    return init_stream(stream_id, client, wait)
+def task_init_stream(block: TNAccessBlock, stream_id: str, wait: bool = True) -> str:
+    return block.init_stream(stream_id=stream_id, wait=wait)
 
-def init_stream(stream_id: str, client: tn_client.TNClient, wait: bool = True) -> str:
-    logging = get_run_logger()
-    with concurrency("tn-write", occupy=1):
-        logging.info(f"Initializing stream {stream_id}")
-        tx_hash = client.init_stream(stream_id, wait=wait)
-        logging.debug(f"Initialized stream {stream_id}")
-        return tx_hash
 
 if __name__ == "__main__":
 
