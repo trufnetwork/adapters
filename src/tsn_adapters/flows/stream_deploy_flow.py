@@ -40,7 +40,8 @@ def check_and_deploy_stream(stream_id: str, tna_block: TNAccessBlock, is_unix: b
     Returns a message indicating the action taken.
     """
     logger = get_run_logger()
-    account = tna_block.get_client().get_current_account()
+    tn_client = tna_block.client
+    account = tn_client.get_current_account()
     if tna_block.stream_exists(account, stream_id):
         message = f"Stream {stream_id} already exists. Skipping deployment."
         logger.debug(message)
