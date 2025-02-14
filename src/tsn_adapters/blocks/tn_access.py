@@ -9,8 +9,8 @@ from prefect.blocks.core import Block
 from prefect.concurrency.sync import concurrency
 from prefect.states import Completed
 from pydantic import ConfigDict, Field, SecretStr
+import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
-from trufnetwork_sdk_py.utils import generate_stream_id
 
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
@@ -243,11 +243,11 @@ class TNAccessBlock(Block):
 
         if include_current_date:
             current_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            args: list[list[str | float | int]] = [
+            args: list[list[str | float | int | list[str] | list[float]]] = [
                 [record["date"], str(record["value"]), current_date] for record in records.to_dict(orient="records")
             ]
         else:
-            args: list[list[str | float | int]] = [
+            args: list[list[str | float | int | list[str] | list[float]]] = [
                 [record["date"], str(record["value"])] for record in records.to_dict(orient="records")
             ]
 
@@ -422,6 +422,14 @@ class TNAccessBlock(Block):
     def wait_for_tx(self, tx_hash: str) -> None:
         with concurrency("tn-read", occupy=1):
             self.get_client().wait_for_tx(tx_hash)
+
+    def deploy_stream(self, stream_id: str, stream_type: str = truf_sdk.StreamTypePrimitive, wait: bool = True) -> str:
+        with concurrency("tn-write", occupy=1):
+            return self.get_client().deploy_stream(stream_id, stream_type, wait)
+
+    def init_stream(self, stream_id: str, wait: bool = True) -> str:
+        with concurrency("tn-write", occupy=1):
+            return self.get_client().init_stream(stream_id, wait)
 
     def destroy_stream(self, stream_id: str, wait: bool = True) -> str:
         """Destroy a stream with the given stream ID.
