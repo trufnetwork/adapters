@@ -166,7 +166,7 @@ class TestPreprocessFlowProcessDate:
         flow._create_summary = cast(Any, MagicMock())
         return flow
 
-    def test_process_date_happy_path(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture):
+    def test_process_date_happy_path(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture, prefect_test_fixture):
         """Test process_date with valid data."""
         # Mock dependencies
         mock_raw_data = cast(Any, MagicMock(spec=pd.DataFrame))
@@ -188,7 +188,7 @@ class TestPreprocessFlowProcessDate:
         mock_process_raw_data = cast(
             Any,
             mocker.patch(
-                "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
+                "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data.fn",
                 return_value=(mock_processed_data, mock_uncategorized),
             ),
         )

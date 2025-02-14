@@ -32,7 +32,7 @@ from tsn_adapters.flows.fmp.real_time_flow import (
 
 # --- Helper and Common Assertions ---
 
-EXPECTED_TN_DATA_COLUMNS = {"stream_id", "date", "value"}
+EXPECTED_TN_DATA_COLUMNS = {"data_provider", "stream_id", "date", "value"}
 
 
 def assert_tn_data_schema(df: DataFrame):

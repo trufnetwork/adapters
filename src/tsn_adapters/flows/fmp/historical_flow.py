@@ -21,7 +21,7 @@ from prefect.tasks import task_input_hash
 
 from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records_unix
+from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
@@ -298,14 +298,24 @@ def run_ticker_pipeline(
             if len(records_to_insert) >= BATCH_SIZE:
                 validated_df = DataFrame[TnDataRowModel](records_to_insert)
                 records_to_insert = pd.DataFrame()
-                task_split_and_insert_records_unix(block=tn_block, records=validated_df, wait=False)
+                task_split_and_insert_records(
+                    block=tn_block,
+                    records=validated_df,
+                    wait=False,
+                    is_unix=True,
+                )
 
             logger.info("Completed ticker processing pipeline")
 
         # Process remaining records
         if len(records_to_insert) > 0:
             validated_df = DataFrame[TnDataRowModel](records_to_insert)
-            task_split_and_insert_records_unix(block=tn_block, records=validated_df, wait=False)
+            task_split_and_insert_records(
+                block=tn_block,
+                records=validated_df,
+                wait=False,
+                is_unix=True,
+            )
 
     except Exception as e:
         logger.error(f"Pipeline execution failed: {e}")

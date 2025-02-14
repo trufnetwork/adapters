@@ -22,7 +22,7 @@ from prefect import flow, get_run_logger, task, unmapped
 
 from tsn_adapters.blocks.fmp import BatchQuoteShort, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records_unix
+from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 
 
@@ -234,7 +234,12 @@ def real_time_flow(
         processed_data = process_data(quotes_df=combined_data, descriptor_df=descriptor_df)
 
         # Insert processed data into TN
-        results = task_split_and_insert_records_unix(block=tn_block, records=processed_data, wait=False)
+        results = task_split_and_insert_records(
+            block=tn_block,
+            records=processed_data,
+            wait=False,
+            is_unix=True,
+        )
         logger.info(f"Completed real-time market data sync flow: {results}")
     except RuntimeError as e:
         # Re-raise the RuntimeError to maintain the original error type
