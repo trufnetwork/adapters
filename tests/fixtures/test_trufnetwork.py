@@ -452,5 +452,5 @@ def tn_block(tn_provider: TrufNetworkProvider, prefect_test_fixture) -> TNAccess
     return TNAccessBlock(
         tn_provider=tn_provider.api_endpoint,
         tn_private_key=SecretStr(os.environ.get("TN_PRIVATE_KEY", DEFAULT_TN_PRIVATE_KEY)),
-        helper_contract_name="test_helper_contract",
+        helper_contract_name="sthelpercontract0000000000000001",
     )
