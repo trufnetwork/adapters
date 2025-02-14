@@ -32,7 +32,7 @@ from tsn_adapters.blocks.tn_access import TNAccessBlock, task_wait_for_tx
 
 @task(tags=["tn", "tn-write"], retries=3, retry_delay_seconds=5)
 def check_and_deploy_stream(
-    stream_id: str, tn_client: tn_client.TNClient, tna_block: TNAccessBlock, is_unix: bool = False
+    stream_id: str, tna_block: TNAccessBlock, is_unix: bool = False
 ) -> str:
     """
     Checks if a stream exists using the SDK's stream_exists function.
@@ -40,7 +40,7 @@ def check_and_deploy_stream(
     Returns a message indicating the action taken.
     """
     logger = get_run_logger()
-    if tn_client.stream_exists(stream_id):
+    if tna_block.stream_exists(stream_id):
         message = f"Stream {stream_id} already exists. Skipping deployment."
         logger.info(message)
         return message
@@ -64,7 +64,6 @@ def check_and_deploy_stream(
 @flow(name="Stream Deployment Flow")
 def deploy_streams_flow(
     psd_block: PrimitiveSourcesDescriptorBlock,
-    tn_client: tn_client.TNClient,
     tna_block: TNAccessBlock,
 ) -> List[str]:
     """
@@ -98,8 +97,8 @@ def deploy_streams_flow(
 
     # Map over the stream IDs using the check/deploy task.
     deployment_messages = check_and_deploy_stream.map(
-        stream_id=stream_ids, tn_client=unmapped(tn_client), tna_block=unmapped(tna_block)
+        stream_id=stream_ids, tna_block=unmapped(tna_block)
     )
 
     logger.info(f"Deployment results: {deployment_messages}")
-    return deployment_messages
+    return deployment_messages.result()
