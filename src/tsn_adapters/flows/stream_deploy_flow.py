@@ -66,6 +66,7 @@ def check_and_deploy_stream(
 def deploy_streams_flow(
     psd_block: PrimitiveSourcesDescriptorBlock,
     tna_block: TNAccessBlock,
+    is_unix: bool = False,
 ) -> List[str]:
     """
     Deploys primitive streams defined in the provided primitive source descriptor.
@@ -98,7 +99,7 @@ def deploy_streams_flow(
 
     # Map over the stream IDs using the check/deploy task.
     deployment_messages = check_and_deploy_stream.map(
-        stream_id=stream_ids, tna_block=unmapped(tna_block)
+        stream_id=stream_ids, tna_block=unmapped(tna_block), is_unix=is_unix
     )
 
     logger.info(f"Deployment results: {deployment_messages}")
