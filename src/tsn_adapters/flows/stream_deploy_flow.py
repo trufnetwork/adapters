@@ -75,6 +75,7 @@ def deploy_streams_flow(
     tna_block: TNAccessBlock,
     is_unix: bool = False,
     batch_size: int = 500,
+    start_from_batch: int = 0,
 ) -> DeployStreamResults:
     """
     Deploys primitive streams defined in the provided primitive source descriptor.
@@ -89,6 +90,7 @@ def deploy_streams_flow(
         tn_client: A TNClient instance for deployment interactions.
         tna_block: A TNAccessBlock instance used to wait for transaction confirmation.
         batch_size: The number of streams to deploy in each batch. Defaults to 500.
+        start_from_batch: The batch number to start from. Defaults to 0.
 
     Returns:
         A list of messages indicating whether each stream was deployed or skipped.
@@ -110,7 +112,7 @@ def deploy_streams_flow(
     batches = [stream_ids[i:i+batch_size] for i in range(0, len(stream_ids), batch_size)]
 
     aggregated_results: list[DeployStreamResult] = []
-    for batch in batches:
+    for batch in batches[start_from_batch:]:
         # for each batch, we will completely deploy -> iniialize and wait for each confirmation
         futures = []
         # Map over the stream IDs using the check/deploy task.
