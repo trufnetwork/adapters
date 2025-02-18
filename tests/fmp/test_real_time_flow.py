@@ -102,10 +102,13 @@ class FakeTNAccessBlock(TNAccessBlock):
 
     def __init__(self):
         super().__init__(tn_provider="fake", tn_private_key=SecretStr("fake"))
-        self.inserted_records = []
+        self.inserted_records: list[DataFrame[TnDataRowModel]] = []
 
     def batch_insert_tn_records(
-        self, records: DataFrame[TnDataRowModel], data_provider: str | None = None
+        self,
+        records: DataFrame[TnDataRowModel],
+        is_unix: bool = False,
+        has_external_created_at: bool = False,
     ) -> Optional[str]:
         """Track inserted records and return a fake BatchInsertResults."""
         self.inserted_records.append(records)
@@ -148,7 +151,7 @@ class TestRealTimeFlow:
         assert "stream_aapl" in inserted_df["stream_id"].values
 
     @pytest.mark.timeout(5, func_only=True)
-    def test_real_time_flow_api_error(self, error_fmp_block):
+    def test_real_time_flow_api_error(self, error_fmp_block: ErrorFMPBlock):
         """Test the flow's behavior when FMP API calls fail."""
         # Test direct error from the FMP block
         with pytest.raises(RuntimeError, match="API Error"):
@@ -172,7 +175,7 @@ class TestRealTimeFlow:
 class TestProcessDataAndDescriptor:
     """Tests for data processing and descriptor handling."""
 
-    def test_process_data(self, sample_quotes_df, sample_descriptor_df):
+    def test_process_data(self, sample_quotes_df: DataFrame[BatchQuoteShort], sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]):
         """Test processing quote data into TN format."""
         # Convert descriptor_df to plain pandas DataFrame as expected by process_data
         descriptor_df = pd.DataFrame(sample_descriptor_df)
@@ -183,12 +186,12 @@ class TestProcessDataAndDescriptor:
         assert len(result) == len(sample_quotes_df)
         assert "stream_aapl" in result["stream_id"].values
 
-    def test_process_data_with_none(self, sample_descriptor_df):
+    def test_process_data_with_none(self, sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]):
         """Test that process_data raises RuntimeError with detailed error messages when quotes_df is None."""
         with pytest.raises(RuntimeError, match="Cannot process data: quotes DataFrame is None"):
             process_data(None, sample_descriptor_df)  # type: ignore
 
-    def test_process_data_with_exception(self, sample_descriptor_df):
+    def test_process_data_with_exception(self, sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]):
         """Test that process_data raises RuntimeError with exception details when quotes_df is an Exception."""
         test_error = RuntimeError("Test API Error")
         with pytest.raises(RuntimeError, match=f"Cannot process data: quotes DataFrame is {test_error}"):
@@ -210,7 +213,7 @@ class TestProcessDataAndDescriptor:
 class TestBatching:
     """Tests for batching functionality."""
 
-    def test_batch_symbols(self, sample_descriptor_df):
+    def test_batch_symbols(self, sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]):
         """Test symbol batching logic."""
         batch_size = 2
         batches = batch_symbols(sample_descriptor_df, batch_size)  # type: ignore
@@ -220,7 +223,7 @@ class TestBatching:
         assert len(batches[1]) == 1
         assert all(isinstance(batch, list) for batch in batches)
 
-    def test_combine_batch_results(self, sample_quotes_df):
+    def test_combine_batch_results(self, sample_quotes_df: DataFrame[BatchQuoteShort]):
         """Test combining multiple quote batches."""
         batch1 = sample_quotes_df.iloc[0:2]
         batch2 = sample_quotes_df.iloc[2:]
@@ -231,7 +234,7 @@ class TestBatching:
         assert len(combined) == len(sample_quotes_df)
         assert all(combined.columns == sample_quotes_df.columns)
 
-    def test_combine_batch_results_with_none(self, sample_quotes_df):
+    def test_combine_batch_results_with_none(self, sample_quotes_df: DataFrame[BatchQuoteShort]):
         """Test that combine_batch_results raises RuntimeError with detailed error messages when any batch is None."""
         batch1 = sample_quotes_df.iloc[0:2]
         batch2 = None  # type: ignore
@@ -239,7 +242,7 @@ class TestBatching:
         with pytest.raises(RuntimeError, match="Failed fetching quote batches: Batch 1 is None"):
             combine_batch_results([batch1, batch2])  # type: ignore
 
-    def test_combine_batch_results_with_exception(self, sample_quotes_df):
+    def test_combine_batch_results_with_exception(self, sample_quotes_df: DataFrame[BatchQuoteShort]):
         """Test that combine_batch_results raises RuntimeError with exception details when a batch is an Exception."""
         batch1 = sample_quotes_df.iloc[0:2]
         test_error = RuntimeError("Test API Error")
@@ -259,26 +262,32 @@ class TestQuoteConversion:
             (
                 {"symbol": ["AAPL", "GOOGL"], "price": [150.0, 2500.0], "volume": [1000000, 500000]},
                 {"AAPL": "stream_aapl", "GOOGL": "stream_googl"},
-                1234567890,
+                1704086400,
                 2,
             ),
             # Empty DataFrame
             (
                 {"symbol": [], "price": [], "volume": []},
                 {"AAPL": "stream_aapl"},
-                1234567890,
+                1704086400,
                 0,
             ),
             # Missing mapping: the row should be dropped
             (
                 {"symbol": ["UNKNOWN"], "price": [100.0], "volume": [1000]},
                 {"AAPL": "stream_aapl"},
-                1234567890,
+                1704086400,
                 0,
             ),
         ],
     )
-    def test_convert_quotes_to_tn_data_parametrized(self, quotes_data, id_mapping, fixed_timestamp, expected_length):
+    def test_convert_quotes_to_tn_data_parametrized(
+        self,
+        quotes_data: dict[str, list[Any]],
+        id_mapping: dict[str, str],
+        fixed_timestamp: int,
+        expected_length: int,
+    ):
         """Test conversion from quotes to TN data under different scenarios."""
         quotes_df = DataFrame[BatchQuoteShort](pd.DataFrame(quotes_data))
         result = convert_quotes_to_tn_data(quotes_df, id_mapping, fixed_timestamp)

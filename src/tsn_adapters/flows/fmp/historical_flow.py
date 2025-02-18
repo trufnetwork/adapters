@@ -145,9 +145,45 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
         raise TNQueryError(str(e)) from e
 
 
-def ensure_unix_timestamp(dt: pd.Series) -> pd.Series:
-    """Convert datetime series to Unix timestamp (seconds since epoch)."""
-    return dt.astype(int) // 10**9
+def ensure_unix_timestamp(dt: pd.Series) -> pd.Series: # type: ignore -> pd Series doesn't fit with any
+    """Convert datetime series to Unix timestamp (seconds since epoch).
+    
+    This function handles various datetime formats and ensures the output
+    is always in seconds since epoch (Unix timestamp). It explicitly handles
+    the conversion from nanoseconds and validates the output range.
+    
+    Args:
+        dt: A pandas Series containing datetime data in various formats
+            
+    Returns:
+        A pandas Series containing Unix timestamps (seconds since epoch)
+        
+    Raises:
+        ValueError: If the resulting timestamps are outside the valid range
+                   or if the conversion results in unexpected units
+    """
+    # Convert to datetime if not already
+    if not pd.api.types.is_datetime64_any_dtype(dt):
+        dt = pd.to_datetime(dt, utc=True)
+    
+    # Get nanoseconds since epoch
+    ns_timestamps = dt.astype('int64')
+    
+    # Convert to seconds (integer division by 1e9 for nanoseconds)
+    second_timestamps = ns_timestamps // 10**9
+    
+    # Validate the range (basic sanity check)
+    # Unix timestamps should be between 1970 and 2100 approximately
+    min_valid_timestamp = 0  # 1970-01-01
+    max_valid_timestamp = 4102444800  # 2100-01-01
+    
+    if (second_timestamps < min_valid_timestamp).any() or (second_timestamps > max_valid_timestamp).any():
+        raise ValueError(
+            f"Converted timestamps outside valid range: "
+            f"min={second_timestamps.min()}, max={second_timestamps.max()}"
+        )
+    
+    return second_timestamps
 
 
 @task(retries=3, retry_delay_seconds=10, cache_key_fn=task_input_hash)
@@ -190,12 +226,16 @@ def convert_eod_to_tn_df(
     Convert EODData DataFrame to TnDataRowModel format.
     Uses the 'price' as the value.
 
+    The dates in EODData are assumed to be in UTC at midnight (00:00:00).
+    This is standard for EOD data - the closing price for a day is timestamped
+    at midnight UTC of that day.
+
     Args:
         eod_df: DataFrame containing EOD data
         stream_id: ID of the stream to associate with the data
 
     Returns:
-        DataFrame in TN format
+        DataFrame in TN format with UTC timestamps
 
     Raises:
         ValueError: If the conversion fails or validation fails
@@ -209,7 +249,12 @@ def convert_eod_to_tn_df(
         result_df = pd.DataFrame(
             {
                 "stream_id": pd.Series([stream_id] * len(eod_df), dtype=str),
-                "date": ensure_unix_timestamp(pd.to_datetime(eod_df["date"])),  # Convert to Unix timestamp
+                # Convert ISO dates to UTC midnight timestamps
+                "date": ensure_unix_timestamp(
+                    pd.to_datetime(eod_df["date"])
+                    .dt.tz_localize("UTC")  # Explicitly set UTC timezone
+                    .dt.normalize()  # Ensure midnight in UTC
+                ),
                 "value": eod_df["price"].astype(str),
             }
         )
@@ -247,7 +292,7 @@ def run_ticker_pipeline(
         Exceptions during processing are logged and raised.
     """
 
-    def process_ticker(row: pd.Series) -> TickerResult:
+    def process_ticker(row: pd.Series) -> TickerResult: # type: ignore -> pd Series doesn't fit with any
         """Process a single ticker row."""
         symbol = row["source_id"]
         stream_id = row["stream_id"]

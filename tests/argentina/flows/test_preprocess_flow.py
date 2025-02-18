@@ -188,8 +188,8 @@ class TestPreprocessFlowProcessDate:
         mock_process_raw_data = cast(
             Any,
             mocker.patch(
-                "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data.fn",
-                return_value=(mock_processed_data, mock_uncategorized),
+                "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
+                return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized))
             ),
         )
 
@@ -199,7 +199,12 @@ class TestPreprocessFlowProcessDate:
         # Verify interactions
         raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
         mock_task_load_category_map.assert_called_once_with(url=mock_preprocess_flow.category_map_url)
-        mock_process_raw_data.assert_called_once_with(raw_data=mock_raw_data, category_map_df=mock_category_map)
+        mock_process_raw_data.assert_called_once_with(
+            raw_data=mock_raw_data,
+            category_map_df=mock_category_map,
+            date=TEST_DATE,
+            return_state=True
+        )
         processed_provider = cast(Any, mock_preprocess_flow.processed_provider)
         processed_provider.save_processed_data.assert_called_once_with(
             date_str=TEST_DATE,

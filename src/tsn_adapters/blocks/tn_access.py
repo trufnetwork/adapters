@@ -15,6 +15,7 @@ import trufnetwork_sdk_py.client as tn_client
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
 from tsn_adapters.utils.logging import get_logger_safe
+from ..utils.unix import check_unix_timestamp
 
 
 class SplitInsertResults(TypedDict):
@@ -381,6 +382,9 @@ class TNAccessBlock(Block):
                         for record in stream_records.to_dict(orient="records")
                     ],
                 }
+                # check that all dates are unix timestamps
+                if not all(check_unix_timestamp(record["date"]) for record in batch["inputs"]):
+                    raise ValueError("All dates must be unix timestamps")
             else:
                 batch = {
                     "stream_id": row["stream_id"],

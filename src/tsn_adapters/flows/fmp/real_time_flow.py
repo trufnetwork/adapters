@@ -87,7 +87,7 @@ def convert_quotes_to_tn_data(
 
     # Set the timestamp
     current_timestamp = timestamp or int(pd.Timestamp.now().timestamp())
-    result_df["date"] = current_timestamp  # Keep as numeric for batch_insert_unix_tn_records
+    result_df["date"] = ensure_unix_timestamp(current_timestamp)  # Keep as numeric for batch_insert_unix_tn_records
 
     # Use price as the value, converting to string as required by TnRecordModel
     result_df["value"] = result_df["price"].astype(str)
@@ -96,6 +96,52 @@ def convert_quotes_to_tn_data(
     result_df = result_df[["stream_id", "date", "value"]]
 
     return DataFrame[TnDataRowModel](result_df)
+
+def ensure_unix_timestamp(time: int) -> int:
+    """
+    Ensure the timestamp is a valid unix timestamp (seconds since epoch).
+    
+    This function validates and converts timestamps to ensure they are in
+    seconds since epoch format. It handles cases where the input might be
+    in milliseconds or microseconds.
+    
+    Args:
+        time: Integer timestamp that might be in seconds, milliseconds,
+              microseconds, or nanoseconds since epoch
+            
+    Returns:
+        Integer timestamp in seconds since epoch
+        
+    Raises:
+        ValueError: If the timestamp is invalid or outside the reasonable range
+    """
+    if time < 0:
+        raise ValueError("Timestamp must be a positive integer")
+
+    # Define valid range for seconds since epoch
+    min_valid_timestamp = 0  # 1970-01-01
+    max_valid_timestamp = 4102444800  # 2100-01-01
+    
+    # Convert to seconds if in a larger unit
+    converted_time = time
+    if time > max_valid_timestamp:
+        # Handle different possible time units
+        if time > 10**18:  # nanoseconds
+            converted_time = time // 10**9
+        elif time > 10**15:  # microseconds
+            converted_time = time // 10**6
+        elif time > 10**12:  # milliseconds
+            converted_time = time // 10**3
+        else:  # assume seconds but with some future date
+            converted_time = time // 10**9  # aggressive conversion to be safe
+    
+    # Validate the range after conversion
+    if converted_time < min_valid_timestamp or converted_time > max_valid_timestamp:
+        raise ValueError(
+            f"Timestamp outside valid range (1970-2100): {converted_time}"
+        )
+    
+    return converted_time
 
 
 @task(retries=3, retry_delay_seconds=10)
