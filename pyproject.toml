@@ -42,7 +42,7 @@ markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')"
 ]
 pythonpath = ["src"]
-addopts = "--import-mode=importlib"
+addopts = "--import-mode=importlib -v -s"
 testpaths = ["tests"]
 
 [tool.ruff]

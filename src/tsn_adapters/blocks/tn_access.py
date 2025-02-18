@@ -6,6 +6,7 @@ import pandas as pd
 from pandera.typing import DataFrame
 from prefect import Task, get_run_logger, task
 from prefect.blocks.core import Block
+from prefect.client.schemas.objects import State, TaskRun
 from prefect.concurrency.sync import concurrency
 from prefect.states import Completed
 from pydantic import ConfigDict, Field, SecretStr
@@ -15,7 +16,42 @@ import trufnetwork_sdk_py.client as tn_client
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
 from tsn_adapters.utils.logging import get_logger_safe
-from ..utils.unix import check_unix_timestamp
+from tsn_adapters.utils.unix import check_unix_timestamp
+
+# used to make sure our special retry condition is the real one
+# must be used together
+UNUSED_INFINITY_RETRIES = 1000000
+
+
+def tn_special_retry_condition(max_other_error_retries: int):
+    """
+    Custom retry condition for Prefect tasks.
+
+    If the raised exception is a TNNodeNetworkError, always retry (indefinitely).
+    Otherwise, only retry if the current attempt (based on task_run's run_count) is less than max_retries.
+
+    Args:
+        max_retries: Maximum allowed retries for non-network errors.
+
+    Returns:
+        A callable that can be used as retry_condition_fn in Prefect tasks.
+    """
+
+    def _retry_condition(task: Task[Any, Any], task_run: TaskRun, state: State[Any]) -> bool:
+        try:
+            # This will re-raise the exception if the task failed.
+            state.result()
+        except TNNodeNetworkError:
+            # Always retry on network errors
+            return True
+        except Exception as exc:
+            # For non-network errors, use the task_run's run_count to decide.
+            if task_run.run_count <= max_other_error_retries:
+                return True
+            return False
+        return False
+
+    return _retry_condition
 
 
 class SplitInsertResults(TypedDict):
@@ -24,6 +60,53 @@ class SplitInsertResults(TypedDict):
     success_tx_hashes: list[str]
     failed_records: DataFrame[TnDataRowModel]
     failed_reasons: list[str]
+
+
+class TNNodeNetworkError(Exception):
+    """Error raised when a TN node network error occurs."""
+
+    # RuntimeError: error deploying stream: http post failed: Post "http://staging.node-1.tsn.truflation.com:8484/rpc/v1": dial tcp 18.189.163.27:8484: connect: connection refused
+
+    @classmethod
+    def from_error(cls, error: Exception) -> "TNNodeNetworkError":
+        if isinstance(error, TNNodeNetworkError):
+            return error
+        if isinstance(error, RuntimeError) and "http post failed" in str(error) and "dial tcp" in str(error):
+            return cls(str(error))
+        raise error
+
+    @classmethod
+    def is_tn_node_network_error(cls, error: Exception) -> bool:
+        try:
+            cls.from_error(error)
+            return True
+        except Exception:
+            return False
+
+
+class SafeTNClientProxy:
+    """
+    A proxy wrapper for the TN client that automatically intercepts callable attributes.
+    It wraps all method calls with error handling so that any TN network error is re-raised as TNNodeNetworkError.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._client, name)
+        if callable(attr):
+
+            def wrapped(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    return attr(*args, **kwargs)
+                except Exception as e:
+                    if TNNodeNetworkError.is_tn_node_network_error(e):
+                        raise TNNodeNetworkError.from_error(e)
+                    raise
+
+            return wrapped
+        return attr
 
 
 class TNAccessBlock(Block):
@@ -63,12 +146,17 @@ class TNAccessBlock(Block):
     model_config = ConfigDict(ignored_types=(Task,))
 
     @property
-    def client(self):
+    def client(self) -> tn_client.TNClient:
         if not hasattr(self, "_client"):
-            self._client = tn_client.TNClient(
-                url=self.tn_provider,
-                token=self.tn_private_key.get_secret_value(),
-            )
+            try:
+                self._client = tn_client.TNClient(
+                    url=self.tn_provider,
+                    token=self.tn_private_key.get_secret_value(),
+                )
+            except Exception as e:
+                if TNNodeNetworkError.is_tn_node_network_error(e):
+                    raise TNNodeNetworkError.from_error(e)
+                raise
         return self._client
 
     @property
@@ -84,6 +172,10 @@ class TNAccessBlock(Block):
     @property
     def logger(self):
         return get_logger_safe(__name__)
+
+    @property
+    def safe_client(self) -> Any:
+        return SafeTNClientProxy(self.client)
 
     def get_client(self):
         """
@@ -131,6 +223,7 @@ class TNAccessBlock(Block):
             error_msg = str(e).lower()
             if "stream not found" in error_msg:
                 raise self.StreamNotFoundError(f"Stream {stream_id} not found")
+
             raise self.Error(f"Failed to query TN for {stream_id}: {e}") from e
 
     def read_all_records(self, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
@@ -146,9 +239,9 @@ class TNAccessBlock(Block):
         self, stream_id: str, data_provider: Optional[str] = None, is_unix: bool = False
     ) -> Optional[TnRecord]:
         if is_unix:
-            result = self.get_client().get_first_record_unix(stream_id, data_provider)
+            result = self.safe_client.get_first_record_unix(stream_id, data_provider)
         else:
-            result = self.get_client().get_first_record(stream_id, data_provider)
+            result = self.safe_client.get_first_record(stream_id, data_provider)
 
         if result is None:
             return None
@@ -189,20 +282,18 @@ class TNAccessBlock(Block):
         try:
             with concurrency("tn-read", occupy=1):
                 if is_unix:
-                    # Cast to int for unix timestamps
                     unix_from = int(cast(int, date_from)) if date_from is not None else None
                     unix_to = int(cast(int, date_to)) if date_to is not None else None
-                    recs = self.get_client().get_records_unix(
+                    recs = self.safe_client.get_records_unix(
                         stream_id,
                         data_provider,
                         unix_from,
                         unix_to,
                     )
                 else:
-                    # Cast to str for ISO format
                     iso_from = str(cast(ShortIso8601Date, date_from)) if date_from is not None else None
                     iso_to = str(cast(ShortIso8601Date, date_to)) if date_to is not None else None
-                    recs = self.get_client().get_records(
+                    recs = self.safe_client.get_records(
                         stream_id,
                         data_provider,
                         iso_from,
@@ -259,7 +350,7 @@ class TNAccessBlock(Block):
 
         with concurrency("tn-write", occupy=1):
             logging.info(f"Inserting {len(records)} records into stream {stream_id}")
-            txHash = self.get_client().execute_procedure(
+            txHash = self.safe_client.execute_procedure(
                 stream_id=stream_id,
                 procedure="insert_record",
                 args=args,
@@ -290,7 +381,7 @@ class TNAccessBlock(Block):
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
-            txHash = self.get_client().execute_procedure(
+            txHash = self.safe_client.execute_procedure(
                 stream_id=stream_id,
                 procedure="insert_record",
                 args=args,
@@ -336,10 +427,10 @@ class TNAccessBlock(Block):
                 values.append(str(record["value"]))
                 external_created_at.append(created_at)
 
-        tx_hash = self.get_client().execute_procedure(
+        tx_hash = self.safe_client.execute_procedure(
             stream_id=helper_contract_stream_id,
             procedure="insert_records_truflation",
-            args=[ [data_providers, stream_ids, date_values, values, external_created_at] ],
+            args=[[data_providers, stream_ids, date_values, values, external_created_at]],
             wait=wait,
             data_provider=helper_contract_provider,
         )
@@ -408,14 +499,14 @@ class TNAccessBlock(Block):
                     wait=False,
                 )
             elif is_unix:
-                results = self.get_client().batch_insert_records_unix(
+                results = self.safe_client.batch_insert_records_unix(
                     batches=batches,
                     helper_contract_stream_id=self.helper_contract_stream_name,
                     helper_contract_data_provider=self.helper_contract_provider,
                     wait=False,
                 )
             else:
-                results = self.get_client().batch_insert_records(
+                results = self.safe_client.batch_insert_records(
                     batches=batches,
                     helper_contract_stream_id=self.helper_contract_stream_name,
                     helper_contract_data_provider=self.helper_contract_provider,
@@ -425,15 +516,15 @@ class TNAccessBlock(Block):
 
     def wait_for_tx(self, tx_hash: str) -> None:
         with concurrency("tn-read", occupy=1):
-            self.get_client().wait_for_tx(tx_hash)
+            self.safe_client.wait_for_tx(tx_hash)
 
     def deploy_stream(self, stream_id: str, stream_type: str = truf_sdk.StreamTypePrimitive, wait: bool = True) -> str:
         with concurrency("tn-write", occupy=1):
-            return self.get_client().deploy_stream(stream_id, stream_type, wait)
+            return self.safe_client.deploy_stream(stream_id, stream_type, wait)
 
     def init_stream(self, stream_id: str, wait: bool = True) -> str:
         with concurrency("tn-write", occupy=1):
-            return self.get_client().init_stream(stream_id, wait)
+            return self.safe_client.init_stream(stream_id, wait)
 
     def destroy_stream(self, stream_id: str, wait: bool = True) -> str:
         """Destroy a stream with the given stream ID.
@@ -446,7 +537,7 @@ class TNAccessBlock(Block):
             The transaction hash
         """
         with concurrency("tn-write", occupy=1):
-            return self.get_client().destroy_stream(stream_id, wait)
+            return self.safe_client.destroy_stream(stream_id, wait)
 
     @staticmethod
     def split_records(
@@ -513,26 +604,20 @@ def task_read_records(
         DataFrame containing the records
     """
     if is_unix:
-        return cast(
-            DataFrame[TnRecordModel],
-            block.read_records(
-                stream_id=stream_id,
-                data_provider=data_provider,
-                date_from=cast(Optional[int], date_from),
-                date_to=cast(Optional[int], date_to),
-                is_unix=True,
-            ),
+        return block.read_records(
+            stream_id=stream_id,
+            data_provider=data_provider,
+            date_from=cast(Optional[int], date_from),
+            date_to=cast(Optional[int], date_to),
+            is_unix=True,
         )
     else:
-        return cast(
-            DataFrame[TnRecordModel],
-            block.read_records(
-                stream_id=stream_id,
-                data_provider=data_provider,
-                date_from=cast(Optional[ShortIso8601Date], date_from),
-                date_to=cast(Optional[ShortIso8601Date], date_to),
-                is_unix=False,
-            ),
+        return block.read_records(
+            stream_id=stream_id,
+            data_provider=data_provider,
+            date_from=cast(Optional[ShortIso8601Date], date_from),
+            date_to=cast(Optional[ShortIso8601Date], date_to),
+            is_unix=False,
         )
 
 
@@ -556,18 +641,18 @@ def task_insert_unix_tn_records(
     return block.insert_unix_tn_records(stream_id, records, data_provider)
 
 
-@task(retries=3, retry_delay_seconds=2)
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=2, retry_condition_fn=tn_special_retry_condition(3))
 def task_wait_for_tx(block: TNAccessBlock, tx_hash: str) -> None:
     return block.wait_for_tx(tx_hash)
 
 
-@task(retries=5, retry_delay_seconds=10)
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_and_wait_for_tx(
     block: TNAccessBlock,
     stream_id: str,
     records: DataFrame[TnRecordModel],
     data_provider: Optional[str] = None,
-):
+) -> State[Any] | str:
     """Insert records into TSN and wait for transaction confirmation"""
     logging = get_run_logger()
 
@@ -587,14 +672,14 @@ def task_insert_and_wait_for_tx(
     return insertion
 
 
-@task(retries=5, retry_delay_seconds=10)
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_unix_and_wait_for_tx(
     block: TNAccessBlock,
     stream_id: str,
     records: DataFrame[TnRecordModel],
     data_provider: Optional[str] = None,
 ):
-    """Insert records into TSN and wait for transaction confirmation"""
+    """Insert unix records into TSN and wait for transaction confirmation"""
     logging = get_run_logger()
 
     logging.info(f"Inserting {len(records)} records into stream {stream_id}")
@@ -615,7 +700,7 @@ def task_insert_unix_and_wait_for_tx(
     return insertion
 
 
-@task(retries=5, retry_delay_seconds=10)
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def _task_only_batch_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
@@ -696,7 +781,7 @@ def task_filter_deployed_streams(block: TNAccessBlock, records: DataFrame[TnData
     )
 
 
-@task(retries=5, retry_delay_seconds=10)
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_split_and_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
@@ -722,7 +807,7 @@ def task_split_and_insert_records(
         SplitInsertResults if successful, None if no records to insert
     """
     logger = get_logger_safe(__name__)
-    failed_reasons = []
+    failed_reasons: list[str] = []
     if filter_deployed_streams:
         filter_with_cache = task_filter_deployed_streams.with_options(cache_expiration=filter_cache_duration)
         filter_results = filter_with_cache(block=block, records=records)
@@ -738,11 +823,13 @@ def task_split_and_insert_records(
     split_records = block.split_records(records, max_batch_size)
     if len(split_records) == 0:
         logger.warning("No records to insert")
-        failed_records = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
-        return SplitInsertResults(success_tx_hashes=[], failed_records=failed_records, failed_reasons=failed_reasons)
+        failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+        return SplitInsertResults(
+            success_tx_hashes=[], failed_records=failed_records_typed, failed_reasons=failed_reasons
+        )
 
-    tx_hashes = []
-    failed_records = []
+    tx_hashes: list[str] = []
+    failed_records: list[DataFrame[TnDataRowModel]] = []
     for batch in split_records:
         tx_hash_state = task_batch_insert_tn_records(
             block=block,
