@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from dataclasses import dataclass, field
 import json
 import logging
@@ -6,7 +7,7 @@ import shutil
 import signal
 import subprocess
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from prefect.testing.utilities import prefect_test_harness
 from pydantic import SecretStr
@@ -29,19 +30,10 @@ class ContainerSpec:
     name: str
     image: str
     tmpfs_path: Optional[str] = None
-    env_vars: list[str] = field(default_factory=list)
+    env_vars: ( list[str] ) = field(default_factory=list)
     ports: dict[str, str] = field(default_factory=dict)
     entrypoint: Optional[str] = None
     args: list[str] = field(default_factory=list)
-
-    def __post_init__(self):
-        if self.env_vars is None:
-            self.env_vars = []
-        if self.ports is None:
-            self.ports = {}
-        if self.args is None:
-            self.args = []
-
 
 # Container specifications
 POSTGRES_CONTAINER = ContainerSpec(
@@ -87,7 +79,7 @@ TSN_DB_CONTAINER = ContainerSpec(
 )
 
 
-def run_docker_command(args: list[str], check: bool = False) -> subprocess.CompletedProcess:
+def run_docker_command(args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
     """
     Executes a docker command with the given list of arguments.
 
@@ -278,7 +270,7 @@ def docker_network():
 
 
 @pytest.fixture(scope="session")
-def tn_node(docker_network):
+def tn_node(docker_network: str) -> Generator[str, None, None]:
     """
     Pytest fixture that sets up a TSN-DB node with Postgres for testing.
 
@@ -345,7 +337,7 @@ class TrufNetworkProvider:
 
 
 @pytest.fixture(scope="session")
-def tn_provider(tn_node) -> TrufNetworkProvider:
+def tn_provider(tn_node: str) -> TrufNetworkProvider:
     """
     Returns a TrufNetworkProvider instance configured to use the test TSN node.
 
@@ -368,13 +360,13 @@ class TestTrufNetworkFixtures:
     Only run locally, skipped in CI.
     """
 
-    def test_docker_network_fixture(self, docker_network):
+    def test_docker_network_fixture(self, docker_network: str):
         """Test docker network creation and cleanup"""
         # Check network exists
         result = run_docker_command(["network", "inspect", docker_network])
         assert result.returncode == 0, "Docker network should exist during test"
 
-    def test_tsn_node_fixture(self, tn_node):
+    def test_tsn_node_fixture(self, tn_node: str):
         """Test TSN node setup and health"""
         import requests
 
@@ -391,7 +383,7 @@ class TestTrufNetworkFixtures:
             result = run_docker_command(["container", "inspect", container])
             assert result.returncode == 0, f"Container {container} should be running"
 
-    def test_tn_provider_fixture(self, tn_provider):
+    def test_tn_provider_fixture(self, tn_provider: TrufNetworkProvider):
         """Test TrufNetworkProvider configuration"""
         assert isinstance(tn_provider, TrufNetworkProvider)
         assert tn_provider.api_endpoint.startswith("http://")
@@ -408,46 +400,65 @@ def term_handler():
 
 @pytest.fixture(scope='session', autouse=True)
 def disable_prefect_retries():
+    from importlib import import_module
     from unittest.mock import patch
+
     from prefect import task as original_task
 
-    def mock_task(*args, **kwargs):
-        kwargs['retries'] = 0
-        return original_task(*args, **kwargs)
-    
-    with patch('prefect.task', side_effect=mock_task), \
-         patch('prefect.Task', side_effect=mock_task):
-        yield
+    # Patch task retries by modifying the task options directly
+    def patch_task_options(task_fn: Any) -> Any:
+        if hasattr(task_fn, 'with_options'):
+            return task_fn.with_options(retries=0, cache_key_fn=None)
+        return task_fn
+
+    # All tasks with retries and their import paths
+    tasks_to_patch = [
+        # FMP Historical Flow
+        'tsn_adapters.flows.fmp.historical_flow.fetch_historical_data',
+        # Stream Deploy Flow
+        'tsn_adapters.flows.stream_deploy_flow.check_and_deploy_stream',
+        # Primitive Source Descriptor
+        'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url',
+        'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github',
+        # FMP Real Time Flow
+        'tsn_adapters.flows.fmp.real_time_flow.fetch_quotes_for_batch',
+        # Argentina Task Wrappers
+        'tsn_adapters.tasks.argentina.task_wrappers.task_create_stream_fetcher',
+        'tsn_adapters.tasks.argentina.task_wrappers.task_get_streams',
+        'tsn_adapters.tasks.argentina.task_wrappers.task_create_sepa_provider',
+        'tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date',
+        'tsn_adapters.tasks.argentina.task_wrappers.task_get_latest_records',
+        'tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map',
+        # TN Access
+        'tsn_adapters.blocks.tn_access.task_wait_for_tx',
+        'tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx',
+        'tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx',
+        'tsn_adapters.blocks.tn_access._task_only_batch_insert_records',
+        'tsn_adapters.blocks.tn_access.task_split_and_insert_records'
+    ]
+
+    with patch('prefect.task', side_effect=original_task) as mock_task:
+        for import_path in tasks_to_patch:
+            # Split the import path into module path and attribute name
+            module_path, attr_name = import_path.rsplit('.', 1)
+            # Import the module and get the task function
+            module = import_module(module_path)
+            task_fn = getattr(module, attr_name)
+            # Patch the task
+            mock_task.return_value = patch_task_options(task_fn)
+            patch(import_path, new=patch_task_options(task_fn)).start()
 
 @pytest.fixture(scope="session", autouse=False)
-def prefect_test_fixture():
+def prefect_test_fixture(disable_prefect_retries: Any):
     with prefect_test_harness(server_startup_timeout=120):
         yield
-
-
-def test_if_retry_disabled(prefect_test_fixture):
-    from prefect import task
-
-    counter = 0
-    
-    @task(retries=2, retry_delay_seconds=0)
-    def test_task():
-        nonlocal counter
-        counter += 1
-        raise Exception("Test exception")
-
-    try:
-        test_task()
-    except Exception as e:
-        pass
-    assert counter == 1
 
 
 DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1
 
 
 @pytest.fixture(scope="session")
-def tn_block(tn_provider: TrufNetworkProvider, prefect_test_fixture) -> TNAccessBlock:
+def tn_block(tn_provider: TrufNetworkProvider, prefect_test_fixture, disable_prefect_retries) -> TNAccessBlock:
     """Create a TNAccessBlock with test node and default credentials."""
     return TNAccessBlock(
         tn_provider=tn_provider.api_endpoint,

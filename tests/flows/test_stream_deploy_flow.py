@@ -1,11 +1,10 @@
-from time import sleep
-from typing import Optional, cast
+from typing import Optional
 
 import pandas as pd
 from pandera.typing import DataFrame
-from pydantic import SecretStr
+from pydantic import ConfigDict, SecretStr
 import pytest
-from pytest import MonkeyPatch
+from pytest import FixtureRequest
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
 
@@ -14,100 +13,15 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourcesDescriptorBlock,
 )
 from tsn_adapters.blocks.tn_access import TNAccessBlock
-from tsn_adapters.flows.stream_deploy_flow import DeployStreamResults, deploy_streams_flow
+from tsn_adapters.flows.stream_deploy_flow import deploy_streams_flow
 
 
-class FakePrimitiveSourcesDescriptor(PrimitiveSourcesDescriptorBlock):
-    def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
-        # Create a simple DataFrame with three stream descriptors.
-        data = {
-            "stream_id": ["stream1", "stream2", "stream3"],
-            "source_id": ["src1", "src2", "src3"],
-            "source_type": ["type1", "type1", "type2"],
-        }
-        return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
-
-
-class FakeTNClient(tn_client.TNClient):
-    def __init__(self, existing_streams: set[str] | None = None):
-        # We do not call the real TNClient __init__ to avoid any side effects.
-        if existing_streams is None:
-            existing_streams = set()
-        self.existing_streams = existing_streams
-        self.deployed_streams: list[str] = []
-        # Instead of self.client = self (which is recursive), we set it to a dummy object.
-        self.client = object()
-
-    def __getstate__(self):
-        """
-        Override serialization to remove the problematic 'client' attribute.
-        This prevents infinite recursion during parameter encoding.
-        """
-        state = self.__dict__.copy()
-        if "client" in state:
-            del state["client"]
-        return state
-
-    def get_current_account(self):
-        return "dummy_account"
-
-    def stream_exists(self, stream_id: str, data_provider: Optional[str] = None) -> bool:
-        return stream_id in self.existing_streams
-
-    def deploy_stream(self, stream_id: str, stream_type: str = truf_sdk.StreamTypePrimitive, wait: bool = True):
-        # Instead of calling the real SDK, we simulate deployment by calling our fake init_stream.
-        self.init_stream(stream_id, wait=wait)
-        return "dummy_tx_hash"
-
-    def init_stream(self, stream_id: str, wait: bool = True):
-        # Simulate a successful stream initialization.
-        self.deployed_streams.append(stream_id)
-        self.existing_streams.add(stream_id)
-        return "dummy_tx_hash"
-
-
-# --- Fake TNAccessBlock that returns our FakeTNClient ---
-class FakeTNAccessBlock(TNAccessBlock):
-    def __init__(self, fake_client: FakeTNClient):
-        # Provide dummy values for required fields.
-        super().__init__(
-            tn_provider="2b5ad5c4795c026514f8317c7a215e218dccd6cf",
-            tn_private_key=SecretStr("0000000000000000000000000000000000000000000000000000000000000001"),
-        )
-        self._fake_client = fake_client
-
-    def get_client(self):
-        return self._fake_client
-
-
-@pytest.mark.usefixtures("prefect_test_fixture")
-def test_deploy_streams_flow_all_new():
-    """
-    When none of the streams exist, all should be deployed.
-    """
-    fake_psd = FakePrimitiveSourcesDescriptor()
-    fake_client = FakeTNClient(existing_streams=set())
-    fake_tna = FakeTNAccessBlock(fake_client=fake_client)
-
-    results = deploy_streams_flow(
-        psd_block=fake_psd, tna_block=fake_tna
-    )
-
-    # All three streams should be deployed.
-    assert set(fake_client.deployed_streams) == {"stream1", "stream2", "stream3"}
-
-    # Each message should indicate that the stream was deployed (or possibly "already exists"
-    # if, for example, a retry ran).
-    for message in results:
-        assert "Deployed and initialized stream" in message or "already exists" in message
-
-
-# Dummy implementation for the primitive source descriptor block
-class DummyPrimitiveSourcesDescriptorBlock(PrimitiveSourcesDescriptorBlock):
-    num_streams: int = 10000
+class TestPrimitiveSourcesDescriptor(PrimitiveSourcesDescriptorBlock):
+    """Test implementation of PrimitiveSourcesDescriptorBlock that can generate a configurable number of streams."""
+    model_config = ConfigDict(ignored_types=(object,))
+    num_streams: int = 3
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
-        # Create a DataFrame with 10,000 stream descriptors
         data = {
             "stream_id": [f"stream_{i}" for i in range(self.num_streams)],
             "source_id": [f"src_{i}" for i in range(self.num_streams)],
@@ -116,74 +30,112 @@ class DummyPrimitiveSourcesDescriptorBlock(PrimitiveSourcesDescriptorBlock):
         return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
 
 
-# Dummy TN client to simulate account retrieval
-class DummyTNClient(tn_client.TNClient):
-    def __init__(self):
-        pass
+class TestTNClient(tn_client.TNClient):
+    """Test implementation of TNClient that tracks deployed streams and can be initialized with existing streams."""
+    def __init__(self, existing_streams: set[str] | None = None):
+        # We don't call super().__init__ to avoid real client initialization
+        if existing_streams is None:
+            existing_streams = set()
+        self.existing_streams = existing_streams
+        self.deployed_streams: list[str] = []
+        # Set a dummy client to satisfy TNClient's expectations
+        self.client = object()
 
-    def get_current_account(self):
+    def get_current_account(self) -> str:
         return "dummy_account"
 
+    def stream_exists(self, stream_id: str, data_provider: Optional[str] = None) -> bool:
+        # Check if the stream exists in either existing_streams or deployed_streams
+        return stream_id in self.existing_streams
 
-# Dummy TNAccessBlock to simulate tn server behavior
-class DummyTNAccessBlock(TNAccessBlock):
-    def __init__(self):
-        super().__init__(
-            tn_provider="2b5ad5c4795c026514f8317c7a215e218dccd6cf",
-            tn_private_key=SecretStr("0000000000000000000000000000000000000000000000000000000000000001"),
-        )
+    def deploy_stream(self, stream_id: str, stream_type: str = truf_sdk.StreamTypePrimitive, wait: bool = True) -> str:
+        # Instead of calling the real SDK, we just track that the stream was deployed
+        self.deployed_streams.append(stream_id)
+        self.existing_streams.add(stream_id)
+        return "dummy_tx_hash"
+
+    def init_stream(self, stream_id: str, wait: bool = True) -> str:
+        # Simulate a successful stream initialization
+        return "dummy_tx_hash"
+
+    def wait_for_tx(self, tx_hash: str) -> None:
+        if tx_hash == "failed_tx_hash":
+            raise Exception("Failed to deploy stream")
+        pass
+
+
+class TestTNAccessBlock(TNAccessBlock):
+    """Test implementation of TNAccessBlock that uses our TestTNClient."""
+    _test_client: TestTNClient
+    model_config = ConfigDict(ignored_types=(object,))
+
+    def __init__(self, existing_streams: set[str] | None = None):
+        super().__init__(tn_provider="", tn_private_key=SecretStr(""))
+        self._test_client = TestTNClient(existing_streams=existing_streams)
 
     @property
-    def client(self):
-        return DummyTNClient()
-
-    def get_client(self):
-        return self.client
-
-    def stream_exists(self, data_provider: str, stream_id: str) -> bool:
-        # For testing, assume the stream never exists
-        return False
-
-    def deploy_stream(self, stream_id: str, stream_type: str = truf_sdk.StreamTypePrimitive, wait: bool = True):
-        # wait 0.01 seconds
-        # sleep(0.01)
-        return f"deploy_tx_{stream_id}"
-
-    def init_stream(self, stream_id: str, wait: bool = True):
-        return f"init_tx_{stream_id}"
-
-    def wait_for_tx(self, tx_hash: str):
-        # wait 0.1 seconds
-        # sleep(0.1)
-        return
-
-
-# Dummy implementations for tn module tasks to avoid real network calls
-
-@pytest.fixture
-def tn_server():
-    # Return our dummy TNAccessBlock instance
-    return DummyTNAccessBlock()
+    def client(self) -> tn_client.TNClient:
+        """Override client property to return our test client instead of creating a real one."""
+        return self._test_client
 
 
 @pytest.fixture
-def primitive_descriptor():
-    dummy = DummyPrimitiveSourcesDescriptorBlock(num_streams=5)
-    return dummy
+def tn_access_block() -> TestTNAccessBlock:
+    """Fixture that provides a TestTNAccessBlock with no existing streams."""
+    return TestTNAccessBlock(existing_streams=set())
+
+
+@pytest.fixture
+def primitive_descriptor(request: FixtureRequest) -> TestPrimitiveSourcesDescriptor:
+    """Fixture that provides a TestPrimitiveSourcesDescriptor with configurable number of streams."""
+    num_streams = getattr(request, "param", 3)  # Default to 3 streams if not parameterized
+    return TestPrimitiveSourcesDescriptor(num_streams=num_streams)
 
 
 @pytest.mark.usefixtures("prefect_test_fixture")
-def test_deploy_streams_flow(
-    tn_server: DummyTNAccessBlock, primitive_descriptor: DummyPrimitiveSourcesDescriptorBlock
-):
-    # Execute the deployment flow which deploys 5 streams
-    result = deploy_streams_flow(
-        psd_block=primitive_descriptor, tna_block=tn_server
+def test_deploy_streams_flow_all_new(
+    tn_access_block: TestTNAccessBlock,
+    primitive_descriptor: TestPrimitiveSourcesDescriptor
+) -> None:
+    """Test that all streams are deployed when none exist."""
+    results = deploy_streams_flow(
+        psd_block=primitive_descriptor,
+        tna_block=tn_access_block
     )
 
-    # Assert that the result is a list with 5 messages
-    assert result["deployed_count"] == 5
-    assert result["skipped_count"] == 0
+    # All three streams should be deployed
+    assert results["deployed_count"] == 3
+    assert results["skipped_count"] == 0
+
+    # Verify the actual streams that were deployed
+    client = tn_access_block.client
+    assert isinstance(client, TestTNClient)  # Type check for mypy
+    assert set(client.deployed_streams) == {"stream_0", "stream_1", "stream_2"}
+
+
+@pytest.mark.usefixtures("prefect_test_fixture")
+def test_deploy_streams_flow_with_existing() -> None:
+    """Test that only non-existing streams are deployed when some already exist."""
+    # Create TNAccessBlock with some existing streams
+    existing_streams = {"stream_0", "stream_2"}  # First and last streams exist
+    tn_access_block = TestTNAccessBlock(existing_streams=existing_streams)
+    
+    # Create descriptor with 3 streams
+    primitive_descriptor = TestPrimitiveSourcesDescriptor(num_streams=3)
+
+    results = deploy_streams_flow(
+        psd_block=primitive_descriptor,
+        tna_block=tn_access_block
+    )
+
+    # Only stream_1 should be deployed, others should be skipped
+    assert results["deployed_count"] == 1
+    assert results["skipped_count"] == 2
+
+    # Verify the actual streams that were deployed
+    client = tn_access_block.client
+    assert isinstance(client, TestTNClient)  # Type check for mypy
+    assert client.deployed_streams == ["stream_1"]  # Changed from len check to exact match
 
 
 if __name__ == "__main__":
