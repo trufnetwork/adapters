@@ -6,10 +6,15 @@ from prefect import flow, task
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
 
-from tsn_adapters.blocks.tn_access import TNAccessBlock
+from tsn_adapters.blocks.tn_access import UNUSED_INFINITY_RETRIES, TNAccessBlock, tn_special_retry_condition
 
 
-@task(tags=["tn", "tn-write"])
+@task(
+    retries=UNUSED_INFINITY_RETRIES,
+    retry_delay_seconds=10,
+    retry_condition_fn=tn_special_retry_condition(3),
+    tags=["tn", "tn-write"],
+)
 def task_insert_tsn_records(
     stream_id: str,
     records: pd.DataFrame,
@@ -79,7 +84,12 @@ def get_all_tsn_records(
     return df
 
 
-@task(tags=["tn", "tn-write"])
+@task(
+    retries=UNUSED_INFINITY_RETRIES,
+    retry_delay_seconds=10,
+    retry_condition_fn=tn_special_retry_condition(3),
+    tags=["tn", "tn-write"],
+)
 def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = True, is_unix: bool = False) -> str:
     stream_type = truf_sdk.StreamTypePrimitive if not is_unix else truf_sdk.StreamTypePrimitiveUnix
     return block.deploy_stream(
@@ -89,7 +99,12 @@ def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = Tru
     )
 
 
-@task(tags=["tn", "tn-write"])
+@task(
+    retries=UNUSED_INFINITY_RETRIES,
+    retry_delay_seconds=10,
+    retry_condition_fn=tn_special_retry_condition(3),
+    tags=["tn", "tn-write"],
+)
 def task_init_stream(block: TNAccessBlock, stream_id: str, wait: bool = True) -> str:
     return block.init_stream(stream_id=stream_id, wait=wait)
 
