@@ -7,16 +7,28 @@ S3DeploymentStateBlock that uses an S3 bucket to store deployment state informat
 in a unified parquet file.
 
 Usage Example:
+    Before using this block:
+    1. Create an S3Bucket block in Prefect (UI or programmatically)
+    2. Register this DeploymentState block in Prefect (UI or programmatically)
+    3. Configure an instance with your S3 bucket details
+
+    # Example using Prefect's recommended loading method:
     from prefect_aws import S3Bucket
     from tsn_adapters.blocks.deployment_state import S3DeploymentStateBlock
     from datetime import datetime, timezone
 
-    # Initialize your S3 bucket (details omitted)
-    s3_bucket = S3Bucket( /* initialize your bucket here */ )
-    file_path = "deployment_states/all_streams.parquet"
-    deployment_block = S3DeploymentStateBlock(s3_bucket=s3_bucket, file_path=file_path)
+    # Load your pre-configured blocks
+    deployment_block = S3DeploymentStateBlock.load("your-deployment-block-name")
     timestamp = datetime.now(timezone.utc)
     deployment_block.mark_as_deployed("stream_id_example", timestamp)
+
+    # Alternatively, if creating programmatically:
+    s3_bucket = S3Bucket.load("your-bucket-block-name")
+    deployment_block = S3DeploymentStateBlock(
+        s3_bucket=s3_bucket,
+        file_path="deployment_states/all_streams.parquet"
+    )
+    deployment_block.save("your-deployment-block-name")
 """
 
 from abc import ABC, abstractmethod
