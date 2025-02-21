@@ -16,7 +16,6 @@ from tsn_adapters.blocks.tn_access import (
     task_insert_and_wait_for_tx,
     task_read_records,
     task_split_and_insert_records,
-    task_wait_for_tx,
 )
 from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel

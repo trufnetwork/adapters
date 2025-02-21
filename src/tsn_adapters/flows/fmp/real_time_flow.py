@@ -97,21 +97,22 @@ def convert_quotes_to_tn_data(
 
     return DataFrame[TnDataRowModel](result_df)
 
+
 def ensure_unix_timestamp(time: int) -> int:
     """
     Ensure the timestamp is a valid unix timestamp (seconds since epoch).
-    
+
     This function validates and converts timestamps to ensure they are in
     seconds since epoch format. It handles cases where the input might be
     in milliseconds or microseconds.
-    
+
     Args:
         time: Integer timestamp that might be in seconds, milliseconds,
               microseconds, or nanoseconds since epoch
-            
+
     Returns:
         Integer timestamp in seconds since epoch
-        
+
     Raises:
         ValueError: If the timestamp is invalid or outside the reasonable range
     """
@@ -121,7 +122,7 @@ def ensure_unix_timestamp(time: int) -> int:
     # Define valid range for seconds since epoch
     min_valid_timestamp = 0  # 1970-01-01
     max_valid_timestamp = 4102444800  # 2100-01-01
-    
+
     # Convert to seconds if in a larger unit
     converted_time = time
     if time > max_valid_timestamp:
@@ -134,13 +135,11 @@ def ensure_unix_timestamp(time: int) -> int:
             converted_time = time // 10**3
         else:  # assume seconds but with some future date
             converted_time = time // 10**9  # aggressive conversion to be safe
-    
+
     # Validate the range after conversion
     if converted_time < min_valid_timestamp or converted_time > max_valid_timestamp:
-        raise ValueError(
-            f"Timestamp outside valid range (1970-2100): {converted_time}"
-        )
-    
+        raise ValueError(f"Timestamp outside valid range (1970-2100): {converted_time}")
+
     return converted_time
 
 

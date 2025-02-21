@@ -18,6 +18,7 @@ from tsn_adapters.flows.stream_deploy_flow import deploy_streams_flow
 
 class TestPrimitiveSourcesDescriptor(PrimitiveSourcesDescriptorBlock):
     """Test implementation of PrimitiveSourcesDescriptorBlock that can generate a configurable number of streams."""
+
     model_config = ConfigDict(ignored_types=(object,))
     num_streams: int = 3
 
@@ -32,6 +33,7 @@ class TestPrimitiveSourcesDescriptor(PrimitiveSourcesDescriptorBlock):
 
 class TestTNClient(tn_client.TNClient):
     """Test implementation of TNClient that tracks deployed streams and can be initialized with existing streams."""
+
     def __init__(self, existing_streams: set[str] | None = None):
         # We don't call super().__init__ to avoid real client initialization
         if existing_streams is None:
@@ -66,6 +68,7 @@ class TestTNClient(tn_client.TNClient):
 
 class TestTNAccessBlock(TNAccessBlock):
     """Test implementation of TNAccessBlock that uses our TestTNClient."""
+
     _test_client: TestTNClient
     model_config = ConfigDict(ignored_types=(object,))
 
@@ -94,14 +97,10 @@ def primitive_descriptor(request: FixtureRequest) -> TestPrimitiveSourcesDescrip
 
 @pytest.mark.usefixtures("prefect_test_fixture")
 def test_deploy_streams_flow_all_new(
-    tn_access_block: TestTNAccessBlock,
-    primitive_descriptor: TestPrimitiveSourcesDescriptor
+    tn_access_block: TestTNAccessBlock, primitive_descriptor: TestPrimitiveSourcesDescriptor
 ) -> None:
     """Test that all streams are deployed when none exist."""
-    results = deploy_streams_flow(
-        psd_block=primitive_descriptor,
-        tna_block=tn_access_block
-    )
+    results = deploy_streams_flow(psd_block=primitive_descriptor, tna_block=tn_access_block)
 
     # All three streams should be deployed
     assert results["deployed_count"] == 3
@@ -119,14 +118,11 @@ def test_deploy_streams_flow_with_existing() -> None:
     # Create TNAccessBlock with some existing streams
     existing_streams = {"stream_0", "stream_2"}  # First and last streams exist
     tn_access_block = TestTNAccessBlock(existing_streams=existing_streams)
-    
+
     # Create descriptor with 3 streams
     primitive_descriptor = TestPrimitiveSourcesDescriptor(num_streams=3)
 
-    results = deploy_streams_flow(
-        psd_block=primitive_descriptor,
-        tna_block=tn_access_block
-    )
+    results = deploy_streams_flow(psd_block=primitive_descriptor, tna_block=tn_access_block)
 
     # Only stream_1 should be deployed, others should be skipped
     assert results["deployed_count"] == 1

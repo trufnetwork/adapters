@@ -2,9 +2,13 @@
 Base flow controller for Argentina SEPA data processing.
 """
 
+from datetime import datetime
+import re
+
 from prefect import get_run_logger
 from prefect_aws import S3Bucket
 
+from tsn_adapters.tasks.argentina.errors.errors import InvalidDateFormatError
 from tsn_adapters.tasks.argentina.provider import ProcessedDataProvider, RawDataProvider
 from tsn_adapters.tasks.argentina.types import DateStr
 
@@ -32,9 +36,26 @@ class ArgentinaFlowController:
             date: Date string to validate
 
         Raises:
-            ValueError: If date format is invalid
+            InvalidDateFormatError: If date format is invalid
         """
-        import re
+        # First check for separators
+        if "/" in date:
+            raise InvalidDateFormatError(date, "wrong_separator")
+        if "-" not in date:
+            raise InvalidDateFormatError(date, "no_separator")
 
+        # Check basic format
         if not re.match(r"\d{4}-\d{2}-\d{2}", date):
-            raise ValueError(f"Invalid date format: {date}")
+            raise InvalidDateFormatError(date, "wrong_format")
+
+        # Check date validity
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError as e:
+            error_msg = str(e)
+            if "month must be in 1..12" in error_msg:
+                raise InvalidDateFormatError(date, "invalid_month")
+            if "day is out of range for month" in error_msg or "day must be in" in error_msg:
+                raise InvalidDateFormatError(date, "invalid_day")
+            # Only raise wrong_format if it's not a specific month/day error
+            raise InvalidDateFormatError(date, "wrong_format")

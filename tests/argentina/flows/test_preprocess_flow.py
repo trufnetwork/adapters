@@ -166,7 +166,9 @@ class TestPreprocessFlowProcessDate:
         flow._create_summary = cast(Any, MagicMock())
         return flow
 
-    def test_process_date_happy_path(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture, prefect_test_fixture):
+    def test_process_date_happy_path(
+        self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture, prefect_test_fixture
+    ):
         """Test process_date with valid data."""
         # Mock dependencies
         mock_raw_data = cast(Any, MagicMock(spec=pd.DataFrame))
@@ -189,7 +191,7 @@ class TestPreprocessFlowProcessDate:
             Any,
             mocker.patch(
                 "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
-                return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized))
+                return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized)),
             ),
         )
 
@@ -200,10 +202,7 @@ class TestPreprocessFlowProcessDate:
         raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
         mock_task_load_category_map.assert_called_once_with(url=mock_preprocess_flow.category_map_url)
         mock_process_raw_data.assert_called_once_with(
-            raw_data=mock_raw_data,
-            category_map_df=mock_category_map,
-            date=TEST_DATE,
-            return_state=True
+            raw_data=mock_raw_data, category_map_df=mock_category_map, date=TEST_DATE, return_state=True
         )
         processed_provider = cast(Any, mock_preprocess_flow.processed_provider)
         processed_provider.save_processed_data.assert_called_once_with(
@@ -443,7 +442,7 @@ class TestPreprocessFlowCreateSummary:
 
 class TestPreprocessFlowTopLevel:
     """Tests for the top-level preprocess_flow function."""
-    
+
     pytestmark = pytest.mark.usefixtures("prefect_test_fixture")
 
     def test_preprocess_flow_happy_path(self, mocker: MockerFixture):

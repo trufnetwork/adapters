@@ -28,6 +28,7 @@ class TnRecordModel(pa.DataFrameModel):
         coerce = True
         strict = "filter"
 
+
 class StreamLocatorModel(pa.DataFrameModel):
     stream_id: Series[str]
     data_provider: Series[pa.String] = pa.Field(
