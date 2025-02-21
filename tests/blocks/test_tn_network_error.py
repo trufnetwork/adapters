@@ -1,8 +1,10 @@
-from datetime import datetime
 from typing import Any, Callable
 
+from prefect.client.schemas.objects import StateDetails, StateType
+from prefect.types._datetime import DateTime
 from pydantic import SecretStr
 import pytest
+from trufnetwork_sdk_py.client import TNClient
 
 from tsn_adapters.blocks.tn_access import (
     SafeTNClientProxy,
@@ -11,17 +13,11 @@ from tsn_adapters.blocks.tn_access import (
     tn_special_retry_condition,
 )
 
-from prefect.client.schemas.objects import StateDetails, StateType
-from prefect.types._datetime import DateTime
-
-from trufnetwork_sdk_py.client import TNClient
-
 
 # --- Dummy TN Client to simulate behavior ---
 class DummyTNClient(TNClient):
     def __init__(self):
         pass
-
 
     def get_first_record(self, *args: Any, **kwargs: Any) -> dict[str, str | float] | None:
         # Simulate a successful call
@@ -77,7 +73,7 @@ def test_is_tn_node_network_error():
 # For our tests we need dummy Task, TaskRun, and State objects.
 # We use minimal dummy implementations.
 from prefect import Task  # Ensure that the correct Task object is imported per your Prefect version.
-from prefect.client.schemas.objects import TaskRun, State
+from prefect.client.schemas.objects import State, TaskRun
 
 
 class DummyTask(Task[Any, Any]):
@@ -172,7 +168,7 @@ def test_tn_access_block_network_error():
 def test_real_tn_client_unexistent_provider():
     """
     Test the real TN client with an unexistent provider.
-    
+
     This test creates a TNAccessBlock using an invalid provider URL and attempts to call
     get_first_record. The safe client is expected to detect the underlying network
     error and re-raise it as a TNNodeNetworkError.
@@ -184,7 +180,7 @@ def test_real_tn_client_unexistent_provider():
         block = TNAccessBlock(
             tn_provider=invalid_provider,
             tn_private_key=SecretStr("0000000000000000000000000000000000000000000000000000000000000012"),
-            helper_contract_name="dummy"
+            helper_contract_name="dummy",
         )
         _ = block.get_first_record("dummy_stream")
     # Check that the error message indicates a connection issue.

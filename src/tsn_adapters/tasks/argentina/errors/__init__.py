@@ -12,7 +12,7 @@ from tsn_adapters.tasks.argentina.errors.errors import (
     InvalidCSVSchemaError,
     InvalidDateFormatError,
     InvalidStructureZIPError,
-    MissingProductIDError,
+    InvalidProductsError,
     MissingProductosCSVError,
     UncategorizedProductsError,
 )
@@ -27,7 +27,7 @@ __all__ = [
     "InvalidCSVSchemaError",
     "InvalidDateFormatError",
     "InvalidStructureZIPError",
-    "MissingProductIDError",
+    "InvalidProductsError",
     "MissingProductosCSVError",
     "UncategorizedProductsError",
 ] 

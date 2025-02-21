@@ -30,10 +30,11 @@ class ContainerSpec:
     name: str
     image: str
     tmpfs_path: Optional[str] = None
-    env_vars: ( list[str] ) = field(default_factory=list)
+    env_vars: list[str] = field(default_factory=list)
     ports: dict[str, str] = field(default_factory=dict)
     entrypoint: Optional[str] = None
     args: list[str] = field(default_factory=list)
+
 
 # Container specifications
 POSTGRES_CONTAINER = ContainerSpec(
@@ -389,7 +390,8 @@ class TestTrufNetworkFixtures:
         assert tn_provider.api_endpoint.startswith("http://")
         assert tn_provider.get_provider() is tn_provider
 
-@pytest.fixture(scope='session', autouse=True)
+
+@pytest.fixture(scope="session", autouse=True)
 def term_handler():
     """
     Fixture to transform SIGTERM into SIGINT. This permit us to gracefully stop the suite uppon SIGTERM.
@@ -398,7 +400,8 @@ def term_handler():
     yield
     signal.signal(signal.SIGTERM, orig)
 
-@pytest.fixture(scope='session', autouse=True)
+
+@pytest.fixture(scope="session", autouse=True)
 def disable_prefect_retries():
     from importlib import import_module
     from unittest.mock import patch
@@ -407,46 +410,47 @@ def disable_prefect_retries():
 
     # Patch task retries by modifying the task options directly
     def patch_task_options(task_fn: Any) -> Any:
-        if hasattr(task_fn, 'with_options'):
+        if hasattr(task_fn, "with_options"):
             return task_fn.with_options(retries=0, cache_key_fn=None)
         return task_fn
 
     # All tasks with retries and their import paths
     tasks_to_patch = [
         # FMP Historical Flow
-        'tsn_adapters.flows.fmp.historical_flow.fetch_historical_data',
+        "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
         # Stream Deploy Flow
-        'tsn_adapters.flows.stream_deploy_flow.check_and_deploy_stream',
+        "tsn_adapters.flows.stream_deploy_flow.check_and_deploy_stream",
         # Primitive Source Descriptor
-        'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url',
-        'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github',
+        "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url",
+        "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github",
         # FMP Real Time Flow
-        'tsn_adapters.flows.fmp.real_time_flow.fetch_quotes_for_batch',
+        "tsn_adapters.flows.fmp.real_time_flow.fetch_quotes_for_batch",
         # Argentina Task Wrappers
-        'tsn_adapters.tasks.argentina.task_wrappers.task_create_stream_fetcher',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_streams',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_create_sepa_provider',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_latest_records',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map',
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_stream_fetcher",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_streams",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_sepa_provider",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_latest_records",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map",
         # TN Access
-        'tsn_adapters.blocks.tn_access.task_wait_for_tx',
-        'tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx',
-        'tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx',
-        'tsn_adapters.blocks.tn_access._task_only_batch_insert_records',
-        'tsn_adapters.blocks.tn_access.task_split_and_insert_records'
+        "tsn_adapters.blocks.tn_access.task_wait_for_tx",
+        "tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx",
+        "tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx",
+        "tsn_adapters.blocks.tn_access._task_only_batch_insert_records",
+        "tsn_adapters.blocks.tn_access.task_split_and_insert_records",
     ]
 
-    with patch('prefect.task', side_effect=original_task) as mock_task:
+    with patch("prefect.task", side_effect=original_task) as mock_task:
         for import_path in tasks_to_patch:
             # Split the import path into module path and attribute name
-            module_path, attr_name = import_path.rsplit('.', 1)
+            module_path, attr_name = import_path.rsplit(".", 1)
             # Import the module and get the task function
             module = import_module(module_path)
             task_fn = getattr(module, attr_name)
             # Patch the task
             mock_task.return_value = patch_task_options(task_fn)
             patch(import_path, new=patch_task_options(task_fn)).start()
+
 
 @pytest.fixture(scope="session", autouse=False)
 def prefect_test_fixture(disable_prefect_retries: Any):

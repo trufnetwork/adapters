@@ -188,6 +188,7 @@ class FakeTNAccessBlock(TNAccessBlock):
         """Mock to prevent real client creation."""
         return None  # type: ignore
 
+
 class ErrorFMPBlock(FMPBlock):
     def get_historical_eod_data(
         self, symbol: str, start_date: str | None = None, end_date: str | None = None
@@ -226,8 +227,6 @@ def fake_tn_block() -> FakeTNAccessBlock:
 @pytest.fixture
 def error_fmp_block():
     """Fixture for error-raising FMP block."""
-
-
 
     return ErrorFMPBlock(api_key=SecretStr("fake"))
 

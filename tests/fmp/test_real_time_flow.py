@@ -175,7 +175,9 @@ class TestRealTimeFlow:
 class TestProcessDataAndDescriptor:
     """Tests for data processing and descriptor handling."""
 
-    def test_process_data(self, sample_quotes_df: DataFrame[BatchQuoteShort], sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]):
+    def test_process_data(
+        self, sample_quotes_df: DataFrame[BatchQuoteShort], sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]
+    ):
         """Test processing quote data into TN format."""
         # Convert descriptor_df to plain pandas DataFrame as expected by process_data
         descriptor_df = pd.DataFrame(sample_descriptor_df)

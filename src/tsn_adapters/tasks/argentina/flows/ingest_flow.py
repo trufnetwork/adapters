@@ -15,7 +15,7 @@ from prefect import flow, transactions
 from prefect.artifacts import create_markdown_artifact
 from prefect_aws import S3Bucket
 
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.target import create_trufnetwork_components
 from tsn_adapters.tasks.argentina.task_wrappers import (

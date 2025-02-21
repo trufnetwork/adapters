@@ -244,21 +244,21 @@ def task_get_and_transform_data(
 
 
 @task(retries=3, cache_expiration=timedelta(hours=1), cache_policy=policies.INPUTS + policies.TASK_SOURCE)
-def task_load_category_map(url: str) -> pd.DataFrame:
+def task_load_category_map(url: str) -> DataFrame[SepaProductCategoryMapModel]:
     """Load the product category mapping from a URL."""
     logger = get_run_logger()
     logger.info(f"Loading category map from: {url}")
     try:
         df = SepaProductCategoryMapModel.from_url(url, sep="|", compression="zip")
         if df.empty:
-            raise EmptyCategoryMapError()
+            raise EmptyCategoryMapError(url=url)
         logger.info(f"Loaded {len(df)} category mappings")
         return df
     except EmptyCategoryMapError:
         raise
     except Exception as e:
         logger.error(f"Failed to load category map: {e}")
-        raise InvalidCategorySchemaError(issues=[f"Failed to load category map from {url}", f"Error: {e!s}"])
+        raise InvalidCategorySchemaError(error=str(e), url=url)
 
 
 @task

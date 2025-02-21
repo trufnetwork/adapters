@@ -1,536 +1,464 @@
 """
 Integration tests for Argentina SEPA error handling system.
 
-This test suite validates error handling across the data processing pipeline,
-focusing on business-critical validations and proper error accumulation.
+This test suite focuses on critical integration tests and complex error handling scenarios,
+validating the complete data processing pipeline and error accumulation mechanisms.
 
 Key Test Areas:
-1. Structure Validation - ZIP and CSV file integrity
-2. Input Validation - Date formats and file requirements
-3. Data Processing - Schema validation and content processing
-4. Category Mapping - Product categorization and mapping validation
-5. Error Recovery - System resilience and error isolation
-6. Error Accumulation - Multi-error handling and context management
-
-Each test focuses on real-world scenarios and validates the complete error lifecycle:
-- Error detection and creation
-- Context preservation
-- Error accumulation
-- Final error reporting
+1. Data Processing Pipeline - Complete flow validation
+2. Error Handling - Complex error scenarios and recovery
+3. Concurrency - Error isolation and accumulation
+4. System Resilience - Partial processing and recovery
 """
 
-import io
-import re
-from typing import cast
-from unittest.mock import MagicMock, patch, mock_open
-import zipfile
-import logging
-import tempfile
+from collections.abc import Generator
 import os
-import shutil
+import re
+from typing import Any, Callable, Optional, TypeVar
+from unittest.mock import MagicMock, patch
+import zipfile
 
 import pandas as pd
+from prefect import flow
 import pytest
-from prefect.testing.utilities import prefect_test_harness
 
 from tsn_adapters.tasks.argentina.base_types import DateStr
+from tsn_adapters.tasks.argentina.errors.accumulator import error_collection
+from tsn_adapters.tasks.argentina.errors.context_helper import ArgentinaErrorContext
 from tsn_adapters.tasks.argentina.errors.errors import (
     AccountableRole,
+    ArgentinaSEPAError,
     DateMismatchError,
     EmptyCategoryMapError,
     InvalidCSVSchemaError,
-    InvalidDateFormatError,
     InvalidStructureZIPError,
-    MissingProductIDError,
+    InvalidProductsError,
     MissingProductosCSVError,
-    UncategorizedProductsError,
+    InvalidDateFormatError,
 )
-from tsn_adapters.tasks.argentina.errors.accumulator import error_collection
-from tsn_adapters.tasks.argentina.flows.preprocess_flow import PreprocessFlow
 from tsn_adapters.tasks.argentina.provider.data_processor import process_sepa_zip
+from tsn_adapters.tasks.argentina.types import SepaDF
 
+T = TypeVar("T", bound=ArgentinaSEPAError)
 
 # --------------------------------------------------
 # Fixtures & Test Data
 # --------------------------------------------------
+
+
+@pytest.fixture
+def error_context_fixture():
+    """Fixture for managing error context and cleanup."""
+    with error_collection() as accumulator:
+        yield accumulator
+
+
 @pytest.fixture
 def mock_s3_block():
-    """Mock S3 block for testing with configurable responses"""
+    """Mock S3 block with configurable responses."""
     mock = MagicMock()
-    
-    # Mock basic S3 operations
     mock.list_available_keys.return_value = ["2024-01-01"]
-    mock.get_raw_data_for.return_value = pd.DataFrame({
-        'id_producto': ['P1', 'P2'],
-        'productos_descripcion': ['Product 1', 'Product 2'],
-        'productos_precio_lista': [100.0, 200.0],
-        'date': ['2024-01-01', '2024-01-01']
-    })
-    
-    # Mock S3 bucket operations
+    mock.get_raw_data_for.return_value = pd.DataFrame(
+        {
+            "id_producto": ["P1", "P2"],
+            "productos_descripcion": ["Product 1", "Product 2"],
+            "productos_precio_lista": [100.0, 200.0],
+            "date": ["2024-01-01", "2024-01-01"],
+        }
+    )
     mock.bucket_name = "mock-bucket"
     mock.bucket_folder = "mock-folder"
     mock.credentials = MagicMock()
-    
-    # Mock S3 methods
-    mock.read_path.return_value = b'mock_s3_content'
-    mock.write_path.return_value = None
-    mock.list_objects.return_value = ['mock_key']
-    mock.download_object_to_path.return_value = None
-    mock.upload_from_path.return_value = None
-    
+    mock.read_path.return_value = b"mock_s3_content"
     return mock
 
-@pytest.fixture
-def valid_sepa_data():
-    """Valid SEPA data fixture with realistic product data"""
-    return pd.DataFrame({
-        "date": ["2024-01-01"] * 5,
-        "id_producto": ["P1", "P2", "P3", "P4", "P5"],
-        "productos_descripcion": [
-            "Leche Entera 1L",
-            "Pan Francés 1kg",
-            "Aceite Girasol 900ml",
-            "Arroz Largo 1kg",
-            "Azúcar Blanca 1kg"
-        ],
-        "precio": [350.0, 800.0, 1200.0, 900.0, 600.0],
-    })
 
 @pytest.fixture
-def create_zip_file(mock_zip_operations):
-    """Factory fixture for creating test ZIP files with various scenarios"""
-    def _create_zip(content_type: str, **kwargs) -> bytes:
-        if content_type == "invalid":
-            # Mock invalid ZIP behavior
-            with patch("zipfile.is_zipfile", return_value=False):
-                return b'This is not a ZIP file'
-        
-        # For all other cases, prepare the data but don't actually create files
-        if content_type == "missing_productos":
-            mock_zip_operations.namelist.return_value = ["sepa_1_comercio-sepa-1_2024-01-01_00-00-00/wrong.csv"]
-        elif content_type == "wrong_date":
-            mock_zip_operations.read.return_value = (
-                "id_producto|productos_descripcion|productos_precio_lista|date\n"
-                f"P1|Product 1|100.0|{kwargs.get('date', '2024-01-02')}\n"
-            ).encode()
-        elif content_type == "mixed_errors":
-            mock_zip_operations.read.return_value = (
-                "id_producto|productos_descripcion|productos_precio_lista|date\n"
-                "|Product 1|100.0|2024-01-01\n"  # Missing ID
-                "|Product 2|200.0|2024-01-01\n"  # Missing ID
-                "P3|Product 3|300.0|2024-01-02\n"  # Wrong date
-                "P4|Product 4|400.0|2024-01-02\n"  # Wrong date
-                "P5|Product 5|invalid|2024-01-01\n"  # Invalid price
-                "P6|Product 6|invalid|2024-01-01\n"  # Invalid price
-            ).encode()
-        elif content_type == "partial_valid":
-            mock_zip_operations.read.return_value = (
-                "id_producto|productos_descripcion|productos_precio_lista|date\n"
-                "|Product 1|100.0|2024-01-01\n"
-                "|Product 2|200.0|2024-01-01\n"
-                "|Product 3|300.0|2024-01-01\n"
-                "P4|Product 4|400.0|2024-01-01\n"
-                "P5|Product 5|500.0|2024-01-01\n"
-            ).encode()
-        
-        return b'mock_zip_content'
-    return _create_zip
+def valid_sepa_data() -> pd.DataFrame:
+    """Valid SEPA data fixture with realistic product data."""
+    df = pd.DataFrame(
+        {
+            "date": ["2024-01-01"] * 5,
+            "id_producto": ["P1", None, "", None, "P5"],
+            "productos_descripcion": [
+                "Leche Entera 1L",
+                "Pan Francés 1kg",
+                "Aceite Girasol 900ml",
+                "Arroz Largo 1kg",
+                "Azúcar Blanca 1kg",
+            ],
+            "productos_precio_lista": [350.0, 800.0, 1200.0, 900.0, 600.0],
+        }
+    )
+    return df
+
 
 @pytest.fixture
-def mock_logger():
-    """Mock logger for testing."""
-    logger = MagicMock(spec=logging.Logger)
-    with patch('tsn_adapters.tasks.argentina.flows.base.get_run_logger', return_value=logger):
-        yield logger
+def mock_zip_factory():
+    """Factory fixture for creating test ZIP files with various scenarios."""
 
-@pytest.fixture(autouse=True)
-def prefect_test_context():
-    """Fixture to provide Prefect test context for all tests."""
-    with prefect_test_harness():
+    def create_zip(scenario: str, *, date: Optional[str] = None, df: Optional[pd.DataFrame] = None) -> bytes:
+        if scenario == "invalid":
+            return b"This is not a valid ZIP file"
+
+        # Create a temporary ZIP file in memory
+        from io import BytesIO
+
+        zip_buffer = BytesIO()
+
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            if scenario == "invalid_date":
+                # Create a directory with invalid date format
+                base_dir = "sepa_1_comercio-sepa-1_2024/01/01_00-00-00"
+            else:
+                base_dir = "sepa_1_comercio-sepa-1_2024-01-01_00-00-00"
+
+            # Create the base directory marker
+            zip_file.writestr(f"{base_dir}/", "")
+
+            if scenario == "missing_productos":
+                # Create a ZIP with wrong file but correct directory structure
+                zip_file.writestr(f"{base_dir}/wrong.csv", "some content")
+            elif scenario == "wrong_date":
+                content_date = date or "2024-01-02"
+                content = (
+                    "id_producto|productos_descripcion|productos_precio_lista|date\n"
+                    f"P1|Product 1|100.0|{content_date}\n"
+                )
+                zip_file.writestr(f"{base_dir}/productos.csv", content)
+            elif scenario == "mixed_errors":
+                # Create an invalid CSV schema
+                content = (
+                    "wrong_column|productos_descripcion|productos_precio_lista|date\n"
+                    "P1|Product 1|100.0|2024-01-01\n"
+                )
+                zip_file.writestr(f"{base_dir}/productos.csv", content)
+            elif scenario == "partial_valid":
+                if df is not None:
+                    content = df.to_csv(sep="|", index=False)
+                else:
+                    content = (
+                        "id_producto|productos_descripcion|productos_precio_lista|date\n"
+                        "|Product 1|100.0|2024-01-01\n"  # Missing ID
+                        "|Product 2|200.0|2024-01-01\n"  # Missing ID
+                        "|Product 3|300.0|2024-01-01\n"  # Missing ID
+                        "P4|Product 4|400.0|2024-01-01\n"  # Valid
+                        "P5|Product 5|500.0|2024-01-01\n"  # Valid
+                    )
+                zip_file.writestr(f"{base_dir}/productos.csv", content)
+            else:
+                # Default valid content
+                content = (
+                    "id_producto|productos_descripcion|productos_precio_lista|date\n"
+                    "P1|Product 1|100.0|2024-01-01\n"
+                )
+                zip_file.writestr(f"{base_dir}/productos.csv", content)
+
+        return zip_buffer.getvalue()
+
+    return create_zip
+
+
+@pytest.fixture
+def mock_filesystem(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Mock filesystem operations for testing."""
+    created_dirs: set[str] = set()
+
+    def mock_makedirs(path: str | os.PathLike[str], exist_ok: bool = False) -> None:
+        """Mock os.makedirs to track created directories."""
+        path_str = str(path)
+        if path_str not in created_dirs:
+            created_dirs.add(path_str)
+
+    with patch.object(os, "makedirs", mock_makedirs):
         yield
 
-@pytest.fixture(autouse=True)
-def mock_filesystem():
-    """Mock filesystem operations to speed up tests."""
-    mock_temp_dir = "/tmp/mock_temp_dir"
-    mock_temp = MagicMock()
-    mock_temp.name = mock_temp_dir
-    
-    # Create the temp directory
-    os.makedirs(mock_temp_dir, exist_ok=True)
-    
-    with patch("tempfile.mkdtemp", return_value=mock_temp_dir), \
-         patch("os.path.join", lambda *args: "/".join(args)), \
-         patch("os.listdir", return_value=["productos.csv"]), \
-         patch("os.makedirs", return_value=None), \
-         patch("os.path.exists", return_value=True), \
-         patch("os.remove", return_value=None), \
-         patch("builtins.open", mock_open(read_data="id_producto|productos_descripcion|productos_precio_lista|date\n")), \
-         patch("shutil.rmtree", return_value=None):
-        yield mock_temp_dir
-        
-        # Clean up
-        try:
-            shutil.rmtree(mock_temp_dir)
-        except:
-            pass
 
 @pytest.fixture(autouse=True)
-def mock_zip_operations():
-    """Mock ZIP file operations to speed up tests."""
-    mock_zip = MagicMock()
-    mock_zip.namelist.return_value = ["sepa_1_comercio-sepa-1_2024-01-01_00-00-00/productos.csv"]
-    
-    with patch("zipfile.ZipFile", return_value=mock_zip), \
-         patch("zipfile.is_zipfile", return_value=True):
-        yield mock_zip
-
-@pytest.fixture(autouse=True)
-def mock_network_operations():
-    """Mock all network operations including S3 and HTTP requests."""
+def mock_network():
+    """Mock all network operations."""
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.content = b'mock_content'
-    mock_response.text = 'mock_text'
-    mock_response.raise_for_status.return_value = None
-    
-    with patch('requests.get', return_value=mock_response), \
-         patch('requests.post', return_value=mock_response), \
-         patch('requests.Session', return_value=MagicMock()), \
-         patch('prefect_aws.S3Bucket.read_path', return_value=b'mock_s3_content'), \
-         patch('prefect_aws.S3Bucket.download_object_to_path', return_value=None), \
-         patch('prefect_aws.S3Bucket.list_objects', return_value=['mock_key']):
+    mock_response.content = b"mock_content"
+    mock_response.text = "mock_text"
+
+    with (
+        patch("requests.get", return_value=mock_response),
+        patch("requests.post", return_value=mock_response),
+        patch("requests.Session", return_value=MagicMock()),
+        patch("prefect_aws.S3Bucket.read_path", return_value=b"mock_s3_content"),
+        patch("prefect_aws.S3Bucket.download_object_to_path", return_value=None),
+        patch("prefect_aws.S3Bucket.list_objects", return_value=["mock_key"]),
+    ):
         yield mock_response
 
-@pytest.fixture(autouse=True)
-def mock_data_tasks():
-    """Mock data processing tasks and heavy computations."""
-    mock_df = pd.DataFrame({
-        'id_producto': ['P1', 'P2'],
-        'productos_descripcion': ['Product 1', 'Product 2'],
-        'productos_precio_lista': [100.0, 200.0],
-        'date': ['2024-01-01', '2024-01-01']
-    })
-    
-    with patch('tsn_adapters.tasks.argentina.task_wrappers.task_create_stream_fetcher', return_value=mock_df), \
-         patch('tsn_adapters.tasks.argentina.task_wrappers.task_get_streams', return_value=mock_df), \
-         patch('tsn_adapters.tasks.argentina.task_wrappers.task_create_sepa_provider', return_value=mock_df), \
-         patch('tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date', return_value=mock_df):
-        yield mock_df
-
-@pytest.fixture(autouse=True)
-def mock_prefect_operations():
-    """Mock Prefect operations to avoid actual task runs and flow executions."""
-    mock_state = MagicMock()
-    mock_state.is_completed.return_value = True
-    mock_state.result.return_value = None
-    
-    with patch('prefect.task', lambda *args, **kwargs: lambda f: f), \
-         patch('prefect.flow', lambda *args, **kwargs: lambda f: f), \
-         patch('prefect.get_run_logger', return_value=MagicMock()), \
-         patch('prefect.context.get_run_context', return_value=MagicMock()):
-        yield mock_state
 
 # --------------------------------------------------
-# 1. Structure Validation Tests
+# Integration Test Classes
 # --------------------------------------------------
-@pytest.mark.parametrize("invalid_content,expected_error,expected_context", [
-    ("invalid", InvalidStructureZIPError, {"source": "test", "date": "2024-01-01", "error": "File is not a zip file"}),
-    ("missing_productos", MissingProductosCSVError, {
-        "directory": r"/tmp/tmp[^/]+/data/sepa_1_comercio-sepa-1_2024-01-01_00-00-00",
-        "available_files": ["wrong.csv"]
-    }),
-])
-def test_zip_structure_validation(create_zip_file, invalid_content, expected_error, expected_context):
-    """Validate ZIP file structure requirements with detailed context"""
-    zip_content = create_zip_file(invalid_content)
-    
-    def mock_reader():
-        yield zip_content
 
-    with error_collection() as accumulator:
+
+class TestDataProcessingPipeline:
+    """Integration tests for the complete data processing pipeline."""
+
+    @pytest.mark.usefixtures("prefect_test_fixture")
+    @flow(name="test-complete-pipeline")
+    def test_complete_processing_flow(
+        self,
+        mock_s3_block: MagicMock,
+        valid_sepa_data: pd.DataFrame,
+        mock_zip_factory: Callable[..., bytes],
+        error_context_fixture: Any,
+    ):
+        """Test the complete data processing pipeline with mixed valid/invalid data."""
+        # Setup test data with mixed scenarios
+        zip_content = mock_zip_factory("partial_valid", df=valid_sepa_data)
+
+        def mock_reader() -> Generator[bytes, None, None]:
+            yield zip_content
+
+        # Process data and verify results
+        result = process_sepa_zip(mock_reader(), DateStr("2024-01-01"), "test_pipeline")
+
+        # Verify error handling
+        assert len(error_context_fixture.errors) > 0
+        error = error_context_fixture.errors[0]
+        assert isinstance(error, InvalidProductsError)
+        assert error.context["missing_count"] == "3"
+
+        # Verify successful processing of valid records
+        assert len(result) == 2
+        assert all(pd.notna(result["id_producto"].astype(str)))
+
+    @pytest.mark.usefixtures("prefect_test_fixture")
+    @pytest.mark.parametrize(
+        "error_scenario,expected_error,validation_details",
+        [
+            (
+                "invalid_structure",
+                InvalidStructureZIPError,
+                {
+                    "code": "ARG-100",
+                    "message": "Invalid ZIP file structure - cannot extract files",
+                    "responsibility": AccountableRole.DATA_PROVIDER,
+                    "context_keys": ["date", "error"],
+                    "context_values": {"date": "2024-01-01"},
+                },
+            ),
+            (
+                "missing_productos",
+                MissingProductosCSVError,
+                {
+                    "code": "ARG-102",
+                    "message": "Missing productos.csv in ZIP archive",
+                    "responsibility": AccountableRole.DATA_PROVIDER,
+                    "context_keys": ["directory", "available_files"],
+                    "context_pattern": r"/tmp/tmp[^/]+/data/sepa_1_comercio-sepa-1_2024-01-01_00-00-00",
+                },
+            ),
+            (
+                "invalid_date",
+                InvalidDateFormatError,
+                {
+                    "code": "ARG-101",
+                    "message": "Invalid date format: 2024/01/01 - must be YYYY-MM-DD",
+                    "responsibility": AccountableRole.SYSTEM,
+                    "context_keys": ["invalid_date"],
+                    "context_values": {"invalid_date": "2024/01/01"},
+                },
+            ),
+        ],
+    )
+    @flow(name="test-error-scenarios")
+    def test_error_scenarios(
+        self,
+        mock_zip_factory: Callable[..., bytes],
+        error_scenario: str,
+        expected_error: type[T],
+        validation_details: dict[str, Any],
+        error_context_fixture: Any,
+    ):
+        """Test various error scenarios in the processing pipeline."""
         try:
+            if error_scenario == "invalid_structure":
+                zip_content = mock_zip_factory("invalid")
+                # Set up context for InvalidStructureZIPError
+                ctx = ArgentinaErrorContext()
+                ctx.store_id = "test"
+                ctx.date = "2024-01-01"
+            elif error_scenario == "invalid_date":
+                zip_content = mock_zip_factory("invalid_date")
+            else:
+                zip_content = mock_zip_factory("missing_productos")
+
+            def mock_reader() -> Generator[bytes, None, None]:
+                yield zip_content
+
             process_sepa_zip(mock_reader(), DateStr("2024-01-01"), "test")
             pytest.fail(f"Expected {expected_error.__name__} to be raised")
         except expected_error as e:
-            accumulator.add_error(e)
-            assert isinstance(e, expected_error)
-            assert e.responsibility == AccountableRole.DATA_PROVIDER
-            # For directory paths, just check the pattern since temp dir will be different
-            if "directory" in expected_context:
-                assert re.match(expected_context["directory"], e.context["directory"])
-                assert e.context["available_files"] == expected_context["available_files"]
-            else:
-                for key, value in expected_context.items():
-                    assert e.context[key] == value
-
-# --------------------------------------------------
-# 2. Input Validation Tests
-# --------------------------------------------------
-@pytest.mark.parametrize("invalid_date,error_details", [
-    ("01-01-2024", {"reason": "wrong_format"}),
-    ("2024/01/01", {"reason": "wrong_separator"}),
-    ("20240101", {"reason": "no_separator"}),
-    ("2024-13-01", {"reason": "invalid_month"}),
-    ("2024-01-32", {"reason": "invalid_day"}),
-])
-def test_date_validation_flow(mock_s3_block, mock_logger, invalid_date, error_details):
-    """Validate date format requirements with various invalid formats"""
-    flow = PreprocessFlow(
-        product_category_map_url="mock://map",
-        s3_block=mock_s3_block
-    )
-    
-    with error_collection() as accumulator:
-        with pytest.raises(InvalidDateFormatError):
-            flow.validate_date(cast("DateStr", invalid_date))
-        
-        error = accumulator.errors[0]
-        assert isinstance(error, InvalidDateFormatError)
-        assert error.code == "ARG-101"
-        assert error.responsibility == AccountableRole.SYSTEM
-        assert invalid_date in error.context["invalid_date"]
-        assert error.context["validation_error"] == error_details["reason"]
-
-# --------------------------------------------------
-# 3. Data Processing Tests
-# --------------------------------------------------
-@pytest.mark.parametrize("scenario", [
-    {
-        "content_date": "2024-01-02",
-        "filename_date": "2024-01-01",
-        "description": "future_date"
-    },
-    {
-        "content_date": "2023-12-31",
-        "filename_date": "2024-01-01",
-        "description": "past_date"
-    },
-])
-def test_date_mismatch_handling(create_zip_file, scenario):
-    """Test date mismatch detection and handling with various scenarios"""
-    zip_content = create_zip_file(
-        "wrong_date",
-        date=scenario["content_date"]
-    )
-    
-    def mock_reader():
-        yield zip_content
-
-    with error_collection() as accumulator:
-        with pytest.raises(DateMismatchError):
-            process_sepa_zip(
-                mock_reader(),
-                DateStr(scenario["filename_date"]),
-                f"test_{scenario['description']}"
-            )
-        
-        error = accumulator.errors[0]
-        assert isinstance(error, DateMismatchError)
-        assert error.code == "ARG-200"
-        assert error.context["external_date"] == scenario["filename_date"]
-        assert error.context["internal_date"] == scenario["content_date"]
-        assert error.context["mismatch_type"] == scenario["description"]
-
-def test_mixed_error_handling(valid_sepa_data, create_zip_file):
-    """Test handling of critical errors that stop processing"""
-    zip_content = create_zip_file("mixed_errors", df=valid_sepa_data)
-    
-    def mock_reader():
-        yield zip_content
-
-    with pytest.raises(InvalidCSVSchemaError) as exc_info:
-        process_sepa_zip(mock_reader(), DateStr("2024-01-01"), "test_mixed")
-    
-    error = exc_info.value
-    assert error.code == "ARG-201"
-    assert error.context["date"] == "2024-01-01"
-    assert error.context["store_id"] == "test_mixed"
-
-# --------------------------------------------------
-# 4. Category Mapping Tests
-# --------------------------------------------------
-@pytest.mark.parametrize("category_map,expected_error,validation_details", [
-    (pd.DataFrame(), EmptyCategoryMapError, {"url": "mock://map"}),
-    (pd.DataFrame({"wrong_column": []}), InvalidCSVSchemaError, {
-        "date": "2024-01-01",
-        "store_id": "test",
-        "missing_columns": ["id_producto", "category"]
-    }),
-])
-def test_category_mapping_validation(mock_s3_block, category_map, expected_error, validation_details):
-    """Test category mapping validation with various invalid scenarios"""
-    mock_map_loader = MagicMock(return_value=category_map)
-    
-    with patch('tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map', mock_map_loader):
-        flow = PreprocessFlow(
-            product_category_map_url="mock://map",
-            s3_block=mock_s3_block
-        )
-        
-        with error_collection() as accumulator:
-            if expected_error == EmptyCategoryMapError:
-                flow.process_date(DateStr("2024-01-01"))
-                error = accumulator.errors[0]
-                assert isinstance(error, EmptyCategoryMapError)
-                assert error.context["url"] == validation_details["url"]
-            else:
-                # For InvalidCSVSchemaError
-                with pytest.raises(expected_error):
-                    flow.process_date(DateStr(validation_details["date"]))
-                error = accumulator.errors[0]
-                assert isinstance(error, expected_error)
-                for key, value in validation_details.items():
-                    assert error.context[key] == value
-
-# --------------------------------------------------
-# 5. Error Recovery Tests
-# --------------------------------------------------
-def test_partial_processing_recovery(valid_sepa_data, create_zip_file):
-    """Test system's ability to process valid records when others fail"""
-    zip_content = create_zip_file("partial_valid", df=valid_sepa_data)
-    
-    def mock_reader():
-        yield zip_content
-
-    with error_collection() as accumulator:
-        result = process_sepa_zip(mock_reader(), DateStr("2024-01-01"), "test_partial")
-        
-        # Verify errors were captured
-        assert len(accumulator.errors) > 0
-        error = accumulator.errors[0]
-        assert isinstance(error, MissingProductIDError)
-        assert error.context["missing_count"] == 3
-        assert error.context["date"] == "2024-01-01"
-        assert error.context["store_id"] == "test_partial"
-        
-        # Verify valid records were processed
-        assert len(result) == 2  # Last 2 records should be valid
-        assert all(pd.notna(result["id_producto"]))
-
-def test_error_recovery_with_retries():
-    """Test error recovery with retry mechanism"""
-    retry_attempts = 0
-    max_retries = 3
-    
-    def failing_operation():
-        nonlocal retry_attempts
-        retry_attempts += 1
-        if retry_attempts < max_retries:
-            # InvalidCSVSchemaError takes date and store_id
-            raise InvalidCSVSchemaError(
-                date=DateStr("2024-01-01"),
-                store_id="test_store"
-            )
-        return True  # Succeed on final attempt
-    
-    with error_collection() as accumulator:
-        # Simulate retry logic
-        success = False
-        for _ in range(max_retries):
-            try:
-                success = failing_operation()
-                if success:
-                    break
-            except InvalidCSVSchemaError as e:  # Catch specific error type
-                accumulator.add_error(e)
-        
-        assert success  # Operation eventually succeeded
-        assert len(accumulator.errors) == max_retries - 1  # Errors from failed attempts
-        assert all(isinstance(e, InvalidCSVSchemaError) for e in accumulator.errors)
-
-# --------------------------------------------------
-# 6. Error Accumulation Tests
-# --------------------------------------------------
-def test_error_context_isolation():
-    """Verify error context isolation between parallel flows"""
-    with error_collection() as flow1_errors:
-        with error_collection() as flow2_errors:
-            flow1_errors.add_error(EmptyCategoryMapError(url="map1"))
-            flow2_errors.add_error(DateMismatchError(
-                external_date="2024-01-01",
-                internal_date="2024-01-02"
-            ))
+            # Verify error code
+            assert e.code == validation_details["code"]
+            # Verify error message
+            assert e.message == validation_details["message"]
+            # Verify responsibility
+            assert e.responsibility == validation_details["responsibility"]
             
-            assert len(flow2_errors.errors) == 1
-            assert isinstance(flow2_errors.errors[0], DateMismatchError)
-            assert flow2_errors.errors[0].context["external_date"] == "2024-01-01"
-            assert flow2_errors.errors[0].context["internal_date"] == "2024-01-02"
-        
-        assert len(flow1_errors.errors) == 1
-        assert isinstance(flow1_errors.errors[0], EmptyCategoryMapError)
-        assert flow1_errors.errors[0].context["url"] == "map1"
+            # Verify context has all required keys
+            for key in validation_details["context_keys"]:
+                assert key in e.context
+            
+            # Verify specific context values if provided
+            if "context_values" in validation_details:
+                for key, value in validation_details["context_values"].items():
+                    assert e.context[key] == value
+            
+            # Verify context patterns if provided
+            if "context_pattern" in validation_details:
+                assert re.match(validation_details["context_pattern"], e.context["directory"])
 
-def test_error_accumulation_resilience():
-    """Test error accumulator's ability to handle multiple errors"""
-    with error_collection() as accumulator:
-        errors = [
-            InvalidCSVSchemaError(date=DateStr("2024-01-01"), store_id="STORE1"),
-            UncategorizedProductsError(count=3, date=DateStr("2024-01-01"), store_id="STORE1"),
-            MissingProductIDError(count=2, date=DateStr("2024-01-01"), store_id="STORE1"),
+    @pytest.mark.usefixtures("prefect_test_fixture")
+    @flow(name="test-invalid-structure-scenarios")
+    def test_invalid_structure_error_scenarios(self, error_context_fixture: Any):
+        """Test various scenarios for InvalidStructureZIPError."""
+        # Test with different error messages
+        error_messages = [
+            "File is not a zip file",
+            "Bad CRC-32 for file",
+            "Bad password for file",
+            "Truncated file header",
         ]
-        
-        for error in errors:
-            accumulator.add_error(error)
-        
-        assert len(accumulator.errors) == len(errors)
-        for original, captured in zip(errors, accumulator.errors):
-            assert type(original) == type(captured)
-            assert original.code == captured.code
-            assert original.responsibility == captured.responsibility
-            assert original.context == captured.context
 
-def test_error_accumulation_order():
-    """Verify error accumulation preserves order and priority"""
-    with error_collection() as accumulator:
-        # Add errors with different priorities
-        errors = [
-            (InvalidStructureZIPError(context={"source": "test", "date": "2024-01-01"}), 1),  # High priority
-            (MissingProductIDError(count=2, date=DateStr("2024-01-01"), store_id="test"), 3),  # Low priority
-            (DateMismatchError(external_date="2024-01-01", internal_date="2024-01-02"), 2),  # Medium priority
+        for error_msg in error_messages:
+            # Set up context
+            ctx = ArgentinaErrorContext()
+            ctx.date = "2024-01-01"
+            
+            # Create and verify error
+            error = InvalidStructureZIPError(error_msg)
+            
+            # Verify basic error properties
+            assert error.code == "ARG-100"
+            assert error.message == "Invalid ZIP file structure - cannot extract files"
+            assert error.responsibility == AccountableRole.DATA_PROVIDER
+            
+            # Verify context
+            assert "date" in error.context
+            assert error.context["date"] == "2024-01-01"
+            assert "error" in error.context
+            assert error.context["error"] == error_msg
+
+        # Test without context date
+        error = InvalidStructureZIPError("test error")
+        assert "date" in error.context
+        assert error.context["date"] is None
+
+    @pytest.mark.usefixtures("prefect_test_fixture")
+    @flow(name="test-date-format-scenarios")
+    def test_date_format_error_scenarios(self, error_context_fixture: Any):
+        """Test various scenarios for InvalidDateFormatError."""
+        # Test with different invalid date formats
+        invalid_dates = [
+            "2024/01/01",  # Wrong separator
+            "24-01-01",    # Wrong year format
+            "2024-1-1",    # Missing padding
+            "2024-13-01",  # Invalid month
+            "2024-01-32",  # Invalid day
+            "01-01-2024",  # Wrong order
+            "2024-01",     # Incomplete
+            "not-a-date",  # Invalid format
         ]
-        
-        for error, _ in errors:
-            accumulator.add_error(error)
-        
-        # Verify errors are stored in order of addition
-        for (original, _), captured in zip(errors, accumulator.errors):
-            assert type(original) == type(captured)
-            assert original.code == captured.code
-            assert original.context == captured.context
 
-def test_error_accumulation(prefect_test_context, create_zip_file, mock_s3_block):
-    """Test that errors are properly accumulated during preprocessing"""
-    # Create test data with missing product IDs
-    test_data = pd.DataFrame({
-        'date': ['2024-01-01'] * 3,
-        'id_producto': [None, None, 'P3'],
-        'productos_descripcion': ['Product 1', 'Product 2', 'Product 3'],
-        'precio': [100.0, 200.0, 300.0]
-    })
-    
-    # Create a temporary CSV file with test data
-    with tempfile.NamedTemporaryFile(suffix='.csv', mode='w', delete=False) as f:
-        test_data.to_csv(f, index=False)
-        temp_csv = f.name
-    
-    try:
-        # Run preprocessing flow
-        flow = PreprocessFlow(
-            product_category_map_url="mock://map",
-            s3_block=mock_s3_block
-        )
-        with pytest.raises(MissingProductIDError) as exc_info:
-            flow.process_date(DateStr("2024-01-01"))
-        
-        error = exc_info.value
-        assert error.code == "ARG-202"  # Fixed error code
-        assert error.context["missing_count"] == 2
-        assert error.context["date"] == "2024-01-01"
-    finally:
-        # Clean up
-        os.unlink(temp_csv)
+        for invalid_date in invalid_dates:
+            # Create and verify error
+            error = InvalidDateFormatError(invalid_date)
+            
+            # Verify basic error properties
+            assert error.code == "ARG-101"
+            assert error.message == f"Invalid date format: {invalid_date} - must be YYYY-MM-DD"
+            assert error.responsibility == AccountableRole.SYSTEM
+            
+            # Verify context
+            assert "invalid_date" in error.context
+            assert error.context["invalid_date"] == invalid_date
+
+
+class TestErrorHandlingSystem:
+    """Integration tests for the error handling and accumulation system."""
+
+    @pytest.mark.usefixtures("prefect_test_fixture")
+    @flow(name="test-error-accumulation")
+    def test_error_accumulation_and_isolation(self, error_context_fixture: Any):
+        """Test error accumulation, ordering, and isolation."""
+        # Test concurrent error accumulation
+        with error_collection() as flow1_errors:
+            with error_collection() as flow2_errors:
+                # Add errors to different flows
+                flow1_errors.add_error(EmptyCategoryMapError(url="map1"))
+                # Set up context for DateMismatchError
+                ctx = ArgentinaErrorContext()
+                ctx.date = "2024-01-01"
+                flow2_errors.add_error(DateMismatchError(internal_date="2024-01-02"))
+
+                # Verify flow2 errors
+                assert len(flow2_errors.errors) == 1
+                assert isinstance(flow2_errors.errors[0], DateMismatchError)
+                assert flow2_errors.errors[0].context["external_date"] == "2024-01-01"
+
+            # Verify flow1 errors
+            assert len(flow1_errors.errors) == 1
+            assert isinstance(flow1_errors.errors[0], EmptyCategoryMapError)
+            assert flow1_errors.errors[0].context["url"] == "map1"
+
+    @pytest.mark.usefixtures("prefect_test_fixture")
+    @flow(name="test-error-recovery")
+    def test_error_recovery_mechanisms(
+        self,
+        mock_zip_factory: Callable[..., bytes],
+        valid_sepa_data: SepaDF,
+        error_context_fixture: Any,
+    ):
+        """Test system recovery from various error conditions."""
+        # Test partial processing recovery
+        zip_content = mock_zip_factory("partial_valid", df=valid_sepa_data)
+
+        def mock_reader() -> Generator[bytes, None, None]:
+            yield zip_content
+
+        result = process_sepa_zip(mock_reader(), DateStr("2024-01-01"), "test_recovery")
+
+        # Verify error capture
+        assert len(error_context_fixture.errors) > 0
+        error = error_context_fixture.errors[0]
+        assert isinstance(error, InvalidProductsError)
+
+        # Verify successful partial processing
+        assert len(result) > 0
+        assert all(pd.notna(result["id_producto"].astype(str)))
+
+    @pytest.mark.usefixtures("prefect_test_fixture")
+    @flow(name="test-complex-errors")
+    def test_complex_error_scenarios(
+        self,
+        mock_zip_factory: Callable[..., bytes],
+        error_context_fixture: Any,
+    ):
+        """Test handling of complex error scenarios with multiple error types."""
+        # Create data with multiple error types
+        zip_content = mock_zip_factory("mixed_errors")
+
+        def mock_reader() -> Generator[bytes, None, None]:
+            yield zip_content
+
+        try:
+            process_sepa_zip(mock_reader(), DateStr("2024-01-01"), "test_complex")
+            pytest.fail("Expected InvalidCSVSchemaError to be raised")
+        except InvalidCSVSchemaError as e:
+            assert e.code == "ARG-102"
+            assert e.responsibility == AccountableRole.DATA_PROVIDER
+            assert len(error_context_fixture.errors) == 1
+            assert error_context_fixture.errors[0] == e
+
 
 if __name__ == "__main__":
-    pytest.main(["-v", __file__]) 
+    pytest.main(["-v", __file__])

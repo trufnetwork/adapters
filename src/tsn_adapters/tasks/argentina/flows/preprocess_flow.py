@@ -8,7 +8,6 @@ This flow handles:
 4. Storage of processed data in S3
 """
 
-from contextlib import contextmanager
 from typing import cast
 
 import pandas as pd
@@ -20,13 +19,15 @@ from prefect_aws import S3Bucket
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
 from tsn_adapters.tasks.argentina.errors import (
     ArgentinaSEPAError,
-    ErrorAccumulator,
 )
+from tsn_adapters.tasks.argentina.errors.accumulator import error_collection
+from tsn_adapters.tasks.argentina.errors.context_helper import ArgentinaErrorContext
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
 from tsn_adapters.tasks.argentina.task_wrappers import task_load_category_map
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, CategoryMapDF, DateStr, SepaDF, UncategorizedDF
+from tsn_adapters.tasks.argentina.utils.processors import process_raw_data
 from tsn_adapters.utils import deroutine
 
 
@@ -38,7 +39,7 @@ def process_raw_data(
     """Process raw SEPA data.
 
     Args:
-        data_item: Raw data item to process
+        raw_data: Raw data item to process
         category_map_df: Category mapping DataFrame
 
     Returns:
@@ -111,11 +112,16 @@ class PreprocessFlow(ArgentinaFlowController):
         Raises:
             ValueError: If date format is invalid
             KeyError: If no data available for date
+            EmptyCategoryMapError: If category map is empty
+            InvalidCSVSchemaError: If category map has invalid schema
         """
         logger = get_run_logger()
         self.validate_date(date)
 
         logger.info(f"Processing {date}")
+
+        # Set up error context
+        ArgentinaErrorContext().date = date
 
         # Get raw data
         raw_data = self.raw_provider.get_raw_data_for(date)

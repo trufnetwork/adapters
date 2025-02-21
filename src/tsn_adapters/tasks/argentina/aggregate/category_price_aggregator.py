@@ -96,10 +96,10 @@ def aggregate_prices_by_category(
     if not uncategorized_df.empty:
         logger.warning(f"Found {len(uncategorized_df)} uncategorized products")
         accumulator = ErrorAccumulator.get_or_create_from_context()
-        accumulator.add_error(UncategorizedProductsError(
-            count=len(uncategorized_df),
-            date=avg_price_product_df["date"].iloc[0],
-            store_id=avg_price_product_df["id_comercio"].iloc[0]
-        ))
+        accumulator.add_error(
+            UncategorizedProductsError(
+                count=len(uncategorized_df),
+            )
+        )
 
     return AggregatedPricesDF(aggregated_df), uncategorized_df

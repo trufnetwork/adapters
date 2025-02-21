@@ -44,7 +44,7 @@ def tn_special_retry_condition(max_other_error_retries: int):
         except TNNodeNetworkError:
             # Always retry on network errors
             return True
-        except Exception as exc:
+        except Exception:
             # For non-network errors, use the task_run's run_count to decide.
             if task_run.run_count <= max_other_error_retries:
                 return True

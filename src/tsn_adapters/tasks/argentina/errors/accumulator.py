@@ -3,25 +3,27 @@ from contextvars import ContextVar
 from typing import Any
 
 from prefect.artifacts import create_markdown_artifact
+
 from tsn_adapters.tasks.argentina.errors.errors import ArgentinaSEPAError
 
-error_ctx = ContextVar("argentina_sepa_errors")
+error_ctx = ContextVar["ErrorAccumulator | None"]("argentina_sepa_errors")
+
 
 class ErrorAccumulator:
     def __init__(self):
-        self.errors = []
+        self.errors: list[ArgentinaSEPAError] = []
 
     def add_error(self, error: ArgentinaSEPAError):
         self.errors.append(error)
 
     def model_dump(self):
         return [error.to_dict() for error in self.errors]
-    
+
     def model_load(self, data: list[dict[str, Any]]):
         self.errors = [ArgentinaSEPAError(**error) for error in data]
 
     @classmethod
-    def get_or_create_from_context(cls) -> 'ErrorAccumulator':
+    def get_or_create_from_context(cls) -> "ErrorAccumulator":
         errors = error_ctx.get()
         if errors is None:
             errors = ErrorAccumulator()
@@ -31,7 +33,6 @@ class ErrorAccumulator:
     def set_to_context(self):
         error_ctx.set(self)
 
-
 @contextmanager
 def error_collection():
     """Context manager for collecting errors during processing."""
@@ -39,6 +40,9 @@ def error_collection():
     accumulator.set_to_context()
     try:
         yield accumulator
+    except ArgentinaSEPAError as e:
+        accumulator.add_error(e)
+        raise
     finally:
         # Create error summary if there are errors
         if accumulator.errors:

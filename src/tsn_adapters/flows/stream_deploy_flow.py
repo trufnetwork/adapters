@@ -8,7 +8,6 @@ does not exist, it creates a deployment transaction (with wait=False) under a tn
 concurrency limiter and then waits for confirmation using tn-read concurrency via TNAccessBlock.
 """
 
-import time
 from typing import Literal
 
 from pandera.typing import DataFrame
@@ -31,6 +30,7 @@ from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive, task_init_
 class DeployStreamResult(TypedDict):
     stream_id: str
     status: Literal["deployed", "skipped"]
+
 
 @task(tags=["tn", "tn-write"], retries=3, retry_delay_seconds=5)
 def check_and_deploy_stream(stream_id: str, tna_block: TNAccessBlock, is_unix: bool = False) -> DeployStreamResult:
@@ -109,7 +109,7 @@ def deploy_streams_flow(
     logger.info(f"Found {len(stream_ids)} stream descriptors.")
 
     # we will deploy in batches of 500 to avoid infinite threads creation
-    batches = [stream_ids[i:i+batch_size] for i in range(0, len(stream_ids), batch_size)]
+    batches = [stream_ids[i : i + batch_size] for i in range(0, len(stream_ids), batch_size)]
 
     aggregated_results: list[DeployStreamResult] = []
     for batch in batches[start_from_batch:]:

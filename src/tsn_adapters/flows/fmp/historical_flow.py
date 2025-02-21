@@ -145,19 +145,19 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
         raise TNQueryError(str(e)) from e
 
 
-def ensure_unix_timestamp(dt: pd.Series) -> pd.Series: # type: ignore -> pd Series doesn't fit with any
+def ensure_unix_timestamp(dt: pd.Series) -> pd.Series:  # type: ignore -> pd Series doesn't fit with any
     """Convert datetime series to Unix timestamp (seconds since epoch).
-    
+
     This function handles various datetime formats and ensures the output
     is always in seconds since epoch (Unix timestamp). It explicitly handles
     the conversion from nanoseconds and validates the output range.
-    
+
     Args:
         dt: A pandas Series containing datetime data in various formats
-            
+
     Returns:
         A pandas Series containing Unix timestamps (seconds since epoch)
-        
+
     Raises:
         ValueError: If the resulting timestamps are outside the valid range
                    or if the conversion results in unexpected units
@@ -165,24 +165,24 @@ def ensure_unix_timestamp(dt: pd.Series) -> pd.Series: # type: ignore -> pd Seri
     # Convert to datetime if not already
     if not pd.api.types.is_datetime64_any_dtype(dt):
         dt = pd.to_datetime(dt, utc=True)
-    
+
     # Get nanoseconds since epoch
-    ns_timestamps = dt.astype('int64')
-    
+    ns_timestamps = dt.astype("int64")
+
     # Convert to seconds (integer division by 1e9 for nanoseconds)
     second_timestamps = ns_timestamps // 10**9
-    
+
     # Validate the range (basic sanity check)
     # Unix timestamps should be between 1970 and 2100 approximately
     min_valid_timestamp = 0  # 1970-01-01
     max_valid_timestamp = 4102444800  # 2100-01-01
-    
+
     if (second_timestamps < min_valid_timestamp).any() or (second_timestamps > max_valid_timestamp).any():
         raise ValueError(
             f"Converted timestamps outside valid range: "
             f"min={second_timestamps.min()}, max={second_timestamps.max()}"
         )
-    
+
     return second_timestamps
 
 
@@ -292,7 +292,7 @@ def run_ticker_pipeline(
         Exceptions during processing are logged and raised.
     """
 
-    def process_ticker(row: pd.Series) -> TickerResult: # type: ignore -> pd Series doesn't fit with any
+    def process_ticker(row: pd.Series) -> TickerResult:  # type: ignore -> pd Series doesn't fit with any
         """Process a single ticker row."""
         symbol = row["source_id"]
         stream_id = row["stream_id"]

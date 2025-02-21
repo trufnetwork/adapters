@@ -7,7 +7,6 @@ import os
 import tempfile
 from typing import cast
 
-import pandas as pd
 from prefect.concurrency.sync import concurrency
 
 from tsn_adapters.tasks.argentina.errors.errors import DateMismatchError, InvalidStructureZIPError
@@ -24,7 +23,7 @@ def process_sepa_zip(
     Process SEPA data from a data item.
 
     Args:
-zip_reader: Generator yielding bytes of the ZIP file
+        zip_reader: Generator yielding bytes of the ZIP file
         source_name: Name of the source (for error messages)
         reported_date: The date reported by the source
 
@@ -53,19 +52,16 @@ zip_reader: Generator yielding bytes of the ZIP file
         os.makedirs(extract_dir, exist_ok=True)
         try:
             processor = SepaDirectoryProcessor.from_zip_path(temp_zip_path, extract_dir)
+            data = processor.get_all_products_data_merged()
+
+            # Validate date matches
+            if not data.empty:
+                data_date: str = cast(str, data["date"].iloc[0])
+                if str(data_date) != str(reported_date):
+                    raise DateMismatchError(internal_date=data_date)
+
+            return data
         except Exception as e:
-            raise InvalidStructureZIPError({"source": source_name, "date": reported_date, "error": str(e)}) from e
-
-        df = processor.get_all_products_data_merged()
-
-        # skip empty dataframes
-        if df.empty:
-            return cast(SepaDF, pd.DataFrame())
-
-        # Validate the date matches
-        real_date = df["date"].iloc[0]
-        if reported_date != real_date:
-            # we need to raise an error so cache is invalidated
-            raise DateMismatchError(external_date=reported_date, internal_date=real_date)
-
-        return cast(SepaDF, df)
+            if isinstance(e, DateMismatchError):
+                raise
+            raise InvalidStructureZIPError(str(e)) from e

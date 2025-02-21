@@ -7,6 +7,9 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+# NEW: Import the global error context helper
+from tsn_adapters.tasks.argentina.errors.context_helper import ArgentinaErrorContext
+
 
 class AccountableRole(Enum):
     """Roles responsible for different types of errors."""
@@ -19,6 +22,7 @@ class AccountableRole(Enum):
 
 class ArgentinaSEPAErrorData(BaseModel):
     """Data model for Argentina SEPA errors."""
+
     code: str
     message: str
     responsibility: AccountableRole
@@ -36,7 +40,7 @@ class ArgentinaSEPAError(Exception):
             code=code,
             message=message,
             responsibility=responsibility,
-            context=context or {}
+            context=context or {},
         )
 
     @property
@@ -61,7 +65,7 @@ class ArgentinaSEPAError(Exception):
             "code": self.code,
             "message": self.message,
             "responsibility": self.responsibility,
-            "context": self.context
+            "context": self.context,
         }
 
 
@@ -71,12 +75,16 @@ class ArgentinaSEPAError(Exception):
 class InvalidStructureZIPError(ArgentinaSEPAError):
     """Invalid ZIP file structure during extraction"""
 
-    def __init__(self, context: dict[str, Any]):
+    def __init__(self, error: str):
+        ctx = ArgentinaErrorContext()
         super().__init__(
             code="ARG-100",
             message="Invalid ZIP file structure - cannot extract files",
             responsibility=AccountableRole.DATA_PROVIDER,
-            context=context,
+            context={
+                "date": ctx.date,
+                "error": error,
+            },
         )
 
 
@@ -95,12 +103,12 @@ class InvalidDateFormatError(ArgentinaSEPAError):
 class MissingProductosCSVError(ArgentinaSEPAError):
     """Missing productos.csv in ZIP file"""
 
-    def __init__(self, context: dict[str, Any]):
+    def __init__(self, directory: str, available_files: list[str]):
         super().__init__(
             code="ARG-102",
             message="Missing productos.csv in ZIP archive",
             responsibility=AccountableRole.DATA_PROVIDER,
-            context=context,
+            context={"directory": directory, "available_files": ", ".join(available_files)},
         )
 
 
@@ -110,13 +118,14 @@ class MissingProductosCSVError(ArgentinaSEPAError):
 class DateMismatchError(ArgentinaSEPAError):
     """Filename vs content date mismatch"""
 
-    def __init__(self, external_date: str, internal_date: str):
+    def __init__(self, internal_date: str):
+        ctx = ArgentinaErrorContext()
         super().__init__(
             code="ARG-200",
-            message=f"Date mismatch: Reported {external_date} vs Actual {internal_date}",
+            message=f"Date mismatch: Reported {ctx.date} vs Actual {internal_date}",
             responsibility=AccountableRole.DATA_PROVIDER,
             context={
-                "external_date": external_date,
+                "external_date": ctx.date,
                 "internal_date": internal_date,
             },
         )
@@ -125,24 +134,31 @@ class DateMismatchError(ArgentinaSEPAError):
 class InvalidCSVSchemaError(ArgentinaSEPAError):
     """Missing required columns in RAW data"""
 
-    def __init__(self, date: str, store_id: str):
+    def __init__(self, error: str):
+        ctx = ArgentinaErrorContext()
         super().__init__(
             code="ARG-201",
             message="Missing required columns",
             responsibility=AccountableRole.DATA_PROVIDER,
-            context={"date": date, "store_id": store_id},
+            context={
+                "date": ctx.date,
+                "store_id": ctx.store_id,
+                "error": error,
+            },
         )
 
 
-class MissingProductIDError(ArgentinaSEPAError):
+class InvalidProductsError(ArgentinaSEPAError):
     """Null/empty product IDs found in RAW data"""
 
-    def __init__(self, count: int, date: str, store_id: str):
+    def __init__(self, invalid_indexes: list[int]):
+        ctx = ArgentinaErrorContext()
+        invalid_indexes_str = ", ".join(str(idx) for idx in invalid_indexes)
         super().__init__(
             code="ARG-202",
-            message=f"{count} products missing IDs",
+            message=f"{len(invalid_indexes)} products with invalid IDs",
             responsibility=AccountableRole.DEVELOPMENT,
-            context={"missing_count": count, "date": date, "store_id": store_id},
+            context={"invalid_indexes": invalid_indexes_str, "date": ctx.date, "store_id": ctx.store_id},
         )
 
 
@@ -164,24 +180,25 @@ class EmptyCategoryMapError(ArgentinaSEPAError):
 class UncategorizedProductsError(ArgentinaSEPAError):
     """Products without category mapping"""
 
-    def __init__(self, count: int, date: str, store_id: str):
+    def __init__(self, count: int):
+        ctx = ArgentinaErrorContext()
         super().__init__(
             code="ARG-301",
             message=f"{count} uncategorized products found",
             responsibility=AccountableRole.DATA_ENGINEERING,
-            context={"uncategorized_count": count, "date": date, "store_id": store_id},
+            context={"uncategorized_count": str(count), "date": ctx.date},
         )
 
 
 class InvalidCategorySchemaError(ArgentinaSEPAError):
     """Invalid category mapping schema"""
 
-    def __init__(self, issues: list[str]):
+    def __init__(self, error: str, url: str):
         super().__init__(
             code="ARG-302",
             message="Invalid category mapping schema",
             responsibility=AccountableRole.DATA_ENGINEERING,
-            context={"validation_issues": issues},
+            context={"error": error, "url": url},
         )
 
 
@@ -191,7 +208,7 @@ all_errors = [
     MissingProductosCSVError,
     DateMismatchError,
     InvalidCSVSchemaError,
-    MissingProductIDError,
+    InvalidProductsError,
     EmptyCategoryMapError,
     UncategorizedProductsError,
     InvalidCategorySchemaError,

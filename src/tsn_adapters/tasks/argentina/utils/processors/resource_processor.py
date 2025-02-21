@@ -6,12 +6,13 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import ClassVar, cast
+from typing import Any, ClassVar
 
 import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import BaseModel, field_validator
 
+from tsn_adapters.tasks.argentina.errors.accumulator import ErrorAccumulator
 from tsn_adapters.tasks.argentina.errors.errors import (
     InvalidCSVSchemaError,
     InvalidDateFormatError,
@@ -100,12 +101,14 @@ class SepaDirectoryProcessor:
         all_data = list(self.get_products_data())
         if not all_data:
             self.logger.warning("No product data found in any directory")
-            empty_df = pd.DataFrame({
-                "id_producto": [],
-                "productos_descripcion": [],
-                "productos_precio_lista": [],
-                "date": [],
-            })
+            empty_df = pd.DataFrame(
+                {
+                    "id_producto": [],
+                    "productos_descripcion": [],
+                    "productos_precio_lista": [],
+                    "date": [],
+                }
+            )
             return DataFrame[SepaProductosDataModel](empty_df)
 
         merged_df = pd.concat(all_data, ignore_index=True)
@@ -194,7 +197,7 @@ class SepaDataDirectory(BaseModel):
                 break
         else:
             self.logger.error(f"No valid product file found in {self.dir_path}")
-            raise MissingProductosCSVError({"directory": self.dir_path, "available_files": files})
+            raise MissingProductosCSVError(directory=self.dir_path, available_files=files)
 
         def read_file_iterator():
             with open(file_path) as file:
@@ -205,12 +208,14 @@ class SepaDataDirectory(BaseModel):
         text_lines = list(read_file_iterator())
         if not text_lines:
             self.logger.warning(f"Empty product file found in {self.dir_path}")
-            empty_df = pd.DataFrame({
-                "id_producto": [],
-                "productos_descripcion": [],
-                "productos_precio_lista": [],
-                "date": [],
-            })
+            empty_df = pd.DataFrame(
+                {
+                    "id_producto": [],
+                    "productos_descripcion": [],
+                    "productos_precio_lista": [],
+                    "date": [],
+                }
+            )
             return DataFrame[SepaProductosDataModel](empty_df)
 
         # models might be
@@ -222,16 +227,15 @@ class SepaDataDirectory(BaseModel):
         for model in models:
             if model.has_columns(text_lines[0]):
                 try:
-                    original_model = model.from_csv(self.date, text_lines, self.logger)
+                    # Parse and convert the data
+                    raw_df: DataFrame[Any] = model.from_csv(self.date, text_lines, self.logger)
                     if model != SepaProductosDataModel:
                         self.logger.info(f"Converting {model} to core model")
-                        return model.to_core_model(original_model)
-                    return original_model
+                        return model.to_core_model(raw_df)
+                    return raw_df
                 except Exception as e:
                     self.logger.error(f"Failed to parse CSV with model {model}: {e}")
+                    ErrorAccumulator.get_or_create_from_context().add_error(InvalidCSVSchemaError(error=str(e)))
                     continue
 
-        raise InvalidCSVSchemaError(
-            date=self.date,
-            store_id=self.id_comercio,
-        )
+        raise InvalidCSVSchemaError(error="No valid model found")

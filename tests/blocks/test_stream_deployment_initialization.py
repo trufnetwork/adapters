@@ -1,8 +1,9 @@
-import pytest
 from datetime import datetime
 
-from tsn_adapters.blocks.tn_access import TNAccessBlock
+import pytest
 from trufnetwork_sdk_py.utils import generate_stream_id
+
+from tsn_adapters.blocks.tn_access import TNAccessBlock
 
 
 @pytest.fixture
@@ -33,15 +34,15 @@ def test_init_stream(tn_block: TNAccessBlock, test_stream_id: str):
     # First deploy the stream
     deploy_tx = tn_block.deploy_stream(test_stream_id, wait=True)
     assert deploy_tx is not None, "Deploy transaction hash should be returned"
-    
+
     # Initialize the stream
     init_tx = tn_block.init_stream(test_stream_id, wait=True)
     assert init_tx is not None, "Init transaction hash should be returned"
-    
+
     # After initialization, the stream should be empty
     record = tn_block.get_first_record(test_stream_id)
     assert record is None, "The stream should be empty after initialization"
-    
+
     # Clean up: destroy the stream
     destroy_tx = tn_block.destroy_stream(test_stream_id, wait=True)
-    assert destroy_tx is not None, "Stream destruction should return a transaction hash" 
+    assert destroy_tx is not None, "Stream destruction should return a transaction hash"
