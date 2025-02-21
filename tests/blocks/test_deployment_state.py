@@ -203,4 +203,75 @@ def test_update_deployment_states_empty(s3_block: S3DeploymentStateBlock) -> Non
     read_df = pd.read_parquet(buffer, engine='pyarrow')
     
     assert len(read_df) == 0
-    assert list(read_df.columns) == ['stream_id', 'deployment_timestamp'] 
+    assert list(read_df.columns) == ['stream_id', 'deployment_timestamp']
+
+
+def test_mark_as_deployed_replaces_existing(s3_block: S3DeploymentStateBlock) -> None:
+    """Test that marking a stream as deployed replaces any existing deployment record."""
+    # First deployment
+    first_timestamp = datetime(2023, 10, 10, 12, 0, tzinfo=timezone.utc)
+    s3_block.mark_as_deployed("test_stream", first_timestamp)
+    
+    # Second deployment with different timestamp
+    second_timestamp = datetime(2023, 10, 10, 13, 0, tzinfo=timezone.utc)
+    s3_block.mark_as_deployed("test_stream", second_timestamp)
+    
+    # Verify that only the second deployment exists
+    content: bytes = s3_block.s3_bucket.read_path("deployment_states/all_streams.parquet")  # type: ignore
+    buffer = io.BytesIO(content)
+    df = pd.read_parquet(buffer, engine='pyarrow')
+    
+    assert len(df) == 1, "Should only have one record for the stream"
+    assert df.iloc[0]['stream_id'] == "test_stream"
+    assert df.iloc[0]['deployment_timestamp'] == second_timestamp
+
+
+def test_mark_multiple_as_deployed_replaces_existing(s3_block: S3DeploymentStateBlock) -> None:
+    """Test that marking multiple streams as deployed replaces any existing deployment records."""
+    # First deployment
+    first_timestamp = datetime(2023, 10, 10, 12, 0, tzinfo=timezone.utc)
+    stream_ids = ["stream1", "stream2", "stream3"]
+    s3_block.mark_multiple_as_deployed(stream_ids, first_timestamp)
+    
+    # Second deployment for subset of streams with different timestamp
+    second_timestamp = datetime(2023, 10, 10, 13, 0, tzinfo=timezone.utc)
+    updated_streams = ["stream1", "stream3"]
+    s3_block.mark_multiple_as_deployed(updated_streams, second_timestamp)
+    
+    # Verify the state
+    content: bytes = s3_block.s3_bucket.read_path("deployment_states/all_streams.parquet")  # type: ignore
+    buffer = io.BytesIO(content)
+    df = pd.read_parquet(buffer, engine='pyarrow')
+    
+    # Convert DataFrame to dictionary for easier assertion
+    stream_to_timestamp: dict[str, datetime] = dict(zip(df['stream_id'], df['deployment_timestamp']))
+    
+    assert len(df) == 3, "Should have three records total"
+    assert stream_to_timestamp["stream1"] == second_timestamp, "stream1 should have second timestamp"
+    assert stream_to_timestamp["stream2"] == first_timestamp, "stream2 should retain first timestamp"
+    assert stream_to_timestamp["stream3"] == second_timestamp, "stream3 should have second timestamp"
+
+
+def test_mark_as_deployed_maintains_other_records(s3_block: S3DeploymentStateBlock) -> None:
+    """Test that marking a stream as deployed doesn't affect other stream records."""
+    # Deploy multiple streams
+    first_timestamp = datetime(2023, 10, 10, 12, 0, tzinfo=timezone.utc)
+    stream_ids = ["stream1", "stream2", "stream3"]
+    s3_block.mark_multiple_as_deployed(stream_ids, first_timestamp)
+    
+    # Update one stream
+    second_timestamp = datetime(2023, 10, 10, 13, 0, tzinfo=timezone.utc)
+    s3_block.mark_as_deployed("stream2", second_timestamp)
+    
+    # Verify the state
+    content: bytes = s3_block.s3_bucket.read_path("deployment_states/all_streams.parquet")  # type: ignore
+    buffer = io.BytesIO(content)
+    df = pd.read_parquet(buffer, engine='pyarrow')
+    
+    # Convert DataFrame to dictionary for easier assertion
+    stream_to_timestamp: dict[str, datetime] = dict(zip(df['stream_id'], df['deployment_timestamp']))
+    
+    assert len(df) == 3, "Should still have three records"
+    assert stream_to_timestamp["stream1"] == first_timestamp, "stream1 should retain first timestamp"
+    assert stream_to_timestamp["stream2"] == second_timestamp, "stream2 should have second timestamp"
+    assert stream_to_timestamp["stream3"] == first_timestamp, "stream3 should retain first timestamp" 

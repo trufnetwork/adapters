@@ -206,11 +206,37 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
         except Exception as exc:
             raise Exception(f"Failed to write deployment states to S3: {str(exc)}")
 
+    def _update_deployment_records(self, df: pd.DataFrame, stream_ids: list[str], timestamp: datetime) -> pd.DataFrame:
+        """Update deployment records, ensuring uniqueness of stream_ids.
+        
+        This method removes any existing records for the given stream_ids and adds
+        new records with the provided timestamp.
+        
+        Args:
+            df: Existing DataFrame of deployment records
+            stream_ids: List of stream IDs to update
+            timestamp: The UTC timestamp to use for the new records
+            
+        Returns:
+            pd.DataFrame: Updated DataFrame with unique stream_ids
+        """
+        # Remove existing records for these stream_ids
+        df = df[~df['stream_id'].astype(str).isin([str(sid) for sid in stream_ids])]
+        
+        # Create new records
+        new_records = pd.DataFrame({
+            'stream_id': pd.Series(stream_ids, dtype=str),
+            'deployment_timestamp': pd.Series([timestamp] * len(stream_ids), dtype='datetime64[ns, UTC]')
+        })
+        
+        # Concatenate with existing records
+        return pd.concat([df, new_records], ignore_index=True)
+
     def mark_as_deployed(self, stream_id: str, timestamp: datetime) -> None:
         """Mark a single stream as deployed at the given timestamp.
         
-        This method adds a new deployment record for the specified stream. If the stream
-        was previously marked as deployed, a new record will be added with the updated timestamp.
+        This method updates the deployment record for the specified stream. If the stream
+        was previously marked as deployed, the old record will be replaced with the new timestamp.
         
         Args:
             stream_id: The unique identifier for the stream.
@@ -222,11 +248,7 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
         self._validate_timestamp(timestamp)
         self._validate_stream_id(stream_id)
         df = self._read_deployment_df(ignore_errors=True)
-        new_row = pd.DataFrame({
-            'stream_id': [stream_id],
-            'deployment_timestamp': [timestamp]
-        })
-        df = pd.concat([df, new_row], ignore_index=True)
+        df = self._update_deployment_records(df, [stream_id], timestamp)
         self._write_deployment_df(df)
 
     def has_been_deployed(self, stream_id: str) -> bool:
@@ -269,8 +291,8 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
     def mark_multiple_as_deployed(self, stream_ids: list[str], timestamp: datetime) -> None:
         """Mark multiple streams as deployed at the same timestamp.
         
-        This method is more efficient than calling mark_as_deployed multiple times
-        as it only reads and writes the deployment state file once.
+        This method updates the deployment records for the specified streams. If any stream
+        was previously marked as deployed, its old record will be replaced with the new timestamp.
         
         Args:
             stream_ids: List of stream identifiers to mark as deployed.
@@ -279,16 +301,12 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
         Raises:
             ValueError: If any stream_id is empty or if the timestamp is not timezone-aware UTC.
         """
-        self._validate_stream_ids(stream_ids)
         self._validate_timestamp(timestamp)
+        self._validate_stream_ids(stream_ids)
         if not stream_ids:
             return
         df = self._read_deployment_df(ignore_errors=True)
-        new_rows = pd.DataFrame({
-            'stream_id': stream_ids,
-            'deployment_timestamp': [timestamp] * len(stream_ids)
-        })
-        df = pd.concat([df, new_rows], ignore_index=True)
+        df = self._update_deployment_records(df, stream_ids, timestamp)
         self._write_deployment_df(df)
 
     def get_deployment_states(self) -> DataFrame[DeploymentStateModel]:
