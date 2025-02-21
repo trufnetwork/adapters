@@ -157,9 +157,11 @@ def test_get_deployment_states_with_data(s3_block: S3DeploymentStateBlock) -> No
     df = s3_block.get_deployment_states()
     assert len(df) == 2
     assert set(df['stream_id'].values) == set(stream_ids)
-    # Convert timestamps to UTC for comparison
-    df_timestamps = pd.to_datetime(df['deployment_timestamp']).dt.tz_localize('UTC')
-    assert all(df_timestamps == timestamp)
+    # Compare timestamps using pandas Series equality
+    expected_ts = pd.Series([timestamp] * len(df))
+    expected_ts = expected_ts.dt.tz_localize(None)  # Convert to naive timestamps for comparison
+    actual_ts = df['deployment_timestamp'].dt.tz_localize(None)
+    pd.testing.assert_series_equal(actual_ts, expected_ts, check_names=False)
 
 
 def test_update_deployment_states_valid(s3_block: S3DeploymentStateBlock) -> None:

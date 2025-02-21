@@ -1,3 +1,24 @@
+"""
+Deployment State Tracking Module
+
+This module defines the Pandera DataFrameModel for deployment state tracking,
+an abstract base class DeploymentStateBlock, and a concrete implementation
+S3DeploymentStateBlock that uses an S3 bucket to store deployment state information
+in a unified parquet file.
+
+Usage Example:
+    from prefect_aws import S3Bucket
+    from tsn_adapters.blocks.deployment_state import S3DeploymentStateBlock
+    from datetime import datetime, timezone
+
+    # Initialize your S3 bucket (details omitted)
+    s3_bucket = S3Bucket( /* initialize your bucket here */ )
+    file_path = "deployment_states/all_streams.parquet"
+    deployment_block = S3DeploymentStateBlock(s3_bucket=s3_bucket, file_path=file_path)
+    timestamp = datetime.now(timezone.utc)
+    deployment_block.mark_as_deployed("stream_id_example", timestamp)
+"""
+
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 import io
@@ -38,7 +59,8 @@ class DeploymentStateBlock(Block, ABC):
 
     @abstractmethod
     def check_multiple_streams(self, stream_ids: list[str]) -> dict[str, bool]:
-        """Check deployment status for multiple stream_ids and return a dictionary mapping each stream_id to its deployment status."""
+        """Check deployment status for multiple stream_ids and return a dictionary
+        mapping each stream_id to its deployment status."""
         raise NotImplementedError
 
     @abstractmethod
@@ -67,10 +89,41 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
     
     This block uses S3 to store deployment states in a unified parquet file.
     All stream states are stored in a single file for better consistency and atomic updates.
+
+    Attributes:
+        s3_bucket: The S3 bucket to store deployment states in.
+        file_path: The path within the bucket where the parquet file is stored.
     """
     s3_bucket: S3Bucket
     file_path: str
     model_config = ConfigDict(ignored_types=(Task,))
+
+    def _create_empty_df(self) -> pd.DataFrame:
+        """Create an empty DataFrame with the correct schema for deployment states.
+        
+        Returns:
+            pd.DataFrame: An empty DataFrame with 'stream_id' and 'deployment_timestamp' columns.
+        """
+        return pd.DataFrame({
+            'stream_id': pd.Series(dtype='str'),
+            'deployment_timestamp': pd.Series(dtype='datetime64[ns, UTC]')
+        })
+
+    def _ensure_utc_timestamps(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure all timestamps in the DataFrame are timezone-aware UTC.
+        
+        Args:
+            df: DataFrame containing deployment timestamps.
+            
+        Returns:
+            pd.DataFrame: DataFrame with UTC-aware timestamps.
+        """
+        if not df.empty and 'deployment_timestamp' in df.columns:
+            if df['deployment_timestamp'].dt.tz is None:
+                df['deployment_timestamp'] = df['deployment_timestamp'].dt.tz_localize('UTC')
+            else:
+                df['deployment_timestamp'] = df['deployment_timestamp'].dt.tz_convert('UTC')
+        return df
 
     def _validate_timestamp(self, timestamp: datetime) -> None:
         """Validate that a timestamp is timezone-aware and in UTC.
@@ -79,13 +132,12 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
             timestamp: The timestamp to validate.
             
         Raises:
-            TypeError: If timestamp is not a datetime object.
             ValueError: If the timestamp is not timezone-aware or not in UTC.
         """
         if timestamp.tzinfo is None:
-            raise ValueError("Timestamp must be timezone-aware")
+            raise ValueError("Timestamp must be timezone-aware and in UTC.")
         if timestamp.tzinfo != timezone.utc:
-            raise ValueError("Timestamp must be in UTC")
+            raise ValueError("Timestamp must be in UTC timezone.")
 
     def _validate_stream_id(self, stream_id: str) -> None:
         """Validate that a stream ID is a non-empty string.
@@ -94,11 +146,10 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
             stream_id: The stream ID to validate.
             
         Raises:
-            TypeError: If stream_id is not a string.
             ValueError: If stream_id is empty.
         """
         if not stream_id:
-            raise ValueError("Stream ID cannot be empty")
+            raise ValueError("Stream ID cannot be empty.")
 
     def _validate_stream_ids(self, stream_ids: list[str]) -> None:
         """Validate that a list of stream IDs contains only non-empty strings.
@@ -107,187 +158,171 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
             stream_ids: The list of stream IDs to validate.
             
         Raises:
-            TypeError: If stream_ids is not a list or if any stream ID is not a string.
             ValueError: If any stream ID is empty.
         """
         for stream_id in stream_ids:
             self._validate_stream_id(stream_id)
 
-    def mark_as_deployed(self, stream_id: str, timestamp: datetime) -> None:
-        self._validate_timestamp(timestamp)
-        self._validate_stream_id(stream_id)
-
-        # Attempt to load existing data from S3
-        try:
-            content = deroutine(self.s3_bucket.read_path(self.file_path))
-            buffer = io.BytesIO(content)
-            df = pd.read_parquet(buffer, engine='pyarrow')
-        except Exception:
-            # If file doesn't exist or can't be read, create a new DataFrame
-            df = pd.DataFrame(columns=['stream_id', 'deployment_timestamp'])
-
-        # Append the new deployment record
-        new_row = {'stream_id': stream_id, 'deployment_timestamp': timestamp}
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
-        # Write the updated DataFrame back to S3
-        buffer = io.BytesIO()
-        df.to_parquet(buffer, engine='pyarrow', compression='snappy', index=False)
-        buffer.seek(0)
-        try:
-            deroutine(self.s3_bucket.write_path(self.file_path, buffer.getvalue()))
-        except Exception as exc:
-            raise Exception(f"Failed to write deployment state to S3: {exc}")
-
-    def has_been_deployed(self, stream_id: str) -> bool:
-        """Check if the deployment has been performed for a given stream_id.
+    def _read_deployment_df(self, ignore_errors: bool = True) -> pd.DataFrame:
+        """Read the deployment states DataFrame from S3.
         
         Args:
-            stream_id: The stream ID to check.
+            ignore_errors: If True, return an empty DataFrame on errors instead of raising exceptions.
             
         Returns:
-            bool: True if the stream has been deployed, False otherwise.
+            pd.DataFrame: The deployment states DataFrame.
             
         Raises:
-            TypeError: If the stream ID is not a string.
-            ValueError: If the stream ID is empty.
+            Exception: If ignore_errors is False and there's an error reading from S3.
         """
-        self._validate_stream_id(stream_id)
         try:
             content = deroutine(self.s3_bucket.read_path(self.file_path))
             buffer = io.BytesIO(content)
             df = pd.read_parquet(buffer, engine='pyarrow')
-            return stream_id in df['stream_id'].values
+            return self._ensure_utc_timestamps(df)
         except ValueError:  # File doesn't exist
-            return False
+            return self._create_empty_df()
         except Exception as exc:
-            raise Exception(f"Failed to read deployment states from S3: {exc}")
+            if ignore_errors:
+                return self._create_empty_df()
+            else:
+                raise Exception(f"Failed to read deployment states from S3: {str(exc)}")
 
-    def check_multiple_streams(self, stream_ids: list[str]) -> dict[str, bool]:
-        """Check deployment status for multiple stream_ids.
+    def _write_deployment_df(self, df: pd.DataFrame) -> None:
+        """Write the deployment states DataFrame to S3.
         
         Args:
-            stream_ids: List of stream IDs to check.
+            df: The DataFrame to write.
+            
+        Raises:
+            Exception: If there's an error writing to S3.
+        """
+        try:
+            df = self._ensure_utc_timestamps(df)
+            buffer = io.BytesIO()
+            df.to_parquet(buffer, engine='pyarrow', compression='snappy', index=False)
+            buffer.seek(0)
+            deroutine(self.s3_bucket.write_path(self.file_path, buffer.getvalue()))
+        except Exception as exc:
+            raise Exception(f"Failed to write deployment states to S3: {str(exc)}")
+
+    def mark_as_deployed(self, stream_id: str, timestamp: datetime) -> None:
+        """Mark a single stream as deployed at the given timestamp.
+        
+        This method adds a new deployment record for the specified stream. If the stream
+        was previously marked as deployed, a new record will be added with the updated timestamp.
+        
+        Args:
+            stream_id: The unique identifier for the stream.
+            timestamp: The UTC timestamp when the stream was deployed.
+            
+        Raises:
+            ValueError: If the stream_id is empty or if the timestamp is not timezone-aware UTC.
+        """
+        self._validate_timestamp(timestamp)
+        self._validate_stream_id(stream_id)
+        df = self._read_deployment_df(ignore_errors=True)
+        new_row = pd.DataFrame({
+            'stream_id': [stream_id],
+            'deployment_timestamp': [timestamp]
+        })
+        df = pd.concat([df, new_row], ignore_index=True)
+        self._write_deployment_df(df)
+
+    def has_been_deployed(self, stream_id: str) -> bool:
+        """Check if a stream has ever been deployed.
+        
+        Args:
+            stream_id: The unique identifier for the stream to check.
+            
+        Returns:
+            bool: True if the stream has been deployed at least once, False otherwise.
+            
+        Raises:
+            ValueError: If the stream_id is empty.
+        """
+        self._validate_stream_id(stream_id)
+        df = self._read_deployment_df(ignore_errors=True)
+        deployed_streams = set(df['stream_id'].values)
+        return stream_id in deployed_streams
+
+    def check_multiple_streams(self, stream_ids: list[str]) -> dict[str, bool]:
+        """Check deployment status for multiple streams simultaneously.
+        
+        This method is more efficient than calling has_been_deployed multiple times
+        as it only reads the deployment state file once.
+        
+        Args:
+            stream_ids: List of stream identifiers to check.
             
         Returns:
             dict[str, bool]: A dictionary mapping each stream_id to its deployment status.
             
         Raises:
-            TypeError: If stream_ids is not a list or if any stream ID is not a string.
-            ValueError: If any stream ID is empty.
-            Exception: If there is an error reading from S3.
+            ValueError: If any stream_id in the list is empty.
         """
         self._validate_stream_ids(stream_ids)
-        if not stream_ids:
-            return {}
-
-        try:
-            content = deroutine(self.s3_bucket.read_path(self.file_path))
-            buffer = io.BytesIO(content)
-            df = pd.read_parquet(buffer, engine='pyarrow')
-            deployed_streams = set(df['stream_id'].values)
-            return {stream_id: stream_id in deployed_streams for stream_id in stream_ids}
-        except ValueError:  # File doesn't exist
-            return {stream_id: False for stream_id in stream_ids}
-        except Exception as exc:
-            raise Exception(f"Failed to read deployment states from S3: {exc}")
+        df = self._read_deployment_df(ignore_errors=True)
+        deployed_streams = set(df['stream_id'].values)
+        return {stream_id: stream_id in deployed_streams for stream_id in stream_ids}
 
     def mark_multiple_as_deployed(self, stream_ids: list[str], timestamp: datetime) -> None:
-        """Mark multiple stream_ids as deployed at the given timestamp.
+        """Mark multiple streams as deployed at the same timestamp.
+        
+        This method is more efficient than calling mark_as_deployed multiple times
+        as it only reads and writes the deployment state file once.
         
         Args:
-            stream_ids: List of stream IDs to mark as deployed.
+            stream_ids: List of stream identifiers to mark as deployed.
             timestamp: The UTC timestamp when the streams were deployed.
             
         Raises:
-            TypeError: If stream_ids is not a list, if any stream ID is not a string,
-                    or if timestamp is not a datetime object.
-            ValueError: If any stream ID is empty, or if the timestamp is not in UTC.
-            Exception: If there is an error reading from or writing to S3.
+            ValueError: If any stream_id is empty or if the timestamp is not timezone-aware UTC.
         """
         self._validate_stream_ids(stream_ids)
         self._validate_timestamp(timestamp)
-
         if not stream_ids:
             return
-
-        try:
-            content = deroutine(self.s3_bucket.read_path(self.file_path))
-            buffer = io.BytesIO(content)
-            df = pd.read_parquet(buffer, engine='pyarrow')
-        except ValueError:  # File doesn't exist
-            df = pd.DataFrame(columns=['stream_id', 'deployment_timestamp'])
-        except Exception as exc:
-            raise Exception(f"Failed to read deployment states from S3: {exc}")
-
-        # Create new rows for all stream IDs
-        new_rows = [{'stream_id': stream_id, 'deployment_timestamp': timestamp} for stream_id in stream_ids]
-        df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-
-        # Write the updated DataFrame back to S3
-        buffer = io.BytesIO()
-        df.to_parquet(buffer, engine='pyarrow', compression='snappy', index=False)
-        buffer.seek(0)
-        try:
-            deroutine(self.s3_bucket.write_path(self.file_path, buffer.getvalue()))
-        except Exception as exc:
-            raise Exception(f"Failed to write deployment states to S3: {exc}")
+        df = self._read_deployment_df(ignore_errors=True)
+        new_rows = pd.DataFrame({
+            'stream_id': stream_ids,
+            'deployment_timestamp': [timestamp] * len(stream_ids)
+        })
+        df = pd.concat([df, new_rows], ignore_index=True)
+        self._write_deployment_df(df)
 
     def get_deployment_states(self) -> DataFrame[DeploymentStateModel]:
-        """Retrieve the deployment states as a Pandera DataFrameModel.
+        """Retrieve all deployment states.
+        
+        This method returns a DataFrame containing all deployment records. The DataFrame
+        is validated against the DeploymentStateModel schema to ensure data consistency.
         
         Returns:
             DataFrame[DeploymentStateModel]: A DataFrame containing all deployment states.
             If no states exist, returns an empty DataFrame with the correct schema.
-        
+            
         Raises:
-            Exception: If there is an error reading from S3 (except for non-existent file).
+            Exception: If there is an error reading from S3 and the data cannot be retrieved.
         """
         try:
-            content = deroutine(self.s3_bucket.read_path(self.file_path))
-            buffer = io.BytesIO(content)
-            df = pd.read_parquet(buffer, engine='pyarrow')
-            # Convert timestamps to timezone-aware UTC if they aren't already
-            if df['deployment_timestamp'].dt.tz is None:
-                df['deployment_timestamp'] = pd.to_datetime(df['deployment_timestamp']).dt.tz_localize('UTC')
-            else:
-                df['deployment_timestamp'] = pd.to_datetime(df['deployment_timestamp']).dt.tz_convert('UTC')
-            # Ensure the DataFrame matches our model schema
+            df = self._read_deployment_df(ignore_errors=False)
+            if df.empty:
+                df = self._create_empty_df()
             return DataFrame[DeploymentStateModel](df)
-        except ValueError:  # File doesn't exist
-            # Create an empty DataFrame with the correct schema
-            empty_df = pd.DataFrame(columns=['stream_id', 'deployment_timestamp'])
-            return DataFrame[DeploymentStateModel](empty_df)
         except Exception as exc:
-            raise Exception(f"Failed to read deployment states from S3: {exc}")
+            raise Exception(f"Failed to read deployment states from S3: {str(exc)}")
 
     def update_deployment_states(self, states: DataFrame[DeploymentStateModel]) -> None:
-        """Update the deployment states with the provided DataFrame of DeploymentStateModel.
+        """Update all deployment states with a new DataFrame.
         
         This method completely replaces the existing deployment states with the new ones.
         The provided DataFrame must conform to the DeploymentStateModel schema.
         
         Args:
-            states: DataFrame[DeploymentStateModel] containing the new deployment states.
-            Must have 'stream_id' and 'deployment_timestamp' columns with correct types.
-        
+            states: DataFrame containing the new deployment states. Must have 'stream_id'
+                   and 'deployment_timestamp' columns with correct types.
+            
         Raises:
-            Exception: If there is an error writing to S3 or if the DataFrame doesn't match the schema.
+            Exception: If there is an error writing to S3.
         """
-        # The type annotation already ensures states is a DataFrame[DeploymentStateModel]
-        # which means it has already been validated against the schema
-        
-        # Write the DataFrame to S3, ensuring timestamps are in UTC
-        df = states.copy()
-        if df['deployment_timestamp'].dt.tz is None:
-            df['deployment_timestamp'] = pd.to_datetime(df['deployment_timestamp']).dt.tz_localize('UTC')
-        else:
-            df['deployment_timestamp'] = pd.to_datetime(df['deployment_timestamp']).dt.tz_convert('UTC')
-        
-        buffer = io.BytesIO()
-        df.to_parquet(buffer, engine='pyarrow', compression='snappy', index=False)
-        buffer.seek(0)
-        try:
-            deroutine(self.s3_bucket.write_path(self.file_path, buffer.getvalue()))
-        except Exception as exc:
-            raise Exception(f"Failed to write deployment states to S3: {exc}") 
+        self._write_deployment_df(states) 
