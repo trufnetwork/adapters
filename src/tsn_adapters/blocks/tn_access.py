@@ -27,7 +27,7 @@ def tn_special_retry_condition(max_other_error_retries: int):
     """
     Custom retry condition for Prefect tasks.
 
-    If the raised exception is a TNNodeNetworkError, always retry (indefinitely).
+    If the raised exception is a TNNodeNetworkError or TNDbTimeoutError, always retry (indefinitely).
     Otherwise, only retry if the current attempt (based on task_run's run_count) is less than max_retries.
 
     Args:
@@ -41,8 +41,8 @@ def tn_special_retry_condition(max_other_error_retries: int):
         try:
             # This will re-raise the exception if the task failed.
             state.result()
-        except TNNodeNetworkError:
-            # Always retry on network errors
+        except (TNNodeNetworkError, TNDbTimeoutError):
+            # Always retry on network and DB timeout errors.
             return True
         except Exception as exc:
             # For non-network errors, use the task_run's run_count to decide.
@@ -84,10 +84,33 @@ class TNNodeNetworkError(Exception):
             return False
 
 
+class TNDbTimeoutError(Exception):
+    """Error raised when a TN database timeout occurs."""
+
+    @classmethod
+    def from_error(cls, error: Exception) -> "TNDbTimeoutError":
+        if isinstance(error, TNDbTimeoutError):
+            return error
+        # if "db timeout" in str(error).lower():
+        #     return cls(str(error))
+        if isinstance(error, RuntimeError) and "db timeout" in str(error):
+            return cls(str(error))
+        raise error
+
+    @classmethod
+    def is_db_timeout_error(cls, error: Exception) -> bool:
+        try:
+            cls.from_error(error)
+            return True
+        except Exception:
+            return False
+
+
 class SafeTNClientProxy:
     """
     A proxy wrapper for the TN client that automatically intercepts callable attributes.
-    It wraps all method calls with error handling so that any TN network error is re-raised as TNNodeNetworkError.
+    It wraps all method calls with error handling so that any TN network error is re-raised as TNNodeNetworkError
+    and any DB timeout error is re-raised as TNDbTimeoutError.
     """
 
     def __init__(self, client: Any) -> None:
@@ -103,6 +126,8 @@ class SafeTNClientProxy:
                 except Exception as e:
                     if TNNodeNetworkError.is_tn_node_network_error(e):
                         raise TNNodeNetworkError.from_error(e)
+                    if TNDbTimeoutError.is_db_timeout_error(e):
+                        raise TNDbTimeoutError.from_error(e)
                     raise
 
             return wrapped
@@ -156,6 +181,8 @@ class TNAccessBlock(Block):
             except Exception as e:
                 if TNNodeNetworkError.is_tn_node_network_error(e):
                     raise TNNodeNetworkError.from_error(e)
+                if TNDbTimeoutError.is_db_timeout_error(e):
+                    raise TNDbTimeoutError.from_error(e)
                 raise
         return self._client
 
