@@ -240,7 +240,7 @@ class TestProcessDataAndDescriptor:
         result = get_symbols_from_descriptor(psd_block)  # type: ignore
 
         assert isinstance(result, DataFrame)
-        assert len(result) == 2  # Our fake block returns 2 symbols
+        assert len(result) == 3  # Our fake block returns 3 symbols
         assert all(col in result.columns for col in ["source_id", "stream_id", "source_type"])
         assert "AAPL" in result["source_id"].values
         assert "stream_aapl" in result["stream_id"].values
