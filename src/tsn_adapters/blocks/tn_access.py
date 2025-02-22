@@ -551,7 +551,7 @@ class TNAccessBlock(Block):
 
 
 # --- Top Level Task Functions ---
-@task()
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_all_records(block: TNAccessBlock, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
     return block.read_all_records(stream_id, data_provider)
 
@@ -580,7 +580,7 @@ def task_read_records(
 ) -> DataFrame[TnRecordModel]: ...
 
 
-@task()
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_records(
     block: TNAccessBlock,
     stream_id: str,
@@ -621,7 +621,7 @@ def task_read_records(
         )
 
 
-@task()
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_tn_records(
     block: TNAccessBlock,
     stream_id: str,
@@ -631,7 +631,7 @@ def task_insert_tn_records(
     return block.insert_tn_records(stream_id, records, data_provider)
 
 
-@task()
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_unix_tn_records(
     block: TNAccessBlock,
     stream_id: str,
@@ -856,7 +856,7 @@ def task_split_and_insert_records(
     )
 
 
-@task()
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_destroy_stream(block: TNAccessBlock, stream_id: str, wait: bool = True) -> str:
     """Task to destroy a stream with the given stream ID.
 
