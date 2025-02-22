@@ -434,7 +434,12 @@ def disable_prefect_retries():
         'tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx',
         'tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx',
         'tsn_adapters.blocks.tn_access._task_only_batch_insert_records',
-        'tsn_adapters.blocks.tn_access.task_split_and_insert_records'
+        'tsn_adapters.blocks.tn_access.task_split_and_insert_records',
+        # TN Common
+        'tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records',
+        'tsn_adapters.common.trufnetwork.tn.task_deploy_primitive',
+        'tsn_adapters.common.trufnetwork.tn.task_init_stream',
+        'tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records'
     ]
 
     with patch('prefect.task', side_effect=original_task) as mock_task:
