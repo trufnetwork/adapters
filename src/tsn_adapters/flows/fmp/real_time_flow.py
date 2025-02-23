@@ -225,7 +225,7 @@ def convert_quotes_to_tn_data(
 
     # Drop any duplicates on stream_id
     result_df = result_df.drop_duplicates(subset=["stream_id"])
-    
+
     # Set the timestamp
     current_timestamp = timestamp or int(pd.Timestamp.now().timestamp())
     result_df["date"] = ensure_unix_timestamp(current_timestamp)  # Keep as numeric for batch_insert_unix_tn_records
@@ -604,7 +604,7 @@ def real_time_flow(
             task_split_and_insert_records(
                 block=tn_block,
                 records=processed_data,
-                wait=False,
+                wait=True,
                 is_unix=True,
             )
             logger.info(
