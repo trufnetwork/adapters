@@ -71,7 +71,7 @@ class TNNodeNetworkError(Exception):
     def from_error(cls, error: Exception) -> "TNNodeNetworkError":
         if isinstance(error, TNNodeNetworkError):
             return error
-        if isinstance(error, RuntimeError) and "http post failed" in str(error) and "dial tcp" in str(error):
+        if isinstance(error, RuntimeError) and "http post failed" in str(error) and "tcp" in str(error):
             return cls(str(error))
         raise error
 
