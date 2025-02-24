@@ -204,7 +204,8 @@ class TNAccessBlock(Block):
     @handle_tn_errors
     def stream_exists(self, data_provider: str, stream_id: str) -> bool:
         """Check if a stream exists"""
-        return self.client.stream_exists(stream_id=stream_id, data_provider=data_provider)
+        with concurrency("tn-read", occupy=1):
+            return self.client.stream_exists(stream_id=stream_id, data_provider=data_provider)
 
     @handle_tn_errors
     def get_stream_type(self, data_provider: str, stream_id: str) -> str:
@@ -220,7 +221,8 @@ class TNAccessBlock(Block):
         Returns:
             str: The stream type if initialized
         """
-        return self.client.get_type(stream_id=stream_id, data_provider=data_provider)
+        with concurrency("tn-read", occupy=1):
+            return self.client.get_type(stream_id=stream_id, data_provider=data_provider)
 
     @handle_tn_errors
     def is_allowed_to_write(self, data_provider: str, stream_id: str) -> bool:
@@ -284,16 +286,18 @@ class TNAccessBlock(Block):
     def call_procedure(
         self, stream_id: str, data_provider: Optional[str] = None, procedure: str = "", args: Optional[list[Any]] = None
     ) -> list[dict[str, Any]]:
-        return self.client.call_procedure(stream_id, data_provider, procedure, args)
+        with concurrency("tn-read", occupy=1):
+            return self.client.call_procedure(stream_id, data_provider, procedure, args)
 
     @handle_tn_errors
     def get_first_record(
         self, stream_id: str, data_provider: Optional[str] = None, is_unix: bool = False
     ) -> Optional[TnRecord]:
-        if is_unix:
-            result = self.client.get_first_record_unix(stream_id, data_provider)
-        else:
-            result = self.client.get_first_record(stream_id, data_provider)
+        with concurrency("tn-read", occupy=1):
+            if is_unix:
+                result = self.client.get_first_record_unix(stream_id, data_provider)
+            else:
+                result = self.client.get_first_record(stream_id, data_provider)
 
         if result is None:
             return None
@@ -483,12 +487,13 @@ class TNAccessBlock(Block):
                 values.append(str(record["value"]))
                 external_created_at.append(created_at)
 
-        tx_hash = self.client.execute_procedure(
-            stream_id=helper_contract_stream_id,
-            procedure="insert_records_truflation",
-            args=[[data_providers, stream_ids, date_values, values, external_created_at]],
-            wait=wait,
-            data_provider=helper_contract_provider,
+        with concurrency("tn-write", occupy=1):
+            tx_hash = self.client.execute_procedure(
+                stream_id=helper_contract_stream_id,
+                procedure="insert_records_truflation",
+                args=[[data_providers, stream_ids, date_values, values, external_created_at]],
+                wait=wait,
+                data_provider=helper_contract_provider,
         )
         return {"tx_hash": tx_hash}
 
