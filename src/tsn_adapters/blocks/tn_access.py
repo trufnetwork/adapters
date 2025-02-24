@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import decimal
-from typing import Any, Literal, Optional, TypedDict, Union, cast, overload
+from functools import wraps
+from typing import Any, Callable, Literal, Optional, TypedDict, TypeVar, Union, cast, overload
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -21,6 +22,28 @@ from tsn_adapters.utils.unix import check_unix_timestamp
 # used to make sure our special retry condition is the real one
 # must be used together
 UNUSED_INFINITY_RETRIES = 1000000
+
+# Add before SafeTNClientProxy class
+ClientType = TypeVar("ClientType")
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def handle_tn_errors(func: F) -> F:
+    """Decorator to handle TN network and DB timeout errors."""
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if TNNodeNetworkError.is_tn_node_network_error(e):
+                raise TNNodeNetworkError.from_error(e)
+            if TNDbTimeoutError.is_db_timeout_error(e):
+                raise TNDbTimeoutError.from_error(e)
+            raise
+
+    return cast(F, wrapper)
 
 
 def tn_special_retry_condition(max_other_error_retries: int):
@@ -44,7 +67,7 @@ def tn_special_retry_condition(max_other_error_retries: int):
         except (TNNodeNetworkError, TNDbTimeoutError):
             # Always retry on network and DB timeout errors.
             return True
-        except Exception as exc:
+        except Exception:
             # For non-network errors, use the task_run's run_count to decide.
             if task_run.run_count <= max_other_error_retries:
                 return True
@@ -106,34 +129,6 @@ class TNDbTimeoutError(Exception):
             return False
 
 
-class SafeTNClientProxy:
-    """
-    A proxy wrapper for the TN client that automatically intercepts callable attributes.
-    It wraps all method calls with error handling so that any TN network error is re-raised as TNNodeNetworkError
-    and any DB timeout error is re-raised as TNDbTimeoutError.
-    """
-
-    def __init__(self, client: Any) -> None:
-        self._client = client
-
-    def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._client, name)
-        if callable(attr):
-
-            def wrapped(*args: Any, **kwargs: Any) -> Any:
-                try:
-                    return attr(*args, **kwargs)
-                except Exception as e:
-                    if TNNodeNetworkError.is_tn_node_network_error(e):
-                        raise TNNodeNetworkError.from_error(e)
-                    if TNDbTimeoutError.is_db_timeout_error(e):
-                        raise TNDbTimeoutError.from_error(e)
-                    raise
-
-            return wrapped
-        return attr
-
-
 class TNAccessBlock(Block):
     """Prefect Block for managing TSN access credentials.
 
@@ -171,19 +166,19 @@ class TNAccessBlock(Block):
     model_config = ConfigDict(ignored_types=(Task,))
 
     @property
+    def current_account(self):
+        if not hasattr(self, "_current_account"):
+            self._current_account = self.client.get_current_account()
+        return self._current_account
+
+    @property
+    @handle_tn_errors
     def client(self) -> tn_client.TNClient:
         if not hasattr(self, "_client"):
-            try:
-                self._client = tn_client.TNClient(
-                    url=self.tn_provider,
-                    token=self.tn_private_key.get_secret_value(),
-                )
-            except Exception as e:
-                if TNNodeNetworkError.is_tn_node_network_error(e):
-                    raise TNNodeNetworkError.from_error(e)
-                if TNDbTimeoutError.is_db_timeout_error(e):
-                    raise TNDbTimeoutError.from_error(e)
-                raise
+            self._client = tn_client.TNClient(
+                url=self.tn_provider,
+                token=self.tn_private_key.get_secret_value(),
+            )
         return self._client
 
     @property
@@ -200,20 +195,47 @@ class TNAccessBlock(Block):
     def logger(self):
         return get_logger_safe(__name__)
 
-    @property
-    def safe_client(self) -> Any:
-        return SafeTNClientProxy(self.client)
-
     def get_client(self):
         """
         deprecated: Use client property instead
         """
         return self.client
 
+    @handle_tn_errors
     def stream_exists(self, data_provider: str, stream_id: str) -> bool:
         """Check if a stream exists"""
-        return self.get_client().stream_exists(stream_id=stream_id, data_provider=data_provider)
+        return self.client.stream_exists(stream_id=stream_id, data_provider=data_provider)
 
+    @handle_tn_errors
+    def get_stream_type(self, data_provider: str, stream_id: str) -> str:
+        """Check if a stream is initialized by getting its stream type.
+
+        This method is used to verify both stream existence and initialization status.
+        A successful response indicates the stream exists and is initialized.
+
+        Args:
+            data_provider: The data provider of the stream
+            stream_id: The ID of the stream to check
+
+        Returns:
+            str: The stream type if initialized
+        """
+        return self.client.get_type(stream_id=stream_id, data_provider=data_provider)
+
+    @handle_tn_errors
+    def is_allowed_to_write(self, data_provider: str, stream_id: str) -> bool:
+        """Check if a stream is initialized by getting its stream type.
+
+        Args:
+            data_provider: The data provider of the stream
+            stream_id: The ID of the stream to check
+
+        Returns:
+            bool: True if the stream is initialized and can be written to, False otherwise
+        """
+        raise NotImplementedError("is_allowed_to_write is not implemented")
+
+    @handle_tn_errors
     def get_earliest_date(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[datetime]:
         """
         Get the earliest date available for a stream.
@@ -253,22 +275,25 @@ class TNAccessBlock(Block):
 
             raise self.Error(f"Failed to query TN for {stream_id}: {e}") from e
 
+    @handle_tn_errors
     def read_all_records(self, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
         """Read all records from TSN"""
         return self.read_records(stream_id, data_provider, date_from="1000-01-01")
 
+    @handle_tn_errors
     def call_procedure(
         self, stream_id: str, data_provider: Optional[str] = None, procedure: str = "", args: Optional[list[Any]] = None
     ) -> list[dict[str, Any]]:
-        return self.get_client().call_procedure(stream_id, data_provider, procedure, args)
+        return self.client.call_procedure(stream_id, data_provider, procedure, args)
 
+    @handle_tn_errors
     def get_first_record(
         self, stream_id: str, data_provider: Optional[str] = None, is_unix: bool = False
     ) -> Optional[TnRecord]:
         if is_unix:
-            result = self.safe_client.get_first_record_unix(stream_id, data_provider)
+            result = self.client.get_first_record_unix(stream_id, data_provider)
         else:
-            result = self.safe_client.get_first_record(stream_id, data_provider)
+            result = self.client.get_first_record(stream_id, data_provider)
 
         if result is None:
             return None
@@ -297,6 +322,7 @@ class TNAccessBlock(Block):
         is_unix: Literal[True],
     ) -> DataFrame[TnRecordModel]: ...
 
+    @handle_tn_errors
     def read_records(
         self,
         stream_id: str,
@@ -311,7 +337,7 @@ class TNAccessBlock(Block):
                 if is_unix:
                     unix_from = int(cast(int, date_from)) if date_from is not None else None
                     unix_to = int(cast(int, date_to)) if date_to is not None else None
-                    recs = self.safe_client.get_records_unix(
+                    recs = self.client.get_records_unix(
                         stream_id,
                         data_provider,
                         unix_from,
@@ -320,7 +346,7 @@ class TNAccessBlock(Block):
                 else:
                     iso_from = str(cast(ShortIso8601Date, date_from)) if date_from is not None else None
                     iso_to = str(cast(ShortIso8601Date, date_to)) if date_to is not None else None
-                    recs = self.safe_client.get_records(
+                    recs = self.client.get_records(
                         stream_id,
                         data_provider,
                         iso_from,
@@ -347,6 +373,7 @@ class TNAccessBlock(Block):
 
         return DataFrame[TnRecordModel](df)
 
+    @handle_tn_errors
     def insert_tn_records(
         self,
         stream_id: str,
@@ -377,7 +404,7 @@ class TNAccessBlock(Block):
 
         with concurrency("tn-write", occupy=1):
             logging.info(f"Inserting {len(records)} records into stream {stream_id}")
-            txHash = self.safe_client.execute_procedure(
+            txHash = self.client.execute_procedure(
                 stream_id=stream_id,
                 procedure="insert_record",
                 args=args,
@@ -387,6 +414,7 @@ class TNAccessBlock(Block):
             logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
             return txHash
 
+    @handle_tn_errors
     def insert_unix_tn_records(
         self,
         stream_id: str,
@@ -408,7 +436,7 @@ class TNAccessBlock(Block):
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
-            txHash = self.safe_client.execute_procedure(
+            txHash = self.client.execute_procedure(
                 stream_id=stream_id,
                 procedure="insert_record",
                 args=args,
@@ -419,6 +447,7 @@ class TNAccessBlock(Block):
 
         return txHash
 
+    @handle_tn_errors
     def batch_insert_records_with_external_created_at(
         self,
         batches: list[dict[str, Any]],
@@ -439,11 +468,11 @@ class TNAccessBlock(Block):
         created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         fallback_data_provider = self.client.get_current_account()
 
-        data_providers = []
-        stream_ids = []
-        date_values = []
-        values = []
-        external_created_at = []
+        data_providers: list[str] = []
+        stream_ids: list[str] = []
+        date_values: list[str] = []
+        values: list[str] = []
+        external_created_at: list[str] = []
 
         for batch in batches:
             for record in batch["inputs"]:
@@ -454,7 +483,7 @@ class TNAccessBlock(Block):
                 values.append(str(record["value"]))
                 external_created_at.append(created_at)
 
-        tx_hash = self.safe_client.execute_procedure(
+        tx_hash = self.client.execute_procedure(
             stream_id=helper_contract_stream_id,
             procedure="insert_records_truflation",
             args=[[data_providers, stream_ids, date_values, values, external_created_at]],
@@ -463,6 +492,7 @@ class TNAccessBlock(Block):
         )
         return {"tx_hash": tx_hash}
 
+    @handle_tn_errors
     def batch_insert_tn_records(
         self,
         records: DataFrame[TnDataRowModel],
@@ -526,14 +556,14 @@ class TNAccessBlock(Block):
                     wait=False,
                 )
             elif is_unix:
-                results = self.safe_client.batch_insert_records_unix(
+                results = self.client.batch_insert_records_unix(
                     batches=batches,
                     helper_contract_stream_id=self.helper_contract_stream_name,
                     helper_contract_data_provider=self.helper_contract_provider,
                     wait=False,
                 )
             else:
-                results = self.safe_client.batch_insert_records(
+                results = self.client.batch_insert_records(
                     batches=batches,
                     helper_contract_stream_id=self.helper_contract_stream_name,
                     helper_contract_data_provider=self.helper_contract_provider,
@@ -541,18 +571,22 @@ class TNAccessBlock(Block):
                 )
             return results["tx_hash"]
 
+    @handle_tn_errors
     def wait_for_tx(self, tx_hash: str) -> None:
         with concurrency("tn-read", occupy=1):
-            self.safe_client.wait_for_tx(tx_hash)
+            self.client.wait_for_tx(tx_hash)
 
+    @handle_tn_errors
     def deploy_stream(self, stream_id: str, stream_type: str = truf_sdk.StreamTypePrimitive, wait: bool = True) -> str:
         with concurrency("tn-write", occupy=1):
-            return self.safe_client.deploy_stream(stream_id, stream_type, wait)
+            return self.client.deploy_stream(stream_id, stream_type, wait)
 
+    @handle_tn_errors
     def init_stream(self, stream_id: str, wait: bool = True) -> str:
         with concurrency("tn-write", occupy=1):
-            return self.safe_client.init_stream(stream_id, wait)
+            return self.client.init_stream(stream_id, wait)
 
+    @handle_tn_errors
     def destroy_stream(self, stream_id: str, wait: bool = True) -> str:
         """Destroy a stream with the given stream ID.
 
@@ -564,7 +598,7 @@ class TNAccessBlock(Block):
             The transaction hash
         """
         with concurrency("tn-write", occupy=1):
-            return self.safe_client.destroy_stream(stream_id, wait)
+            return self.client.destroy_stream(stream_id, wait)
 
     @staticmethod
     def split_records(
@@ -790,17 +824,53 @@ class FilterStreamsResults(TypedDict):
 
 @task(cache_key_fn=lambda _, args: hash_record_stream_id(args["records"]))
 def task_filter_deployed_streams(block: TNAccessBlock, records: DataFrame[TnDataRowModel]) -> FilterStreamsResults:
-    """Filter records to only include deployed streams"""
+    """Filter records based on whether their streams are deployed and initialized.
 
-    # data frame with unique stream locator (stream_id, data_provider)
+    This function checks each unique stream in the input records to verify if it exists
+    and is initialized. It uses get_stream_type to perform this check - a successful
+    response indicates the stream is ready for use, while specific error messages
+    ("stream not found" or "no type found") indicate the stream should be filtered out.
+
+    The function maintains a cache of results to avoid repeated checks for the same stream
+    within a configurable time window (default 1 day).
+
+    Args:
+        block: The TNAccessBlock instance to use for checking streams
+        records: The records to filter, containing stream_id and data_provider columns
+
+    Returns:
+        FilterStreamsResults containing:
+            - existent_streams: DataFrame of streams that exist and are initialized
+            - missing_streams: DataFrame of streams that don't exist or aren't initialized
+
+    Note:
+        Network errors and other unexpected errors are re-raised to be handled by
+        the retry mechanism, ensuring transient failures don't incorrectly filter
+        out valid streams.
+    """
+    if records.empty:
+        empty_df = DataFrame[StreamLocatorModel](pd.DataFrame(columns=["data_provider", "stream_id"]))
+        return FilterStreamsResults(
+            existent_streams=empty_df,
+            missing_streams=empty_df,
+        )
+
     unique_stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
     existent_streams = pd.DataFrame(columns=["data_provider", "stream_id"])
     missing_streams = pd.DataFrame(columns=["data_provider", "stream_id"])
+
     for _, row in unique_stream_locators.iterrows():
-        if block.stream_exists(data_provider=row["data_provider"], stream_id=row["stream_id"]):
+        try:
+            # If get_stream_type succeeds, the stream is initialized
+            block.get_stream_type(data_provider=row["data_provider"], stream_id=row["stream_id"])
             existent_streams = pd.concat([existent_streams, pd.DataFrame([row])])
-        else:
-            missing_streams = pd.concat([missing_streams, pd.DataFrame([row])])
+        except Exception as e:
+            # Filter out streams that don't exist or aren't initialized
+            if "stream not found" in str(e).lower() or "no type found" in str(e).lower():
+                missing_streams = pd.concat([missing_streams, pd.DataFrame([row])])
+            else:
+                # Re-raise any other errors (like network errors) to be handled by retry mechanism
+                raise e
 
     return FilterStreamsResults(
         existent_streams=DataFrame[StreamLocatorModel](existent_streams),
