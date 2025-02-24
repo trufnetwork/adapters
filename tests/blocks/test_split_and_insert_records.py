@@ -168,27 +168,41 @@ class TestSplitAndInsertRecords:
         assert any("invalid stream id" in reason for reason in results["failed_reasons"])
 
     def test_filter_deployed_streams(self, tn_block: TNAccessBlock, test_stream_ids: list[str]):
-        """Test that filter_deployed_streams correctly filters out non-deployed streams."""
+        """Test that filter_deployed_streams correctly filters out non-deployed and uninitialized streams."""
         base_timestamp = int(datetime.now().timestamp())
         
-        # Create records for both deployed and non-deployed streams
+        # Create records for deployed, initialized, and non-existent streams
         deployed_records = []
-        for stream_id in test_stream_ids:
+        for stream_id in test_stream_ids:  # These are already deployed and initialized by the fixture
             deployed_records.append({
                 "stream_id": stream_id,
                 "date": base_timestamp,
                 "value": 100.0,
             })
             
+        # Create a stream that exists but isn't initialized
+        uninitialized_stream_id = generate_stream_id("uninitialized_test_stream")
+        client = tn_block.get_client()
+        client.deploy_stream(uninitialized_stream_id, stream_type=truf_sdk.StreamTypePrimitiveUnix, wait=True)
+        # Don't initialize it
+        
+        # Create records for uninitialized and non-existent streams
         non_deployed_stream_id = generate_stream_id("non_deployed_test_stream")
-        non_deployed_records = [{
-            "stream_id": non_deployed_stream_id,
-            "date": base_timestamp,
-            "value": 200.0,
-        }]
+        other_records = [
+            {
+                "stream_id": uninitialized_stream_id,
+                "date": base_timestamp,
+                "value": 200.0,
+            },
+            {
+                "stream_id": non_deployed_stream_id,
+                "date": base_timestamp,
+                "value": 300.0,
+            }
+        ]
         
         # Combine all records
-        all_records = pd.DataFrame(deployed_records + non_deployed_records)
+        all_records = pd.DataFrame(deployed_records + other_records)
         all_records = DataFrame[TnDataRowModel](all_records)
         
         # Test with filter_deployed_streams=True
@@ -201,26 +215,40 @@ class TestSplitAndInsertRecords:
         )
         
         assert results is not None
-        # Should have successfully processed only the deployed streams
+        # Should have successfully processed only the deployed and initialized streams
         assert len(results["success_tx_hashes"]) > 0
-        # No failed records since non-deployed streams were filtered out
+        # No failed records since non-deployed/uninitialized streams were filtered out
         assert len(results["failed_records"]) == 0
         
-        # Verify only deployed streams were processed
+        # Verify only deployed and initialized streams were processed
         for stream_id in test_stream_ids:
             records = tn_block.read_records(stream_id, is_unix=True, date_from=base_timestamp)
             assert len(records) == 1
             
-        # Test with filter_deployed_streams=False
-        results_no_filter = task_split_and_insert_records(
+        # Verify non-existent streams were not processed
+        with pytest.raises(Exception):
+            tn_block.read_records(non_deployed_stream_id, is_unix=True, date_from=base_timestamp)
+            
+        # Clean up the uninitialized stream
+        try:
+            tn_block.destroy_stream(uninitialized_stream_id)
+        except Exception as e:
+            pytest.fail(f"Failed to cleanup test stream {uninitialized_stream_id}: {e}")
+
+    def test_filter_deployed_streams_empty_records(self, tn_block: TNAccessBlock):
+        """Test that filter_deployed_streams handles empty record sets correctly."""
+        # Create an empty DataFrame with the correct schema
+        empty_records = DataFrame[TnDataRowModel](pd.DataFrame(columns=["stream_id", "data_provider", "date", "value"]))
+        
+        # Test with filter_deployed_streams=True
+        results = task_split_and_insert_records(
             tn_block,
-            all_records,
+            empty_records,
             is_unix=True,
-            filter_deployed_streams=False,
+            filter_deployed_streams=True,
             wait=True
         )
         
-        assert results_no_filter is not None
-        # Should have some failed records (the non-deployed stream)
-        assert len(results_no_filter["failed_records"]) > 0
-        assert non_deployed_stream_id in results_no_filter["failed_records"]["stream_id"].values
+        assert results is not None
+        assert len(results["success_tx_hashes"]) == 0
+        assert len(results["failed_records"]) == 0

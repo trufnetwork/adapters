@@ -120,6 +120,10 @@ class FakeTNAccessBlock(TNAccessBlock):
         """Mock waiting for transaction - do nothing."""
         pass  # Skip actual transaction waiting in tests
 
+    def get_stream_type(self, data_provider: str, stream_id: str) -> str:
+        """Mock stream type check."""
+        return "primitive" if stream_id.startswith("stream_") else "unknown"
+
     def stream_exists(self, data_provider: str, stream_id: str) -> bool:
         """Mock stream existence check."""
         return stream_id.startswith("stream_")
