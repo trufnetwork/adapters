@@ -118,7 +118,6 @@ class PreprocessFlow(ArgentinaFlowController):
         processed_data, uncategorized = process_raw_data(
             raw_data=raw_data,
             category_map_df=category_map_df,
-            date=date,
             return_state=True,
         ).result()
 
