@@ -113,7 +113,7 @@ class IngestFlow(ArgentinaFlowController):
 
             self.logger.info("Dates have not been processed in the last day, processing...")
 
-            all_data = pd.DataFrame()
+            all_data = pd.DataFrame(columns=["date", "value", "stream_id", "data_provider"])
             for date in sorted_needed_dates:
                 data = self.processed_provider.get_data_for(date)
                 transformed_data = task_transform_data(transformer=transformer, data=data)
