@@ -12,6 +12,7 @@ from pandera.typing import DataFrame
 import pytest
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 from trufnetwork_sdk_py.utils import generate_stream_id
+from prefect import flow
 
 from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
@@ -84,15 +85,66 @@ def sample_records(test_stream_ids: list[str]) -> DataFrame[TnDataRowModel]:
     return DataFrame[TnDataRowModel](pd.DataFrame(records))
 
 
+# Define flows outside the test class
+@flow(name="helper-split-small-batches-flow")
+def helper_split_small_batches_flow(tn_block: TNAccessBlock, records: DataFrame[TnDataRowModel], max_batch_size: int):
+    """Flow wrapper for split_and_insert_records with small batches."""
+    return task_split_and_insert_records(
+        tn_block, records, max_batch_size=max_batch_size, is_unix=True, 
+        filter_deployed_streams=False, wait=False
+    )
+
+@flow(name="helper-split-single-batch-flow")
+def helper_split_single_batch_flow(tn_block: TNAccessBlock, records: DataFrame[TnDataRowModel], max_batch_size: int):
+    """Flow wrapper for split_and_insert_records with a single batch."""
+    return task_split_and_insert_records(
+        tn_block, records, max_batch_size=max_batch_size, is_unix=True, 
+        filter_deployed_streams=False, wait=False
+    )
+
+@flow(name="helper-split-empty-records-flow")
+def helper_split_empty_records_flow(tn_block: TNAccessBlock, empty_records: DataFrame[TnDataRowModel]):
+    """Flow wrapper for split_and_insert_records with empty records."""
+    return task_split_and_insert_records(
+        tn_block, empty_records, is_unix=True, filter_deployed_streams=False, wait=False
+    )
+
+@flow(name="helper-split-with-failures-flow")
+def helper_split_with_failures_flow(tn_block: TNAccessBlock, mixed_records: DataFrame[TnDataRowModel]):
+    """Flow wrapper for split_and_insert_records with failures."""
+    return task_split_and_insert_records(
+        tn_block, mixed_records, is_unix=True, filter_deployed_streams=False, wait=True
+    )
+
+@flow(name="helper-filter-deployed-streams-flow")
+def helper_filter_deployed_streams_flow(tn_block: TNAccessBlock, all_records: DataFrame[TnDataRowModel]):
+    """Flow wrapper for split_and_insert_records with filter_deployed_streams=True."""
+    return task_split_and_insert_records(
+        tn_block,
+        all_records,
+        is_unix=True,
+        filter_deployed_streams=True,
+        wait=True
+    )
+
+@flow(name="helper-filter-deployed-streams-empty-flow")
+def helper_filter_deployed_streams_empty_flow(tn_block: TNAccessBlock, empty_records: DataFrame[TnDataRowModel]):
+    """Flow wrapper for split_and_insert_records with empty records and filter_deployed_streams=True."""
+    return task_split_and_insert_records(
+        tn_block,
+        empty_records,
+        is_unix=True,
+        filter_deployed_streams=True,
+        wait=True
+    )
+
 class TestSplitAndInsertRecords:
     """Integration tests for split_and_insert_records functionality."""
 
     def test_split_and_insert_small_batches(self, tn_block: TNAccessBlock, sample_records: DataFrame[TnDataRowModel]):
         """Test splitting and inserting records with small batch size."""
         # Split into very small batches (2 records each)
-        results = task_split_and_insert_records(
-            tn_block, sample_records, max_batch_size=2, is_unix=True, filter_deployed_streams=False, wait=False
-        )
+        results = helper_split_small_batches_flow(tn_block, sample_records, max_batch_size=2)
 
         assert results is not None
         assert len(results["success_tx_hashes"]) > 0
@@ -111,9 +163,7 @@ class TestSplitAndInsertRecords:
     def test_split_and_insert_single_batch(self, tn_block: TNAccessBlock, sample_records: DataFrame[TnDataRowModel]):
         """Test inserting all records in a single batch."""
         # Use batch size larger than total records
-        results = task_split_and_insert_records(
-            tn_block, sample_records, max_batch_size=100, is_unix=True, filter_deployed_streams=False, wait=False
-        )
+        results = helper_split_single_batch_flow(tn_block, sample_records, max_batch_size=100)
 
         assert results is not None
         assert len(results["success_tx_hashes"]) == 1  # Should be single batch
@@ -132,9 +182,7 @@ class TestSplitAndInsertRecords:
     def test_split_and_insert_empty_records(self, tn_block: TNAccessBlock):
         """Test handling of empty records DataFrame."""
         empty_records = DataFrame[TnDataRowModel](pd.DataFrame(columns=["stream_id", "date", "value"]))
-        results = task_split_and_insert_records(
-            tn_block, empty_records, is_unix=True, filter_deployed_streams=False, wait=False
-        )
+        results = helper_split_empty_records_flow(tn_block, empty_records)
 
         if results is None:
             pytest.fail("Results should not be None")
@@ -157,9 +205,7 @@ class TestSplitAndInsertRecords:
         mixed_records = pd.concat([sample_records, invalid_records])
         mixed_records = DataFrame[TnDataRowModel](mixed_records)
 
-        results = task_split_and_insert_records(
-            tn_block, mixed_records, is_unix=True, filter_deployed_streams=False, wait=True
-        )
+        results = helper_split_with_failures_flow(tn_block, mixed_records)
 
         assert results is not None
         assert len(results["success_tx_hashes"]) == 0
@@ -206,13 +252,7 @@ class TestSplitAndInsertRecords:
         all_records = DataFrame[TnDataRowModel](all_records)
         
         # Test with filter_deployed_streams=True
-        results = task_split_and_insert_records(
-            tn_block,
-            all_records,
-            is_unix=True,
-            filter_deployed_streams=True,
-            wait=True
-        )
+        results = helper_filter_deployed_streams_flow(tn_block, all_records)
         
         assert results is not None
         # Should have successfully processed only the deployed and initialized streams
@@ -241,13 +281,7 @@ class TestSplitAndInsertRecords:
         empty_records = DataFrame[TnDataRowModel](pd.DataFrame(columns=["stream_id", "data_provider", "date", "value"]))
         
         # Test with filter_deployed_streams=True
-        results = task_split_and_insert_records(
-            tn_block,
-            empty_records,
-            is_unix=True,
-            filter_deployed_streams=True,
-            wait=True
-        )
+        results = helper_filter_deployed_streams_empty_flow(tn_block, empty_records)
         
         assert results is not None
         assert len(results["success_tx_hashes"]) == 0

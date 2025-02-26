@@ -5,7 +5,6 @@ from pydantic import SecretStr
 import pytest
 
 from tsn_adapters.blocks.tn_access import (
-    SafeTNClientProxy,
     TNAccessBlock,
     TNNodeNetworkError,
     tn_special_retry_condition,
@@ -34,31 +33,6 @@ class DummyTNClient(TNClient):
     def get_other_error(self, *args: Any, **kwargs: Any):
         # Simulate any other error
         raise ValueError("Some other error")
-
-
-# --- Tests for SafeTNClientProxy ---
-
-
-def test_safe_client_normal_call():
-    client = DummyTNClient()
-    safe_client = SafeTNClientProxy(client)
-    result = safe_client.get_first_record()
-    assert result == {"dummy_record": 1.0}
-
-
-def test_safe_client_network_error():
-    client = DummyTNClient()
-    safe_client = SafeTNClientProxy(client)
-    with pytest.raises(TNNodeNetworkError) as excinfo:
-        safe_client.get_network_error()
-    assert "http post failed" in str(excinfo.value)
-
-
-def test_safe_client_other_error():
-    client = DummyTNClient()
-    safe_client = SafeTNClientProxy(client)
-    with pytest.raises(ValueError):
-        safe_client.get_other_error()
 
 
 # --- Tests for TNNodeNetworkError helper methods ---

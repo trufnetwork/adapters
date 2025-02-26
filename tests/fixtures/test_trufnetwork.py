@@ -435,6 +435,7 @@ def disable_prefect_retries():
         'tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx',
         'tsn_adapters.blocks.tn_access._task_only_batch_insert_records',
         'tsn_adapters.blocks.tn_access.task_split_and_insert_records',
+        'tsn_adapters.blocks.tn_access.task_filter_initialized_streams',
         # TN Common
         'tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records',
         'tsn_adapters.common.trufnetwork.tn.task_deploy_primitive',
