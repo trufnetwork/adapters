@@ -827,17 +827,40 @@ class FilterStreamsResults(TypedDict):
     missing_streams: DataFrame[StreamLocatorModel]
 
 
+@task(retries=3, retry_delay_seconds=5, retry_condition_fn=tn_special_retry_condition(2))
+def check_single_stream(
+    block: TNAccessBlock, 
+    data_provider: str, 
+    stream_id: str
+) -> bool:
+    """
+    Check if a specific stream exists and is initialized.
+    
+    Args:
+        block: The TNAccessBlock instance
+        data_provider: The data provider of the stream (may be None)
+        stream_id: The ID of the stream
+        
+    Returns:
+        True if the stream exists and is initialized, False otherwise
+    """
+    try:
+        # If get_stream_type succeeds, the stream is initialized
+        block.get_stream_type(data_provider=data_provider, stream_id=stream_id)
+        return True
+    except Exception as e:
+        # Return False for streams that don't exist or aren't initialized
+        if "stream not found" in str(e).lower() or "no type found" in str(e).lower():
+            return False
+        # Re-raise any other errors to be handled by retry mechanism
+        raise e
+
 @task(cache_key_fn=lambda _, args: hash_record_stream_id(args["records"]))
 def task_filter_deployed_streams(block: TNAccessBlock, records: DataFrame[TnDataRowModel]) -> FilterStreamsResults:
     """Filter records based on whether their streams are deployed and initialized.
 
     This function checks each unique stream in the input records to verify if it exists
-    and is initialized. It uses get_stream_type to perform this check - a successful
-    response indicates the stream is ready for use, while specific error messages
-    ("stream not found" or "no type found") indicate the stream should be filtered out.
-
-    The function maintains a cache of results to avoid repeated checks for the same stream
-    within a configurable time window (default 1 day).
+    and is initialized. It uses parallel task submissions to check multiple streams simultaneously.
 
     Args:
         block: The TNAccessBlock instance to use for checking streams
@@ -847,12 +870,9 @@ def task_filter_deployed_streams(block: TNAccessBlock, records: DataFrame[TnData
         FilterStreamsResults containing:
             - existent_streams: DataFrame of streams that exist and are initialized
             - missing_streams: DataFrame of streams that don't exist or aren't initialized
-
-    Note:
-        Network errors and other unexpected errors are re-raised to be handled by
-        the retry mechanism, ensuring transient failures don't incorrectly filter
-        out valid streams.
     """
+    logger = get_logger_safe(__name__)
+    
     if records.empty:
         empty_df = DataFrame[StreamLocatorModel](pd.DataFrame(columns=["data_provider", "stream_id"]))
         return FilterStreamsResults(
@@ -861,22 +881,34 @@ def task_filter_deployed_streams(block: TNAccessBlock, records: DataFrame[TnData
         )
 
     unique_stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
+    
+    # Submit all stream check tasks in parallel
+    futures = []
+    for _, row in unique_stream_locators.iterrows():
+        data_provider = row["data_provider"] or ""  # Handle None/NaN values
+        stream_id = row["stream_id"]
+        future = check_single_stream.submit(block=block, data_provider=data_provider, stream_id=stream_id)
+        futures.append((future, row))
+    
+    # Wait for all futures to complete and process results
     existent_streams = pd.DataFrame(columns=["data_provider", "stream_id"])
     missing_streams = pd.DataFrame(columns=["data_provider", "stream_id"])
-
-    for _, row in unique_stream_locators.iterrows():
+    
+    for future, row in futures:
         try:
-            # If get_stream_type succeeds, the stream is initialized
-            block.get_stream_type(data_provider=row["data_provider"], stream_id=row["stream_id"])
-            existent_streams = pd.concat([existent_streams, pd.DataFrame([row])])
-        except Exception as e:
-            # Filter out streams that don't exist or aren't initialized
-            if "stream not found" in str(e).lower() or "no type found" in str(e).lower():
-                missing_streams = pd.concat([missing_streams, pd.DataFrame([row])])
+            exists = future.result()
+            if exists:
+                existent_streams = pd.concat([existent_streams, pd.DataFrame([row])])
             else:
-                # Re-raise any other errors (like network errors) to be handled by retry mechanism
-                raise e
-
+                missing_streams = pd.concat([missing_streams, pd.DataFrame([row])])
+                logger.info(f"Stream not found or not initialized: {row['stream_id']}")
+        except Exception as e:
+            # If a check failed with an unexpected error, consider the stream missing
+            logger.warning(f"Error checking stream {row['stream_id']}: {str(e)}")
+            missing_streams = pd.concat([missing_streams, pd.DataFrame([row])])
+    
+    logger.info(f"Found {len(existent_streams)} existing streams and {len(missing_streams)} missing streams")
+    
     return FilterStreamsResults(
         existent_streams=DataFrame[StreamLocatorModel](existent_streams),
         missing_streams=DataFrame[StreamLocatorModel](missing_streams),
