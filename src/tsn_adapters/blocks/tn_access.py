@@ -8,7 +8,7 @@ from pandera.typing import DataFrame
 from prefect import Task, get_run_logger, task
 from prefect.blocks.core import Block
 from prefect.client.schemas.objects import State, TaskRun
-from prefect.concurrency.sync import concurrency
+from prefect.concurrency.sync import concurrency, rate_limit
 from prefect.states import Completed
 from pydantic import ConfigDict, Field, SecretStr
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
@@ -221,8 +221,8 @@ class TNAccessBlock(Block):
         Returns:
             str: The stream type if initialized
         """
-        with concurrency("tn-read", occupy=1):
-            return self.client.get_type(stream_id=stream_id, data_provider=data_provider)
+        rate_limit('tn-read-rate-limit', occupy=1)
+        return self.client.get_type(stream_id=stream_id, data_provider=data_provider)
 
     @handle_tn_errors
     def is_allowed_to_write(self, data_provider: str, stream_id: str) -> bool:
