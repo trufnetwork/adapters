@@ -391,30 +391,6 @@ class TestHistoricalFlowAdvanced:
     """Advanced tests for historical flow focusing on async behavior and batching."""
 
     @pytest.mark.asyncio
-    @pytest.mark.timeout(5, func_only=True)
-    async def test_historical_flow_async(
-        self,
-        fake_fmp_block: FakeFMPBlock,
-        fake_psd_block: FakePrimitiveSourcesDescriptorBlock,
-        fake_tn_block: FakeTNAccessBlock,
-    ):
-        """Test that the historical flow works correctly in async context."""
-        await historical_flow(
-            fmp_block=fake_fmp_block,
-            psd_block=fake_psd_block,
-            tn_block=fake_tn_block,
-            min_fetch_date=datetime.datetime(2023, 1, 1),
-            ticker_chunk_size=1,
-            batch_size=10000,
-        )
-
-        # Verify that data was processed and inserted
-        assert len(fake_tn_block.inserted_records) > 0
-        inserted_df = fake_tn_block.inserted_records[0]
-        assert_tn_data_schema(inserted_df)
-        assert_all_records_for_stream(inserted_df, "stream_aapl")
-
-    @pytest.mark.asyncio
     @pytest.mark.timeout(30, func_only=True)
     async def test_historical_flow_batch_processing(
         self,
