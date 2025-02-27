@@ -827,7 +827,7 @@ def task_insert_unix_tn_records(
     cache_key_fn=lambda _, args: hash_record_stream_id(args["records"]),
 )
 def task_filter_initialized_streams(
-    block: TNAccessBlock, records: DataFrame[TnDataRowModel], max_depth: int = 10
+    block: TNAccessBlock, records: DataFrame[TnDataRowModel], max_depth: int = 10, max_filter_size: int = 5000
 ) -> FilterStreamsResults:
     """
     Filter records based on whether their streams are initialized.
@@ -839,6 +839,7 @@ def task_filter_initialized_streams(
         block: The TNAccessBlock instance
         records: The records to filter, containing stream_id and data_provider columns
         max_depth: Maximum recursion depth for the divide and conquer algorithm
+        max_filter_size: Maximum number of streams to process in a single batch
 
     Returns:
         FilterStreamsResults containing:
@@ -858,7 +859,12 @@ def task_filter_initialized_streams(
     stream_locators_typed = extract_stream_locators(records)
 
     # Use the divide and conquer algorithm
-    result = task_filter_streams_divide_conquer(block=block, stream_locators=stream_locators_typed, max_depth=max_depth)
+    result = task_filter_streams_divide_conquer(
+        block=block, 
+        stream_locators=stream_locators_typed, 
+        max_depth=max_depth,
+        max_filter_size=max_filter_size
+    )
 
     logger.info(
         f"Stream filtering complete: {len(result['initialized_streams'])} initialized, "
@@ -881,6 +887,7 @@ def task_split_and_insert_records(
     is_unix: bool = False,
     fail_on_batch_error: bool = False,
     filter_deployed_streams: bool = True,
+    max_filter_size: int = 5000,
     filter_cache_duration: timedelta = timedelta(days=1),
     max_filter_depth: int = 10,
     # this is used only by truflation's data adapter streams
@@ -900,6 +907,7 @@ def task_split_and_insert_records(
         is_unix: Whether the date column is a unix timestamp
         fail_on_batch_error: Whether to fail if a batch fails
         filter_deployed_streams: Whether to filter out streams that are not deployed
+        max_filter_size: Maximum number of streams to process in a single batch during filtering
         filter_cache_duration: How long to cache the filter results
         max_filter_depth: Maximum recursion depth for divide-and-conquer approach
         has_external_created_at: Whether the records have external_created_at
@@ -913,7 +921,12 @@ def task_split_and_insert_records(
     if filter_deployed_streams:
         # Use the divide-and-conquer approach with caching
         filter_with_cache = task_filter_initialized_streams.with_options(cache_expiration=filter_cache_duration)
-        filter_results = filter_with_cache(block=block, records=records, max_depth=max_filter_depth)
+        filter_results = filter_with_cache(
+            block=block, 
+            records=records, 
+            max_depth=max_filter_depth,
+            max_filter_size=max_filter_size
+        )
 
         if len(filter_results["missing_streams"]) > 0:
             logger.warning(f"Total missing streams: {len(filter_results['missing_streams'])}")
@@ -1087,6 +1100,7 @@ def task_filter_streams_divide_conquer(
     max_depth: int = 10,
     current_depth: int = 0,
     force_fallback: bool = False,
+    max_filter_size: int = 5000,
 ) -> DivideAndConquerResult:
     """
     Filter streams using a divide-and-conquer approach.
@@ -1100,6 +1114,7 @@ def task_filter_streams_divide_conquer(
         max_depth: Maximum recursion depth
         current_depth: Current recursion depth
         force_fallback: Force using the fallback method
+        max_filter_size: Maximum number of streams to process in a single batch
 
     Returns:
         DivideAndConquerResult with initialized and uninitialized streams
@@ -1183,8 +1198,8 @@ def task_filter_streams_divide_conquer(
             fallback_used=True,
         )
 
-    # Try the batch method first if not forced to use fallback
-    if not force_fallback and len(stream_locators) > 1:
+    # If the number of streams exceeds max_filter_size, skip the batch method and go straight to divide-and-conquer
+    if not force_fallback and len(stream_locators) <= max_filter_size:
         try:
             # Try to use the batch method
             batch_result = task_filter_batch_initialized_streams(block=block, stream_locators=stream_locators)
@@ -1225,6 +1240,10 @@ def task_filter_streams_divide_conquer(
 
     # If batch method failed with get_metadata error or was skipped, use divide and conquer
     if len(stream_locators) > 1:
+        # Log if we're skipping the batch method due to size
+        if len(stream_locators) > max_filter_size:
+            logger.info(f"Batch size ({len(stream_locators)}) exceeds max_filter_size ({max_filter_size}), splitting into smaller batches")
+        
         # Split the streams into two halves
         mid = len(stream_locators) // 2
         left_half = stream_locators.iloc[:mid]
@@ -1232,11 +1251,19 @@ def task_filter_streams_divide_conquer(
 
         # Process each half recursively
         left = task_filter_streams_divide_conquer.submit(
-            block=block, stream_locators=left_half, max_depth=max_depth, current_depth=current_depth + 1
+            block=block, 
+            stream_locators=left_half, 
+            max_depth=max_depth, 
+            current_depth=current_depth + 1,
+            max_filter_size=max_filter_size
         )
 
         right = task_filter_streams_divide_conquer.submit(
-            block=block, stream_locators=right_half, max_depth=max_depth, current_depth=current_depth + 1
+            block=block, 
+            stream_locators=right_half, 
+            max_depth=max_depth, 
+            current_depth=current_depth + 1,
+            max_filter_size=max_filter_size
         )
 
         left_result = left.result()
@@ -1268,6 +1295,7 @@ def task_filter_streams_divide_conquer(
             max_depth=max_depth,
             current_depth=current_depth,
             force_fallback=True,
+            max_filter_size=max_filter_size
         )
 
 
