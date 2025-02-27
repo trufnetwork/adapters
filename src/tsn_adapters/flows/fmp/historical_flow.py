@@ -27,7 +27,7 @@ from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
 
 # Constants for flow control
-DEFAULT_MIN_FETCH_DATE = datetime.datetime.now() - datetime.timedelta(days=365 * 30)
+DEFAULT_MIN_FETCH_DATE = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=365 * 30)
 
 # Type variables for RxPy
 T = TypeVar("T")
@@ -299,7 +299,7 @@ def run_ticker_pipeline(
             # Get earliest data date first - this implicitly checks if stream exists
             earliest_date = get_earliest_data_date(tn_block=tn_block, stream_id=stream_id)
             if earliest_date is None:
-                earliest_date = datetime.datetime.now()
+                earliest_date = datetime.datetime.now(datetime.timezone.utc)
 
             # Calculate date range
             end_date = earliest_date.strftime("%Y-%m-%d")
