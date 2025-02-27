@@ -301,8 +301,7 @@ def run_ticker_pipeline(
             # Get earliest data date first - this implicitly checks if stream exists
             earliest_date = get_earliest_data_date(tn_block=tn_block, stream_id=stream_id)
             if earliest_date is None:
-                logger.warning(f"Stream not found for {symbol}")
-                return TickerError(symbol, stream_id, error="stream_not_found")
+                earliest_date = datetime.datetime.now()
 
             # Calculate date range
             end_date = earliest_date.strftime("%Y-%m-%d")
