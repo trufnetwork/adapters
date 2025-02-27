@@ -30,14 +30,10 @@ class TnRecordModel(pa.DataFrameModel):
 
 class StreamLocatorModel(pa.DataFrameModel):
     stream_id: Series[str]
-    data_provider: Series[pa.String] = pa.Field(
-        nullable=True,
-        description="The data provider of the stream",
-    )
+    data_provider: Series[str]
 
     class Config(pa.DataFrameModel.Config):
         coerce = True
-        add_missing_columns = True
         strict = "filter"
 
 

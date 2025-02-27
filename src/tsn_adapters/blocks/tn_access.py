@@ -24,6 +24,7 @@ from pydantic import ConfigDict, Field, SecretStr
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
 
+from tsn_adapters.blocks.shared_types import DivideAndConquerResult
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
 from tsn_adapters.utils.logging import get_logger_safe
@@ -52,6 +53,8 @@ def append_to_df(df: pd.DataFrame, row_data: Union[dict[str, Any], "pd.Series[An
 
 def convert_to_typed_df(df: pd.DataFrame, model_type: type[T]) -> DataFrame[T]:
     """Convert a pandas DataFrame to a typed DataFrame."""
+    if df.empty:
+        return cast(DataFrame[T], df)
     return DataFrame[model_type](df)
 
 
@@ -740,8 +743,8 @@ class TNAccessBlock(Block):
 
     @handle_tn_errors
     def filter_initialized_streams(
-        self, stream_ids: list[str], data_providers: Optional[list[str]] = None
-    ) -> list[dict[str, str]]:
+        self, stream_ids: list[str], data_providers: list[str]
+    ) -> DataFrame[StreamLocatorModel]:
         """
         Filter a list of streams to only those that are initialized.
 
@@ -753,21 +756,19 @@ class TNAccessBlock(Block):
         Returns:
             List of dictionaries containing initialized streams with 'stream_id' and 'data_provider' keys
         """
-        # fill data providers with current account if not provided
-        if data_providers is None:
-            data_providers = [self.current_account] * len(stream_ids)
-        else:
-            for i, data_provider in enumerate(data_providers):
-                if data_provider is None:
-                    data_providers[i] = self.current_account
+        if any(data_provider == "" for data_provider in data_providers):
+            raise ValueError("Data provider cannot be empty")
 
         with concurrency("tn-read", occupy=1):
-            return self.client.filter_initialized_streams(
+            records = self.client.filter_initialized_streams(
                 stream_ids=stream_ids,
                 data_providers=data_providers,
                 helper_contract_stream_id=self.helper_contract_stream_name,
                 helper_contract_data_provider=self.helper_contract_provider,
             )
+        if len(records) == 0:
+            return convert_to_typed_df(create_empty_df(["data_provider", "stream_id"]), StreamLocatorModel)
+        return convert_to_typed_df(DataFrame[StreamLocatorModel](records), StreamLocatorModel)
 
 
 # --- Top Level Task Functions ---
@@ -827,43 +828,47 @@ def task_insert_unix_tn_records(
     cache_key_fn=lambda _, args: hash_record_stream_id(args["records"]),
 )
 def task_filter_initialized_streams(
-    block: TNAccessBlock, records: DataFrame[TnDataRowModel], max_depth: int = 10, max_filter_size: int = 5000
-) -> FilterStreamsResults:
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    max_depth: int = 5,
+    max_filter_size: int = 100,
+) -> DivideAndConquerResult:
     """
-    Filter records based on whether their streams are initialized.
-
-    Uses an efficient divide-and-conquer strategy with appropriate fallbacks to filter
-    streams that are initialized vs. those that are not initialized or don't exist.
+    Filter initialized streams from a list of records.
 
     Args:
-        block: The TNAccessBlock instance
-        records: The records to filter, containing stream_id and data_provider columns
-        max_depth: Maximum recursion depth for the divide and conquer algorithm
-        max_filter_size: Maximum number of streams to process in a single batch
+        block: The TN access block to use
+        records: The records to filter
+        max_depth: The maximum recursion depth for divide and conquer
+        max_filter_size: The maximum size for batch filtering
 
     Returns:
-        FilterStreamsResults containing:
-            - existent_streams: DataFrame of streams that exist and are initialized
-            - missing_streams: DataFrame of streams that don't exist or aren't initialized
+        A DataFrame of records with initialized streams only
     """
+    # We'll do the import here to avoid circular imports
+    from .stream_filtering import task_filter_streams_divide_conquer
+
     logger = get_run_logger()
+    logger.info(f"Filtering {len(records)} records for initialized streams")
 
     if records.empty:
-        empty_df = create_empty_stream_locator_df()
-        return FilterStreamsResults(
-            existent_streams=empty_df,
-            missing_streams=empty_df,
-        )
+        logger.info("No records to filter")
+        return {
+            "initialized_streams": convert_to_typed_df(
+                create_empty_df(["data_provider", "stream_id"]), StreamLocatorModel
+            ),
+            "uninitialized_streams": convert_to_typed_df(
+                create_empty_df(["data_provider", "stream_id"]), StreamLocatorModel
+            ),
+            "depth": 0,
+            "fallback_used": False,
+        }
 
-    # Extract unique stream locators
     stream_locators_typed = extract_stream_locators(records)
 
     # Use the divide and conquer algorithm
     result = task_filter_streams_divide_conquer(
-        block=block, 
-        stream_locators=stream_locators_typed, 
-        max_depth=max_depth,
-        max_filter_size=max_filter_size
+        block=block, stream_locators=stream_locators_typed, max_depth=max_depth, max_filter_size=max_filter_size
     )
 
     logger.info(
@@ -873,10 +878,8 @@ def task_filter_initialized_streams(
     )
 
     # Return in the expected format
-    return FilterStreamsResults(
-        existent_streams=result["initialized_streams"],
-        missing_streams=result["uninitialized_streams"],
-    )
+    return result
+
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_split_and_insert_records(
@@ -918,30 +921,23 @@ def task_split_and_insert_records(
     logger = get_logger_safe(__name__)
     failed_reasons: list[str] = []
 
+    # fill empty data provider with current account
+    records["data_provider"] = records["data_provider"].fillna(block.current_account)
+
     if filter_deployed_streams:
         # Use the divide-and-conquer approach with caching
         filter_with_cache = task_filter_initialized_streams.with_options(cache_expiration=filter_cache_duration)
         filter_results = filter_with_cache(
-            block=block, 
-            records=records, 
-            max_depth=max_filter_depth,
-            max_filter_size=max_filter_size
+            block=block, records=records, max_depth=max_filter_depth, max_filter_size=max_filter_size
         )
 
-        if len(filter_results["missing_streams"]) > 0:
-            logger.warning(f"Total missing streams: {len(filter_results['missing_streams'])}")
-        
-        same_stream_id_mask = records["stream_id"].isin(filter_results["existent_streams"]["stream_id"])
-        same_data_provider_mask = records["data_provider"].isin(filter_results["existent_streams"]["data_provider"])
-        empty_data_provider_mask = records["data_provider"].isna()
-        
-        # if not given, we consider it's always the current account
-        same_data_provider_or_empty_mask = same_data_provider_mask | empty_data_provider_mask
+        if len(filter_results["uninitialized_streams"]) > 0:
+            logger.warning(f"Total missing streams: {len(filter_results['uninitialized_streams'])}")
 
-        filtered_records = records[
-            same_stream_id_mask
-            & same_data_provider_or_empty_mask
-        ]
+        same_stream_id_mask = records["stream_id"].isin(filter_results["initialized_streams"]["stream_id"])
+        same_data_provider_mask = records["data_provider"].isin(filter_results["initialized_streams"]["data_provider"])
+
+        filtered_records = records[same_stream_id_mask & same_data_provider_mask]
         records = DataFrame[TnDataRowModel](filtered_records)
 
     split_records = block.split_records(records, max_batch_size)
@@ -1037,268 +1033,6 @@ def task_batch_insert_tn_records(
     return tx_or_none
 
 
-@task(retries=2, retry_delay_seconds=5, retry_condition_fn=tn_special_retry_condition(1))
-def check_single_stream(block: TNAccessBlock, data_provider: str, stream_id: str) -> bool:
-    """
-    Check if a single stream is initialized.
-
-    This is a wrapper around get_stream_type to check if a stream is initialized.
-
-    Args:
-        block: The TNAccessBlock instance
-        data_provider: The data provider of the stream
-        stream_id: The ID of the stream
-
-    Returns:
-        True if the stream is initialized, False otherwise
-    """
-    try:
-        # A stream is initialized if we can get its type
-        stream_type = block.get_stream_type(data_provider=data_provider, stream_id=stream_id)
-        return stream_type is not None
-    except Exception:
-        return False
-
-
-class DivideAndConquerResult(TypedDict):
-    """Results from the divide and conquer stream filtering algorithm."""
-
-    initialized_streams: DataFrame[StreamLocatorModel]
-    uninitialized_streams: DataFrame[StreamLocatorModel]
-    depth: int
-    fallback_used: bool
-
-
-@task(retries=2, retry_delay_seconds=5, retry_condition_fn=tn_special_retry_condition(1))
-def task_filter_batch_initialized_streams(
-    block: TNAccessBlock, stream_locators: DataFrame[StreamLocatorModel]
-) -> list[dict[str, str]]:
-    """
-    Filter a batch of streams to find which ones are initialized.
-
-    This task wraps the TNAccessBlock.filter_initialized_streams method and handles retries.
-
-    Args:
-        block: The TNAccessBlock instance
-        stream_locators: DataFrame with data_provider and stream_id columns
-
-    Returns:
-        List of dictionaries containing initialized streams with 'stream_id' and 'data_provider' keys
-    """
-    # Prepare data
-    stream_ids = stream_locators["stream_id"].tolist()
-    data_providers = [provider or block.current_account for provider in stream_locators["data_provider"].tolist()]
-
-    # Call the method with retry handling
-    return block.filter_initialized_streams(stream_ids=stream_ids, data_providers=data_providers)
-
-
-@task
-def task_filter_streams_divide_conquer(
-    block: TNAccessBlock,
-    stream_locators: DataFrame[StreamLocatorModel],
-    max_depth: int = 10,
-    current_depth: int = 0,
-    force_fallback: bool = False,
-    max_filter_size: int = 5000,
-) -> DivideAndConquerResult:
-    """
-    Filter streams using a divide-and-conquer approach.
-
-    This function recursively divides the stream locators into smaller batches
-    until it can efficiently determine which streams are initialized.
-
-    Args:
-        block: TNAccessBlock instance
-        stream_locators: DataFrame of stream locators to check
-        max_depth: Maximum recursion depth
-        current_depth: Current recursion depth
-        force_fallback: Force using the fallback method
-        max_filter_size: Maximum number of streams to process in a single batch
-
-    Returns:
-        DivideAndConquerResult with initialized and uninitialized streams
-    """
-    logger = get_run_logger()
-    logger.info(f"Filtering {len(stream_locators)} streams at depth {current_depth}")
-
-    # Base case: empty input
-    if len(stream_locators) == 0:
-        empty_df = create_empty_stream_locator_df()
-        return DivideAndConquerResult(
-            initialized_streams=empty_df, uninitialized_streams=empty_df, depth=current_depth, fallback_used=False
-        )
-
-    # Base case: max depth reached or only one stream left
-    if current_depth >= max_depth or len(stream_locators) == 1:
-        logger.info(f"Using fallback method for {len(stream_locators)} streams")
-
-        # Use the fallback method: check each stream individually
-        existent_streams = create_empty_df(["data_provider", "stream_id"])
-        non_existent_streams = create_empty_df(["data_provider", "stream_id"])
-
-        # Check existence for each stream
-        for _, row in stream_locators.iterrows():
-            data_provider = row["data_provider"] or ""
-            stream_id = row["stream_id"]
-            try:
-                if block.stream_exists(data_provider=data_provider, stream_id=stream_id):
-                    existent_streams = append_to_df(existent_streams, row)
-                else:
-                    non_existent_streams = append_to_df(non_existent_streams, row)
-            except Exception as e:
-                logger.warning(f"Error checking if stream {stream_id} exists: {e!s}")
-                non_existent_streams = append_to_df(non_existent_streams, row)
-
-        # For existing streams, check if they're initialized using batch method
-        # since we already filtered for existent streams
-        if not existent_streams.empty:
-            # Convert to StreamLocatorModel type for the batch function
-            existent_streams_typed = convert_to_typed_df(existent_streams, StreamLocatorModel)
-
-            # Use the batch check since these streams are known to exist
-            batch_result = task_filter_batch_initialized_streams(block=block, stream_locators=existent_streams_typed)
-
-            # Process the batch result
-            initialized_df = pd.DataFrame(batch_result)
-
-            # Get unintialized streams by finding the difference between existent and initialized
-            if not initialized_df.empty:
-                all_existent = get_stream_locator_set(existent_streams)
-                initialized_set = get_stream_locator_set(initialized_df)
-                uninitialized_data = diff_stream_locator_sets(all_existent, initialized_set)
-
-                uninitialized_df = (
-                    pd.DataFrame(uninitialized_data)
-                    if uninitialized_data
-                    else create_empty_df(["data_provider", "stream_id"])
-                )
-                initialized_streams = initialized_df
-                uninitialized_streams = uninitialized_df
-            else:
-                # If no streams are initialized, all existent streams are uninitialized
-                initialized_streams = create_empty_df(["data_provider", "stream_id"])
-                uninitialized_streams = existent_streams
-        else:
-            # No existent streams, so both initialized and uninitialized are empty
-            initialized_streams = create_empty_df(["data_provider", "stream_id"])
-            uninitialized_streams = create_empty_df(["data_provider", "stream_id"])
-
-        # Add non-existent streams to uninitialized_streams
-        uninitialized_streams = pd.concat([uninitialized_streams, non_existent_streams])
-
-        # Convert to typed DataFrames
-        initialized_streams_typed = convert_to_typed_df(initialized_streams, StreamLocatorModel)
-        uninitialized_streams_typed = convert_to_typed_df(uninitialized_streams, StreamLocatorModel)
-
-        return DivideAndConquerResult(
-            initialized_streams=initialized_streams_typed,
-            uninitialized_streams=uninitialized_streams_typed,
-            depth=current_depth,
-            fallback_used=True,
-        )
-
-    # If the number of streams exceeds max_filter_size, skip the batch method and go straight to divide-and-conquer
-    if not force_fallback and len(stream_locators) <= max_filter_size:
-        try:
-            # Try to use the batch method
-            batch_result = task_filter_batch_initialized_streams(block=block, stream_locators=stream_locators)
-
-            # Process the batch result
-            initialized_df = pd.DataFrame(batch_result)
-
-            # If we got results, convert to the expected format
-            if not initialized_df.empty:
-                # Create dataframe of uninitialized streams by finding the difference
-                all_streams = get_stream_locator_set(stream_locators)
-                initialized_set = get_stream_locator_set(initialized_df)
-                uninitialized_data = diff_stream_locator_sets(all_streams, initialized_set)
-
-                uninitialized_df = (
-                    pd.DataFrame(uninitialized_data)
-                    if uninitialized_data
-                    else create_empty_df(["data_provider", "stream_id"])
-                )
-
-                # Convert to the expected types
-                initialized_streams = convert_to_typed_df(initialized_df, StreamLocatorModel)
-                uninitialized_streams = convert_to_typed_df(uninitialized_df, StreamLocatorModel)
-
-                return DivideAndConquerResult(
-                    initialized_streams=initialized_streams,
-                    uninitialized_streams=uninitialized_streams,
-                    depth=current_depth,
-                    fallback_used=False,
-                )
-        except MetadataProcedureNotFoundError:
-            # this is expected if the stream does not exist, we let the fallback handle this bundle
-            pass
-        except Exception as e:
-            # For other errors, propagate the exception up
-            logger.error(f"Batch method failed with an unexpected error: {e!s}")
-            raise e
-
-    # If batch method failed with get_metadata error or was skipped, use divide and conquer
-    if len(stream_locators) > 1:
-        # Log if we're skipping the batch method due to size
-        if len(stream_locators) > max_filter_size:
-            logger.info(f"Batch size ({len(stream_locators)}) exceeds max_filter_size ({max_filter_size}), splitting into smaller batches")
-        
-        # Split the streams into two halves
-        mid = len(stream_locators) // 2
-        left_half = stream_locators.iloc[:mid]
-        right_half = stream_locators.iloc[mid:]
-
-        # Process each half recursively
-        left = task_filter_streams_divide_conquer.submit(
-            block=block, 
-            stream_locators=left_half, 
-            max_depth=max_depth, 
-            current_depth=current_depth + 1,
-            max_filter_size=max_filter_size
-        )
-
-        right = task_filter_streams_divide_conquer.submit(
-            block=block, 
-            stream_locators=right_half, 
-            max_depth=max_depth, 
-            current_depth=current_depth + 1,
-            max_filter_size=max_filter_size
-        )
-
-        left_result = left.result()
-        right_result = right.result()
-
-        # Combine the results
-        initialized_streams = pd.concat([left_result["initialized_streams"], right_result["initialized_streams"]])
-
-        uninitialized_streams = pd.concat([left_result["uninitialized_streams"], right_result["uninitialized_streams"]])
-
-        # Convert to typed DataFrames
-        initialized_streams_typed = convert_to_typed_df(initialized_streams, StreamLocatorModel)
-        uninitialized_streams_typed = convert_to_typed_df(uninitialized_streams, StreamLocatorModel)
-
-        # Determine if fallback was used in either branch
-        fallback_used = left_result["fallback_used"] or right_result["fallback_used"]
-
-        return DivideAndConquerResult(
-            initialized_streams=initialized_streams_typed,
-            uninitialized_streams=uninitialized_streams_typed,
-            depth=max(left_result["depth"], right_result["depth"]),
-            fallback_used=fallback_used,
-        )
-    else:
-        # If we have just one stream and the batch method failed, use the fallback
-        return task_filter_streams_divide_conquer(
-            block=block,
-            stream_locators=stream_locators,
-            max_depth=max_depth,
-            current_depth=current_depth,
-            force_fallback=True,
-            max_filter_size=max_filter_size
-        )
-
-
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=2, retry_condition_fn=tn_special_retry_condition(3))
 def task_wait_for_tx(block: TNAccessBlock, tx_hash: str) -> None:
     return block.wait_for_tx(tx_hash)
@@ -1371,6 +1105,30 @@ def task_destroy_stream(block: TNAccessBlock, stream_id: str, wait: bool = True)
         The transaction hash
     """
     return block.destroy_stream(stream_id, wait)
+
+
+@task(retries=2, retry_delay_seconds=5, retry_condition_fn=tn_special_retry_condition(1))
+def task_filter_batch_initialized_streams(
+    block: TNAccessBlock, stream_locators: DataFrame[StreamLocatorModel]
+) -> DataFrame[StreamLocatorModel]:
+    """
+    Filter a batch of streams to find which ones are initialized.
+
+    This task wraps the TNAccessBlock.filter_initialized_streams method and handles retries.
+
+    Args:
+        block: The TNAccessBlock instance
+        stream_locators: DataFrame with data_provider and stream_id columns
+
+    Returns:
+        DataFrame of stream locators with initialized streams
+    """
+    # Prepare data
+    stream_ids: list[str] = stream_locators["stream_id"].tolist()
+    data_providers: list[str] = stream_locators["data_provider"].tolist()
+
+    # Call the method with retry handling
+    return block.filter_initialized_streams(stream_ids=stream_ids, data_providers=data_providers)
 
 
 if __name__ == "__main__":
