@@ -27,9 +27,6 @@ from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
 
 # Constants for flow control
-MAX_CONCURRENT_INSERTS = 5
-MAX_CONCURRENT_FETCHES = 3
-BATCH_SIZE = 50000  # Number of records to batch for TN insertion
 DEFAULT_MIN_FETCH_DATE = datetime.datetime.now() - datetime.timedelta(days=365 * 30)
 
 # Type variables for RxPy
@@ -271,6 +268,7 @@ def run_ticker_pipeline(
     tn_block: TNAccessBlock,
     min_fetch_date: datetime.datetime,
     logger: Any,
+    batch_size: int,
 ) -> None:
     """
     Create and execute a pipeline for processing tickers with backpressure control.
@@ -339,7 +337,7 @@ def run_ticker_pipeline(
             else:
                 logger.error(f"Unexpected result type for {row_data['source_id']}: {type(result)}")
 
-            if len(records_to_insert) >= BATCH_SIZE:
+            if len(records_to_insert) >= batch_size:
                 validated_df = DataFrame[TnDataRowModel](records_to_insert)
                 records_to_insert = pd.DataFrame()
                 task_split_and_insert_records(
@@ -372,6 +370,8 @@ async def historical_flow(
     psd_block: PrimitiveSourcesDescriptorBlock,
     tn_block: TNAccessBlock,
     min_fetch_date: datetime.datetime = DEFAULT_MIN_FETCH_DATE,
+    batch_size: int = 10000,
+    start_from_n_ticker: int = 0,
 ) -> None:
     """
     Main flow to fetch and update historical market data.
@@ -395,6 +395,10 @@ async def historical_flow(
             logger.warning("No active tickers found")
             return
 
+        # Skip the first n tickers
+        if start_from_n_ticker > 0:
+            descriptor_df = cast(DataFrame[PrimitiveSourceDataModel], descriptor_df.iloc[start_from_n_ticker:])
+
         # Create and run the reactive pipeline
         run_ticker_pipeline(
             descriptor_df=descriptor_df,
@@ -402,6 +406,7 @@ async def historical_flow(
             tn_block=tn_block,
             min_fetch_date=min_fetch_date,
             logger=logger,
+            batch_size=batch_size,
         )
 
         logger.info("Completed historical market data sync flow")
