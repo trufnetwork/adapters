@@ -366,7 +366,7 @@ def run_ticker_pipeline(
             # Submit all ticker processing tasks in the chunk
             for _, row_data in chunked_tickers.iterrows():
                 result_futures.append(
-                    process_ticker(
+                    process_ticker.submit(
                         row=row_data,
                         fmp_block=fmp_block,
                         tn_block=tn_block,
