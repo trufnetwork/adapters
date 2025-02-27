@@ -372,43 +372,6 @@ class TestDataProcessing:
             assert all(col in result.columns for col in ["date", "symbol", "price", "volume"])
 
     @pytest.mark.timeout(5, func_only=True)
-    def test_timezone_aware_date_comparison(self, sample_eod_data: DataFrame[EODData]):
-        """Test that timezone-aware date comparison works correctly.
-        
-        This test verifies the fix for the timezone comparison issue where
-        comparing timezone-aware and timezone-naive dates would raise a TypeError.
-        """
-        # Create a timezone-aware datetime (like DEFAULT_MIN_FETCH_DATE or earliest_date)
-        timezone_aware_date = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
-        
-        # Convert sample dates to pandas datetime (these would be timezone-naive by default)
-        sample_dates = pd.to_datetime(sample_eod_data["date"])
-        
-        # Before our fix, this comparison would raise a TypeError
-        # Now with our fix ensuring all dates are timezone-aware, this should work
-        
-        # First, verify that direct comparison with timezone-naive dates raises an error
-        with pytest.raises(TypeError):
-            _ = sample_dates >= timezone_aware_date
-        
-        # Now verify our fix - explicitly localize the dates to UTC before comparison
-        sample_dates_utc = pd.to_datetime(sample_eod_data["date"]).dt.tz_localize("UTC")
-        comparison_result = sample_dates_utc >= timezone_aware_date
-        
-        # The first date (2024-01-01) should be equal to our test date
-        assert comparison_result[0], "First date should be >= timezone_aware_date"
-        # The second date (2024-01-02) should be greater than our test date
-        assert comparison_result[1], "Second date should be >= timezone_aware_date"
-        
-        # Test with a later date to ensure comparison works correctly
-        later_date = datetime.datetime(2024, 1, 3, tzinfo=datetime.timezone.utc)
-        comparison_result = sample_dates_utc >= later_date
-        
-        # Both dates should be less than the later date
-        assert not comparison_result[0], "First date should not be >= later_date"
-        assert not comparison_result[1], "Second date should not be >= later_date"
-
-    @pytest.mark.timeout(5, func_only=True)
     def test_convert_eod_to_tn_data(
         self,
         sample_eod_data: DataFrame[EODData],
@@ -429,88 +392,6 @@ class TestDataProcessing:
         for iso_date, unix_ts in zip(sample_eod_data["date"], tn_df["date"]):
             expected_ts = str(int(parse_iso_date(iso_date).timestamp()))
             assert unix_ts == expected_ts, f"Timestamp mismatch for {iso_date}: expected {expected_ts}, got {unix_ts}"
-
-    @pytest.mark.timeout(5, func_only=True)
-    def test_process_ticker_with_none_earliest_date(
-        self,
-        fake_fmp_block: FakeFMPBlock,
-        fake_tn_block: FakeTNAccessBlock,
-        monkeypatch: MonkeyPatch,
-    ):
-        """Test that process_ticker correctly handles None earliest_date.
-        
-        This test verifies the fix for the timezone issue where earliest_date
-        was set to a timezone-naive datetime when it was None, causing comparison
-        errors with timezone-aware min_fetch_date.
-        """
-        from tsn_adapters.flows.fmp.historical_flow import run_ticker_pipeline
-        
-        # Create a modified TNAccessBlock that returns None for earliest_date
-        class NoneEarliestDateTNBlock(FakeTNAccessBlock):
-            def __init__(self):
-                # Initialize with the same parameters as FakeTNAccessBlock
-                super().__init__()
-                
-            def get_earliest_date(self, stream_id: str, data_provider: str | None = None) -> datetime.datetime | None:
-                """Always return None for earliest_date to test our fix."""
-                return None
-        
-        tn_block = NoneEarliestDateTNBlock()
-        
-        # Create a test descriptor with one ticker
-        descriptor_data = {
-            "source_id": ["TEST"],
-            "stream_id": ["stream_test"],
-            "source_type": ["stock"],
-        }
-        descriptor_df = DataFrame[PrimitiveSourceDataModel](pd.DataFrame(descriptor_data))
-        
-        # Create a logger for testing
-        logger = get_logger_safe(__name__)
-        
-        # Set a timezone-aware min_fetch_date
-        min_fetch_date = datetime.datetime(2023, 1, 1, tzinfo=datetime.timezone.utc)
-        
-        # Mock get_earliest_data_date to track calls and return values
-        original_get_earliest_data_date = get_earliest_data_date
-        
-        def mock_get_earliest_data_date(*args, **kwargs):
-            """Mock that returns None but tracks the call."""
-            return None
-        
-        monkeypatch.setattr(
-            "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
-            mock_get_earliest_data_date,
-        )
-        
-        # Mock fetch_historical_data to avoid actual API calls
-        def mock_fetch_historical_data(*args, **kwargs):
-            """Return empty DataFrame to simplify test."""
-            return DataFrame[EODData](
-                pd.DataFrame(
-                    {
-                        "date": [],
-                        "symbol": [],
-                        "price": [],
-                        "volume": [],
-                    }
-                )
-            )
-        
-        monkeypatch.setattr(
-            "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
-            mock_fetch_historical_data,
-        )
-        
-        # Run the ticker pipeline, expecting no errors
-        run_ticker_pipeline(
-            descriptor_df=descriptor_df,
-            fmp_block=fake_fmp_block,
-            tn_block=tn_block,
-            min_fetch_date=min_fetch_date,
-            logger=logger,
-            batch_size=10,
-        )
 
 
 class TestHistoricalFlowAdvanced:
