@@ -485,6 +485,8 @@ def real_time_flow(
     tn_block: TNAccessBlock,
     tickers_per_request: int = 20000,
     fetch_task: Any = None,
+    max_filter_size: int = 5000,
+    insert_batch_size: int = 25000,
 ) -> FlowResult:
     """
     Main flow to fetch and update real-time market data.
@@ -606,6 +608,8 @@ def real_time_flow(
                 records=processed_data,
                 wait=True,
                 is_unix=True,
+                max_filter_size=max_filter_size,
+                max_batch_size=insert_batch_size,
             )
             logger.info(
                 "Completed real-time market data sync flow",

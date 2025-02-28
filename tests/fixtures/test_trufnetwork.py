@@ -9,6 +9,7 @@ import subprocess
 import time
 from typing import Any, Optional
 
+from prefect import Task
 from prefect.testing.utilities import prefect_test_harness
 from pydantic import SecretStr
 import pytest
@@ -402,19 +403,41 @@ def term_handler():
 def disable_prefect_retries():
     from importlib import import_module
     from unittest.mock import patch
+    from typing import Any
 
     from prefect import task as original_task
 
     # Patch task retries by modifying the task options directly
-    def patch_task_options(task_fn: Any) -> Any:
+    def patch_task_options(task_fn: Task[Any, Any]) -> Task[Any, Any]:
+        # Always override retries, cache_key_fn, and cache_expiration
+        # regardless of how the task was created
         if hasattr(task_fn, 'with_options'):
-            return task_fn.with_options(retries=0, cache_key_fn=None)
+            patched_task = task_fn.with_options(retries=0, cache_key_fn=None, cache_expiration=None, retry_condition_fn=None)
+            
+            # Also patch the with_options method of the returned task to ensure
+            # any subsequent calls also have these options overridden
+            original_with_options = patched_task.with_options
+            
+            # Use a simple function that ignores type checking
+            def ensure_no_retries_or_cache(**kwargs: Any) -> Any:
+                # Force these options regardless of what was passed
+                kwargs['retries'] = 0
+                kwargs['cache_key_fn'] = None
+                kwargs['cache_expiration'] = None
+                kwargs['retry_condition_fn'] = None
+                return original_with_options(**kwargs)  # type: ignore
+            
+            # Use setattr to avoid type checking issues
+            setattr(patched_task, 'with_options', ensure_no_retries_or_cache)
+            
+            return patched_task
         return task_fn
 
     # All tasks with retries and their import paths
     tasks_to_patch = [
         # FMP Historical Flow
         'tsn_adapters.flows.fmp.historical_flow.fetch_historical_data',
+        'tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date',
         # Stream Deploy Flow
         'tsn_adapters.flows.stream_deploy_flow.check_and_deploy_stream',
         # Primitive Source Descriptor
@@ -429,19 +452,28 @@ def disable_prefect_retries():
         'tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date',
         'tsn_adapters.tasks.argentina.task_wrappers.task_get_latest_records',
         'tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map',
+        'tsn_adapters.tasks.argentina.task_wrappers.task_get_and_transform_data',
+        'tsn_adapters.tasks.argentina.task_wrappers.task_get_now_date',
+        'tsn_adapters.tasks.argentina.task_wrappers.task_dates_already_processed',
         # TN Access
         'tsn_adapters.blocks.tn_access.task_wait_for_tx',
         'tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx',
         'tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx',
         'tsn_adapters.blocks.tn_access._task_only_batch_insert_records',
         'tsn_adapters.blocks.tn_access.task_split_and_insert_records',
+        'tsn_adapters.blocks.tn_access.task_filter_initialized_streams',
         # TN Common
         'tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records',
         'tsn_adapters.common.trufnetwork.tn.task_deploy_primitive',
         'tsn_adapters.common.trufnetwork.tn.task_init_stream',
-        'tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records'
+        'tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records',
+        # GSheet Tasks
+        'tsn_adapters.tasks.gsheet.task_read_gsheet',
+        # Argentina Preprocess Flow
+        'tsn_adapters.tasks.argentina.flows.preprocess_flow.task_list_available_dates'
     ]
 
+    # Patch the task decorator to apply our options
     with patch('prefect.task', side_effect=original_task) as mock_task:
         for import_path in tasks_to_patch:
             # Split the import path into module path and attribute name
@@ -452,6 +484,8 @@ def disable_prefect_retries():
             # Patch the task
             mock_task.return_value = patch_task_options(task_fn)
             patch(import_path, new=patch_task_options(task_fn)).start()
+    
+    yield
 
 @pytest.fixture(scope="session", autouse=False)
 def prefect_test_fixture(disable_prefect_retries: Any):
@@ -463,7 +497,11 @@ DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1
 
 
 @pytest.fixture(scope="session")
-def tn_block(tn_provider: TrufNetworkProvider, prefect_test_fixture, disable_prefect_retries) -> TNAccessBlock:
+def tn_block(
+    tn_provider: TrufNetworkProvider, 
+    prefect_test_fixture: Any, 
+    disable_prefect_retries: Any
+) -> TNAccessBlock:
     """Create a TNAccessBlock with test node and default credentials."""
     return TNAccessBlock(
         tn_provider=tn_provider.api_endpoint,
