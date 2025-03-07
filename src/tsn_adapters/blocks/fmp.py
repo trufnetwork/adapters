@@ -25,35 +25,35 @@ class ActiveTicker(DataFrameModel):
 
 class TickerDetail(DataFrameModel):
     symbol: Series[str]
-    marketCap: Series[str]
-    beta: Series[float]
-    lastDividend: Series[float]
-    range: Series[str]
-    change: Series[float]
-    changePercentage: Series[float]
-    volume: Series[int]
-    averageVolume: Series[int]
-    companyName: Series[str]
-    currency: Series[str]
-    cik: Series[str]
-    isin: Series[str]
-    cusip: Series[str]
-    exchangeFullName: Series[str]
-    exchange: Series[str]
-    industry: Series[str]
-    website: Series[str]
-    description: Series[str]
-    ceo: Series[str]
-    sector: Series[str]
-    country: Series[str]
-    fullTimeEmployees: Series[str]
-    phone: Series[str]
-    address: Series[str]
-    city: Series[str]
-    state: Series[str]
-    zip: Series[str]
-    image: Series[str]
-    ipoDate: Series[str]
+    marketCap: Series[str] = Field(nullable=True)
+    beta: Series[float] = Field(nullable=True)
+    lastDividend: Series[float] = Field(nullable=True)
+    range: Series[str] = Field(nullable=True)
+    change: Series[float] = Field(nullable=True)
+    changePercentage: Series[float] = Field(nullable=True)
+    volume: Series[int] = Field(nullable=True)
+    averageVolume: Series[int] = Field(nullable=True)
+    companyName: Series[str] = Field(nullable=True)
+    currency: Series[str] = Field(nullable=True)
+    cik: Series[str] = Field(nullable=True)
+    isin: Series[str] = Field(nullable=True)
+    cusip: Series[str] = Field(nullable=True)
+    exchangeFullName: Series[str] = Field(nullable=True)
+    exchange: Series[str] = Field(nullable=True)
+    industry: Series[str] = Field(nullable=True)
+    website: Series[str] = Field(nullable=True)
+    description: Series[str] = Field(nullable=True)
+    ceo: Series[str] = Field(nullable=True)
+    sector: Series[str] = Field(nullable=True)
+    country: Series[str] = Field(nullable=True)
+    fullTimeEmployees: Series[str] = Field(nullable=True)
+    phone: Series[str] = Field(nullable=True)
+    address: Series[str] = Field(nullable=True)
+    city: Series[str] = Field(nullable=True)
+    state: Series[str] = Field(nullable=True)
+    zip: Series[str] = Field(nullable=True)
+    image: Series[str] = Field(nullable=True)
+    ipoDate: Series[str] = Field(nullable=True)
     defaultImage: Series[bool]
     isEtf: Series[bool]
     isActivelyTrading: Series[bool]
