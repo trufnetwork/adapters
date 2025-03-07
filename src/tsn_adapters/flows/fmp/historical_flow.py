@@ -17,8 +17,9 @@ from typing import Any, NamedTuple, Optional, TypeGuard, TypeVar, Union, cast
 import pandas as pd
 from pandera.typing import DataFrame, Series
 from prefect import flow, task
-from prefect.tasks import task_input_hash
 from prefect.futures import PrefectFuture
+from prefect.tasks import task_input_hash
+
 from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
 from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records
@@ -133,7 +134,7 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
     """
     logger = get_logger_safe(__name__)
     try:
-        return tn_block.get_earliest_date(stream_id=stream_id)
+        return tn_block.get_earliest_date(stream_id=stream_id, is_unix=True)
     except TNAccessBlock.StreamNotFoundError:
         logger.warning(f"Stream {stream_id} not found")
         raise  # Re-raise the StreamNotFoundError
@@ -144,17 +145,17 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
 
 def ensure_unix_timestamp(dt: Series[Any]) -> Series[int]:
     """Convert datetime series to Unix timestamp (seconds since epoch).
-    
+
     This function handles various datetime formats and ensures the output
     is always in seconds since epoch (Unix timestamp). It explicitly handles
     the conversion from nanoseconds and validates the output range.
-    
+
     Args:
         dt: A pandas Series containing datetime data in various formats
-            
+
     Returns:
         A pandas Series containing Unix timestamps (seconds since epoch)
-        
+
     Raises:
         ValueError: If the resulting timestamps are outside the valid range
                    or if the conversion results in unexpected units
@@ -162,24 +163,24 @@ def ensure_unix_timestamp(dt: Series[Any]) -> Series[int]:
     # Convert to datetime if not already
     if not pd.api.types.is_datetime64_any_dtype(dt):
         dt = pd.to_datetime(dt, utc=True)
-    
+
     # Get nanoseconds since epoch
-    ns_timestamps = dt.astype('int64')
-    
+    ns_timestamps = dt.astype("int64")
+
     # Convert to seconds (integer division by 1e9 for nanoseconds)
     second_timestamps = ns_timestamps // 10**9
-    
+
     # Validate the range (basic sanity check)
     # Unix timestamps should be between 1970 and 2100 approximately
     min_valid_timestamp = 0  # 1970-01-01
     max_valid_timestamp = 4102444800  # 2100-01-01
-    
+
     if second_timestamps.lt(min_valid_timestamp).any() or second_timestamps.gt(max_valid_timestamp).any():
         raise ValueError(
             f"Converted timestamps outside valid range: "
             f"min={second_timestamps.min()}, max={second_timestamps.max()}"
         )
-    
+
     return second_timestamps
 
 
@@ -272,14 +273,14 @@ def process_ticker(
 ) -> TickerResult:
     """
     Process a single ticker row.
-    
+
     Args:
         row: Row from the descriptor DataFrame containing ticker information
         fmp_block: Block for FMP API interactions
         tn_block: Block for TN interactions
         min_fetch_date: Minimum date to fetch data from
         max_fetch_period: Maximum period to fetch data for
-        
+
     Returns:
         TickerResult containing either the fetched data or error information
     """
@@ -309,7 +310,7 @@ def process_ticker(
             logger.warning(f"No data found for {symbol}")
             return TickerError(symbol, stream_id, error="no_data")
 
-        logger.info(f"Successfully fetched data for {symbol}")
+        logger.info(f"Successfully fetched data for {symbol} from {start_date} to {end_date}")
         return TickerSuccess(symbol, stream_id, data=eod_data)
 
     except Exception as e:
@@ -355,14 +356,14 @@ def run_ticker_pipeline(
         for chunk_start in range(0, total_tickers, ticker_chunk_size):
             chunk_end = min(chunk_start + ticker_chunk_size, total_tickers)
             logger.info(f"Processing ticker chunk {chunk_start}-{chunk_end} of {total_tickers}")
-            
+
             # Get the current chunk of tickers
             chunked_tickers = descriptor_df.iloc[chunk_start:chunk_end]
-            
+
             result_futures: list[PrefectFuture[TickerResult]] = []
             # Process tickers with backpressure control
             records_to_insert = pd.DataFrame()
-            
+
             # Submit all ticker processing tasks in the chunk
             for _, row_data in chunked_tickers.iterrows():
                 result_futures.append(
@@ -407,7 +408,7 @@ def run_ticker_pipeline(
                     wait=False,
                     is_unix=True,
                 )
-                
+
             logger.info(f"Completed processing ticker chunk {chunk_start}-{chunk_end}")
 
     except Exception as e:
