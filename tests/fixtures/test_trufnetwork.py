@@ -13,6 +13,7 @@ from prefect import Task
 from prefect.testing.utilities import prefect_test_harness
 from pydantic import SecretStr
 import pytest
+import trufnetwork_sdk_c_bindings.exports as truf_sdk
 
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 
@@ -402,8 +403,8 @@ def term_handler():
 @pytest.fixture(scope='session', autouse=True)
 def disable_prefect_retries():
     from importlib import import_module
-    from unittest.mock import patch
     from typing import Any
+    from unittest.mock import patch
 
     from prefect import task as original_task
 
@@ -508,3 +509,21 @@ def tn_block(
         tn_private_key=SecretStr(os.environ.get("TN_PRIVATE_KEY", DEFAULT_TN_PRIVATE_KEY)),
         helper_contract_name="sthelpercontract0000000000000001",
     )
+
+@pytest.fixture(scope="session")
+def helper_contract_id(tn_block: TNAccessBlock) -> Generator[str, None, None]:
+    """Create and manage the helper contract."""
+    helper_stream_id = tn_block.helper_contract_stream_name
+    client = tn_block.get_client()
+
+    # Try to deploy helper contract
+    try:
+        # we don't need to initialize helper contracts
+        client.deploy_stream(helper_stream_id, stream_type=truf_sdk.StreamTypeHelper, wait=True)
+    except Exception as e:
+        if "dataset exists" not in str(e) and "already exists" not in str(e):
+            raise e
+
+    yield helper_stream_id
+
+    # Don't cleanup helper contract as it might be used by other tests

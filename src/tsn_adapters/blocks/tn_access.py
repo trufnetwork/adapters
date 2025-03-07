@@ -363,7 +363,9 @@ class TNAccessBlock(Block):
         raise NotImplementedError("is_allowed_to_write is not implemented")
 
     @handle_tn_errors
-    def get_earliest_date(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[datetime]:
+    def get_earliest_date(
+        self, stream_id: str, data_provider: Optional[str] = None, is_unix: bool = False
+    ) -> Optional[datetime]:
         """
         Get the earliest date available for a stream.
 
@@ -381,7 +383,7 @@ class TNAccessBlock(Block):
             TNAccessBlock.Error: For other TN-related errors
         """
         try:
-            first_record = self.get_first_record(stream_id=stream_id, data_provider=data_provider)
+            first_record = self.get_first_record(stream_id=stream_id, data_provider=data_provider, is_unix=is_unix)
             if first_record is None:
                 return None
 
@@ -389,11 +391,14 @@ class TNAccessBlock(Block):
             if date_value is None:
                 raise self.InvalidRecordFormatError(f"Invalid record format for {stream_id}: missing DateValue")
 
-            try:
-                timestamp = int(date_value)
-                return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-            except (ValueError, TypeError) as e:
-                raise self.InvalidTimestampError(f"Invalid timestamp format for {stream_id}: {e}") from e
+            if is_unix:
+                try:
+                    timestamp = int(date_value)
+                    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                except (ValueError, TypeError) as e:
+                    raise self.InvalidTimestampError(f"Invalid timestamp format for {stream_id}: {e}") from e
+            else:
+                return datetime.fromisoformat(date_value)
 
         except Exception as e:
             error_msg = str(e).lower()
