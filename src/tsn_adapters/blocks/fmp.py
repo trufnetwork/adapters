@@ -23,6 +23,46 @@ class ActiveTicker(DataFrameModel):
         strict = "filter"
         coerce = True
 
+class TickerDetail(DataFrameModel):
+    symbol: Series[str]
+    marketCap: Series[str]
+    beta: Series[float]
+    lastDividend: Series[float]
+    range: Series[str]
+    change: Series[float]
+    changePercentage: Series[float]
+    volume: Series[int]
+    averageVolume: Series[int]
+    companyName: Series[str]
+    currency: Series[str]
+    cik: Series[str]
+    isin: Series[str]
+    cusip: Series[str]
+    exchangeFullName: Series[str]
+    exchange: Series[str]
+    industry: Series[str]
+    website: Series[str]
+    description: Series[str]
+    ceo: Series[str]
+    sector: Series[str]
+    country: Series[str]
+    fullTimeEmployees: Series[str]
+    phone: Series[str]
+    address: Series[str]
+    city: Series[str]
+    state: Series[str]
+    zip: Series[str]
+    image: Series[str]
+    ipoDate: Series[str]
+    defaultImage: Series[bool]
+    isEtf: Series[bool]
+    isActivelyTrading: Series[bool]
+    isAdr: Series[bool]
+    isFund: Series[bool]
+
+    class Config(DataFrameModel.Config):
+        strict = "filter"
+        coerce = True
 
 class BatchQuoteShort(DataFrameModel):
     """Schema for batch quote data from FMP API.
@@ -121,6 +161,18 @@ class FMPBlock(Block):
         if isinstance(data, list):
             return DataFrame[ActiveTicker](data)
         return DataFrame[ActiveTicker](pd.DataFrame())
+    
+    def get_ticker_detail(self, symbol: str):
+        """
+        Access detailed company profile data with the FMP Company Profile Data API. 
+        This API provides key financial and operational information for a specific stock symbol, 
+        including the company's market capitalization, stock price, industry, and much more.
+        """
+        path = f"profile?symbol={symbol}"
+        data = self._get_jsonparsed_data(path)
+        if isinstance(data, list):
+            return DataFrame[TickerDetail](data)
+        return DataFrame[TickerDetail](pd.DataFrame())
 
     def get_batch_quote(self, symbols: list[str]) -> DataFrame[BatchQuoteShort]:
         """
