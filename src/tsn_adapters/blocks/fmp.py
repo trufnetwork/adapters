@@ -54,11 +54,11 @@ class TickerDetail(DataFrameModel):
     zip: Series[str] = Field(nullable=True)
     image: Series[str] = Field(nullable=True)
     ipoDate: Series[str] = Field(nullable=True)
-    defaultImage: Series[bool]
-    isEtf: Series[bool]
-    isActivelyTrading: Series[bool]
-    isAdr: Series[bool]
-    isFund: Series[bool]
+    defaultImage: Series[bool] = Field(nullable=True)
+    isEtf: Series[bool] = Field(nullable=True)
+    isActivelyTrading: Series[bool] = Field(nullable=True)
+    isAdr: Series[bool] = Field(nullable=True)
+    isFund: Series[bool] = Field(nullable=True)
 
     class Config(DataFrameModel.Config):
         strict = "filter"
