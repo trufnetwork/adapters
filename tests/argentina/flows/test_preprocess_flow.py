@@ -59,8 +59,6 @@ def enable_prefect_test_harness(prefect_test_fixture: Any):
         yield
 
 
-# --- Start New Fixtures ---
-
 @pytest.fixture
 def mock_s3_block() -> MagicMock:
     """Provides a mocked S3Bucket instance."""
@@ -104,15 +102,7 @@ def preprocess_flow_instance(
         product_category_map_url=TEST_CATEGORY_MAP_URL,
         s3_block=mock_s3_block,
     )
-    # We might still need to manually assign if constructor patching isn't enough,
-    # or if base class initialization interferes. Let's assume patching works for now.
-    # If tests fail, we might need:
-    # flow.raw_provider = mock_raw_provider
-    # flow.processed_provider = mock_processed_provider
-    # flow.product_averages_provider = mock_product_avg_provider
     return flow
-
-# --- End New Fixtures ---
 
 
 class TestPreprocessFlowInit:
@@ -148,7 +138,7 @@ class TestPreprocessFlowInit:
         # Check instances are assigned (they will be MagicMock instances due to patching)
         assert isinstance(flow.raw_provider, MagicMock)
         assert isinstance(flow.product_averages_provider, MagicMock)
-        assert isinstance(flow.processed_provider, MagicMock) # Now check this too
+        assert isinstance(flow.processed_provider, MagicMock)
 
 
 class TestPreprocessFlowRunFlow:
@@ -271,7 +261,7 @@ class TestPreprocessFlowProcessDate:
             date_str=TEST_DATE,
             data=mock_processed_data,
             uncategorized=mock_uncategorized,
-            logs=b"Placeholder for logs", # This might need adjustment if logs are dynamic
+            logs=b"Placeholder for logs",
         )
         preprocess_flow_instance._create_summary.assert_called_once_with(TEST_DATE, mock_processed_data, mock_uncategorized) # type: ignore[attr-defined]
 
