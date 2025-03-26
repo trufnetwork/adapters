@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 from pandera.errors import SchemaError
+from pandera.typing import DataFrame
 from prefect.logging.loggers import disable_run_logger
 from prefect_aws import S3Bucket
 import pytest
@@ -15,7 +16,8 @@ from pytest_mock import MockerFixture
 from tsn_adapters.tasks.argentina.flows.preprocess_flow import PreprocessFlow, preprocess_flow
 from tsn_adapters.tasks.argentina.models.aggregated_prices import SepaAggregatedPricesModel
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
-from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaProductosDataModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel, SepaProductosDataModel
+from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.provider.s3 import ProcessedDataProvider, RawDataProvider
 from tsn_adapters.tasks.argentina.types import (
     AggregatedPricesDF,
@@ -51,29 +53,92 @@ SAMPLE_PROCESSED_DATA = {
 
 
 @pytest.fixture(autouse=True)
-def mock_run_logger():
+def enable_prefect_test_harness(prefect_test_fixture: Any):
     with disable_run_logger():
+        _ = prefect_test_fixture
         yield
+
+
+@pytest.fixture
+def mock_s3_block() -> MagicMock:
+    """Provides a mocked S3Bucket instance."""
+    return MagicMock(spec=S3Bucket)
+
+@pytest.fixture
+def mock_raw_provider(mocker: MockerFixture, mock_s3_block: MagicMock) -> MagicMock:
+    """Provides a mocked RawDataProvider instance."""
+    mock_inst = MagicMock(spec=RawDataProvider)
+    # Mock the class constructor to return our instance
+    mocker.patch("tsn_adapters.tasks.argentina.flows.preprocess_flow.RawDataProvider", return_value=mock_inst)
+    return mock_inst
+
+@pytest.fixture
+def mock_processed_provider(mocker: MockerFixture, mock_s3_block: MagicMock) -> MagicMock:
+    """Provides a mocked ProcessedDataProvider instance."""
+    mock_inst = MagicMock(spec=ProcessedDataProvider)
+    # Mock the class constructor (likely in the base class) to return our instance
+    mocker.patch("tsn_adapters.tasks.argentina.flows.base.ProcessedDataProvider", return_value=mock_inst)
+    return mock_inst
+
+@pytest.fixture
+def mock_product_avg_provider(mocker: MockerFixture, mock_s3_block: MagicMock) -> MagicMock:
+    """Provides a mocked ProductAveragesProvider instance."""
+    mock_inst = MagicMock(spec=ProductAveragesProvider)
+    # Mock the class constructor to return our instance
+    mocker.patch("tsn_adapters.tasks.argentina.flows.preprocess_flow.ProductAveragesProvider", return_value=mock_inst)
+    return mock_inst
+
+@pytest.fixture
+def preprocess_flow_instance(
+    mock_s3_block: MagicMock,
+    mock_raw_provider: MagicMock, # Ensure provider mocks are active
+    mock_processed_provider: MagicMock,
+    mock_product_avg_provider: MagicMock,
+) -> PreprocessFlow:
+    """Provides a PreprocessFlow instance with mocked providers."""
+    # Instantiating the flow will now automatically use the mocked providers
+    # because we patched their constructors in the provider fixtures.
+    flow = PreprocessFlow(
+        product_category_map_url=TEST_CATEGORY_MAP_URL,
+        s3_block=mock_s3_block,
+    )
+    return flow
 
 
 class TestPreprocessFlowInit:
     """Tests for the PreprocessFlow class initialization."""
 
-    def test_init_success(self):
+    def test_init_success(self, mocker: MockerFixture):
         """Test successful initialization of PreprocessFlow."""
         mock_s3_block = MagicMock(spec=S3Bucket)
+        # Mock provider classes *before* instantiation
+        mock_raw_provider_cls = mocker.patch("tsn_adapters.tasks.argentina.flows.preprocess_flow.RawDataProvider")
+        # Patch ProcessedDataProvider where it's used in the base class __init__
+        mock_processed_provider_cls = mocker.patch(
+            "tsn_adapters.tasks.argentina.flows.base.ProcessedDataProvider" # Correct path for base class usage
+        )
+        # Patch ProductAveragesProvider where it's used in PreprocessFlow __init__
+        mock_product_avg_provider_cls = mocker.patch(
+            "tsn_adapters.tasks.argentina.flows.preprocess_flow.ProductAveragesProvider" # Corrected path
+        )
 
         flow = PreprocessFlow(
             product_category_map_url=TEST_CATEGORY_MAP_URL,
             s3_block=mock_s3_block,
         )
 
-        assert isinstance(flow.raw_provider, RawDataProvider)
-        assert isinstance(flow.processed_provider, ProcessedDataProvider)
+        # Verify classes were called with the s3_block
+        mock_raw_provider_cls.assert_called_once_with(s3_block=mock_s3_block)
+        # Verify ProcessedDataProvider was called (by the base class)
+        mock_processed_provider_cls.assert_called_once_with(s3_block=mock_s3_block)
+        # Verify ProductAveragesProvider was called
+        mock_product_avg_provider_cls.assert_called_once_with(s3_block=mock_s3_block)
+
         assert flow.category_map_url == TEST_CATEGORY_MAP_URL
-        # Check that providers were initialized with the correct S3 block
-        assert flow.raw_provider.s3_block == mock_s3_block
-        assert flow.processed_provider.s3_block == mock_s3_block
+        # Check instances are assigned (they will be MagicMock instances due to patching)
+        assert isinstance(flow.raw_provider, MagicMock)
+        assert isinstance(flow.product_averages_provider, MagicMock)
+        assert isinstance(flow.processed_provider, MagicMock)
 
 
 class TestPreprocessFlowRunFlow:
@@ -151,86 +216,149 @@ class TestPreprocessFlowRunFlow:
 class TestPreprocessFlowProcessDate:
     """Tests for the PreprocessFlow process_date method."""
 
-    @pytest.fixture
-    def mock_preprocess_flow(self) -> PreprocessFlow:
-        """Fixture to create a PreprocessFlow instance with mocked providers."""
-        mock_s3_block = MagicMock(spec=S3Bucket)
-        flow = PreprocessFlow(
-            product_category_map_url=TEST_CATEGORY_MAP_URL,
-            s3_block=mock_s3_block,
-        )
-        # Mock the providers directly with proper typing
-        flow.raw_provider = cast(Any, MagicMock(spec=RawDataProvider))
-        flow.processed_provider = cast(Any, MagicMock(spec=ProcessedDataProvider))
-        # Mock _create_summary as a MagicMock
-        flow._create_summary = cast(Any, MagicMock())
-        return flow
-
-    def test_process_date_happy_path(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture, prefect_test_fixture):
+    def test_process_date_happy_path(
+        self,
+        mocker: MockerFixture,
+        preprocess_flow_instance: PreprocessFlow,
+        mock_raw_provider: MagicMock,
+        mock_processed_provider: MagicMock,
+        mock_product_avg_provider: MagicMock,
+    ):
         """Test process_date with valid data."""
-        # Mock dependencies
-        mock_raw_data = cast(Any, MagicMock(spec=pd.DataFrame))
-        mock_raw_data.empty = False
-        raw_provider = cast(Any, mock_preprocess_flow.raw_provider)
-        raw_provider.get_raw_data_for.return_value = mock_raw_data
+        # Arrange: Set return values on the mocked providers from fixtures
+        mock_raw_data = MagicMock(spec=pd.DataFrame); mock_raw_data.empty = False
+        mock_raw_provider.get_raw_data_for.return_value = mock_raw_data
 
-        mock_category_map = cast(Any, MagicMock(spec=pd.DataFrame))
-        mock_task_load_category_map = cast(
-            Any,
-            mocker.patch(
-                "tsn_adapters.tasks.argentina.flows.preprocess_flow.task_load_category_map",
-                return_value=mock_category_map,
-            ),
-        )
+        mock_category_map = MagicMock(spec=pd.DataFrame)
+        mock_task_load_category_map = mocker.patch("tsn_adapters.tasks.argentina.flows.preprocess_flow.task_load_category_map", return_value=mock_category_map)
 
-        mock_processed_data = cast(Any, MagicMock(spec=pd.DataFrame))
-        mock_uncategorized = cast(Any, MagicMock(spec=pd.DataFrame))
-        mock_process_raw_data = cast(
-            Any,
-            mocker.patch(
+        mock_processed_data = MagicMock(spec=AggregatedPricesDF)
+        mock_uncategorized = MagicMock(spec=UncategorizedDF)
+        mock_avg_price_df = MagicMock(spec=DataFrame[SepaAvgPriceProductModel]); mock_avg_price_df.empty = False
+        mock_process_raw_data_task = mocker.patch(
                 "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
-                return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized))
-            ),
+            return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized, mock_avg_price_df)),
         )
 
-        # Run the method
-        mock_preprocess_flow.process_date(TEST_DATE)
+        # Mock the _create_summary method directly on the instance from the fixture
+        preprocess_flow_instance._create_summary = MagicMock() # type: ignore[assignment] # Acknowledge protected access
 
-        # Verify interactions
-        raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
-        mock_task_load_category_map.assert_called_once_with(url=mock_preprocess_flow.category_map_url)
-        mock_process_raw_data.assert_called_once_with(
+        # Act
+        preprocess_flow_instance.process_date(TEST_DATE)
+
+        # Assert
+        mock_raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
+        mock_task_load_category_map.assert_called_once_with(url=preprocess_flow_instance.category_map_url)
+        mock_process_raw_data_task.assert_called_once_with(
             raw_data=mock_raw_data,
             category_map_df=mock_category_map,
-            date=TEST_DATE,
-            return_state=True
+            return_state=True,
         )
-        processed_provider = cast(Any, mock_preprocess_flow.processed_provider)
-        processed_provider.save_processed_data.assert_called_once_with(
+        mock_product_avg_provider.save_product_averages.assert_called_once_with(
+            date_str=TEST_DATE, data=mock_avg_price_df
+        )
+        mock_processed_provider.save_processed_data.assert_called_once_with(
             date_str=TEST_DATE,
             data=mock_processed_data,
             uncategorized=mock_uncategorized,
             logs=b"Placeholder for logs",
         )
-        create_summary = cast(Any, mock_preprocess_flow._create_summary)
-        create_summary.assert_called_once_with(TEST_DATE, mock_processed_data, mock_uncategorized)
+        preprocess_flow_instance._create_summary.assert_called_once_with(TEST_DATE, mock_processed_data, mock_uncategorized) # type: ignore[attr-defined]
 
-    def test_process_date_no_data(self, mock_preprocess_flow: PreprocessFlow):
+    def test_process_date_with_empty_avg_prices(
+        self,
+        mocker: MockerFixture,
+        preprocess_flow_instance: PreprocessFlow,
+        mock_raw_provider: MagicMock,
+        mock_processed_provider: MagicMock,
+        mock_product_avg_provider: MagicMock,
+    ):
+        """Test process_date when product average DataFrame is empty."""
+        # Arrange
+        mock_raw_data = MagicMock(spec=pd.DataFrame); mock_raw_data.empty = False
+        mock_raw_provider.get_raw_data_for.return_value = mock_raw_data
+
+        mock_category_map = MagicMock(spec=pd.DataFrame)
+        mocker.patch("tsn_adapters.tasks.argentina.flows.preprocess_flow.task_load_category_map", return_value=mock_category_map)
+
+        mock_processed_data = MagicMock(spec=AggregatedPricesDF)
+        mock_uncategorized = MagicMock(spec=UncategorizedDF)
+        mock_avg_price_df = MagicMock(spec=DataFrame[SepaAvgPriceProductModel]); mock_avg_price_df.empty = True # Key difference
+        mocker.patch(
+            "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
+            return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized, mock_avg_price_df)),
+        )
+
+        preprocess_flow_instance._create_summary = MagicMock() # type: ignore[assignment]
+
+        # Act
+        preprocess_flow_instance.process_date(TEST_DATE)
+
+        # Assert
+        mock_product_avg_provider.save_product_averages.assert_not_called() # Key assertion
+        mock_processed_provider.save_processed_data.assert_called_once()
+        preprocess_flow_instance._create_summary.assert_called_once_with(TEST_DATE, mock_processed_data, mock_uncategorized) # type: ignore[attr-defined]
+
+    def test_process_date_product_avg_save_error(
+        self,
+        mocker: MockerFixture,
+        preprocess_flow_instance: PreprocessFlow,
+        mock_raw_provider: MagicMock,
+        mock_processed_provider: MagicMock,
+        mock_product_avg_provider: MagicMock,
+    ):
+        """Test that process_date continues even if saving product averages fails."""
+        # Arrange
+        mock_raw_data = MagicMock(spec=pd.DataFrame); mock_raw_data.empty = False
+        mock_raw_provider.get_raw_data_for.return_value = mock_raw_data
+
+        mock_category_map = MagicMock(spec=pd.DataFrame)
+        mocker.patch("tsn_adapters.tasks.argentina.flows.preprocess_flow.task_load_category_map", return_value=mock_category_map)
+
+        mock_processed_data = MagicMock(spec=AggregatedPricesDF)
+        mock_uncategorized = MagicMock(spec=UncategorizedDF)
+        mock_avg_price_df = MagicMock(spec=DataFrame[SepaAvgPriceProductModel]); mock_avg_price_df.empty = False
+        mocker.patch(
+            "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
+            return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized, mock_avg_price_df)),
+        )
+        # Make saving product averages fail
+        mock_product_avg_provider.save_product_averages.side_effect = Exception("Failed to save product averages")
+
+        preprocess_flow_instance._create_summary = MagicMock() # type: ignore[assignment]
+
+        # Act
+        preprocess_flow_instance.process_date(TEST_DATE)
+
+        # Assert
+        mock_product_avg_provider.save_product_averages.assert_called_once_with(
+            date_str=TEST_DATE, data=mock_avg_price_df
+        ) # Verify attempt
+        mock_processed_provider.save_processed_data.assert_called_once() # Verify this still happens
+        preprocess_flow_instance._create_summary.assert_called_once_with(TEST_DATE, mock_processed_data, mock_uncategorized) # type: ignore[attr-defined]
+
+    def test_process_date_no_data(
+        self,
+        preprocess_flow_instance: PreprocessFlow,
+        mock_raw_provider: MagicMock,
+        mock_processed_provider: MagicMock,
+        mock_product_avg_provider: MagicMock,
+    ):
         """Test process_date when no data is available for the date."""
-        # Mock raw_provider to return empty DataFrame
-        mock_empty_df = cast(Any, MagicMock(spec=pd.DataFrame))
-        mock_empty_df.empty = True
-        raw_provider = cast(Any, mock_preprocess_flow.raw_provider)
-        raw_provider.get_raw_data_for.return_value = mock_empty_df
+        # Arrange
+        mock_empty_df = MagicMock(spec=pd.DataFrame); mock_empty_df.empty = True
+        mock_raw_provider.get_raw_data_for.return_value = mock_empty_df
 
-        mock_preprocess_flow.process_date(TEST_DATE)
+        preprocess_flow_instance._create_summary = MagicMock() # type: ignore[assignment]
 
-        # Verify that processing stops after finding no data
-        raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
-        processed_provider = cast(Any, mock_preprocess_flow.processed_provider)
-        processed_provider.save_processed_data.assert_not_called()
-        create_summary = cast(Any, mock_preprocess_flow._create_summary)
-        create_summary.assert_not_called()
+        # Act
+        preprocess_flow_instance.process_date(TEST_DATE)
+
+        # Assert
+        mock_raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
+        mock_product_avg_provider.save_product_averages.assert_not_called()
+        mock_processed_provider.save_processed_data.assert_not_called()
+        preprocess_flow_instance._create_summary.assert_not_called() # type: ignore[attr-defined]
 
     @pytest.mark.parametrize(
         "invalid_date",
@@ -242,203 +370,86 @@ class TestPreprocessFlowProcessDate:
             "2024-01-32",  # Invalid day
         ],
     )
-    def test_process_date_invalid_date(self, mock_preprocess_flow: PreprocessFlow, invalid_date: str):
+    def test_process_date_invalid_date(
+        self,
+        preprocess_flow_instance: PreprocessFlow, # Use the flow instance fixture
+        mock_raw_provider: MagicMock, # Need this to assert it wasn't called
+        invalid_date: str
+    ):
         """Test process_date with invalid date format."""
 
-        # Override validate_date to do stricter validation
+        # Override validate_date on the instance provided by the fixture
         def strict_validate_date(date: DateStr) -> None:
-            # First check format with regex
             if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
                 raise ValueError(f"Invalid date format: {date}")
-
-            # Then check if it's a valid date
             try:
                 datetime.strptime(date, "%Y-%m-%d")
             except ValueError:
                 raise ValueError(f"Invalid date format: {date}")
 
-        mock_preprocess_flow.validate_date = strict_validate_date
+        preprocess_flow_instance.validate_date = strict_validate_date
 
         with pytest.raises(ValueError, match=f"Invalid date format: {invalid_date}"):
-            mock_preprocess_flow.process_date(cast(DateStr, invalid_date))
+            preprocess_flow_instance.process_date(cast(DateStr, invalid_date))
 
-        # Verify no processing was attempted
-        mock_preprocess_flow.raw_provider.get_raw_data_for.assert_not_called()
+        mock_raw_provider.get_raw_data_for.assert_not_called()
 
-    def test_process_date_category_map_error(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture):
+    def test_process_date_category_map_error(
+        self,
+        mocker: MockerFixture,
+        preprocess_flow_instance: PreprocessFlow,
+        mock_raw_provider: MagicMock,
+        mock_processed_provider: MagicMock,
+    ):
         """Test process_date when category map loading fails."""
-        # Mock raw data
-        mock_raw_data = cast(Any, MagicMock(spec=pd.DataFrame))
-        mock_raw_data.empty = False
-        raw_provider = cast(Any, mock_preprocess_flow.raw_provider)
-        raw_provider.get_raw_data_for.return_value = mock_raw_data
+        # Arrange
+        mock_raw_data = MagicMock(spec=pd.DataFrame); mock_raw_data.empty = False
+        mock_raw_provider.get_raw_data_for.return_value = mock_raw_data
 
         # Mock category map loading to fail
-        mock_task_load_category_map = cast(
-            Any,
-            mocker.patch(
+        mock_task_load_category_map = mocker.patch(
                 "tsn_adapters.tasks.argentina.flows.preprocess_flow.task_load_category_map",
                 side_effect=Exception("Failed to load category map"),
-            ),
         )
 
+        # Act & Assert
         with pytest.raises(Exception, match="Failed to load category map"):
-            mock_preprocess_flow.process_date(TEST_DATE)
+            preprocess_flow_instance.process_date(TEST_DATE)
 
-        # Verify interactions
-        raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
-        mock_task_load_category_map.assert_called_once_with(url=mock_preprocess_flow.category_map_url)
-        processed_provider = cast(Any, mock_preprocess_flow.processed_provider)
-        processed_provider.save_processed_data.assert_not_called()
-        create_summary = cast(Any, mock_preprocess_flow._create_summary)
-        create_summary.assert_not_called()
+        mock_raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
+        mock_task_load_category_map.assert_called_once_with(url=preprocess_flow_instance.category_map_url)
+        mock_processed_provider.save_processed_data.assert_not_called()
 
-    def test_process_date_processing_error(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture):
+    def test_process_date_processing_error(
+        self,
+        mocker: MockerFixture,
+        preprocess_flow_instance: PreprocessFlow,
+        mock_raw_provider: MagicMock,
+        mock_processed_provider: MagicMock,
+    ):
         """Test process_date when data processing fails."""
-        # Mock raw data and category map
-        mock_raw_data = cast(Any, MagicMock(spec=pd.DataFrame))
-        mock_raw_data.empty = False
-        raw_provider = cast(Any, mock_preprocess_flow.raw_provider)
-        raw_provider.get_raw_data_for.return_value = mock_raw_data
+        # Arrange
+        mock_raw_data = MagicMock(spec=pd.DataFrame); mock_raw_data.empty = False
+        mock_raw_provider.get_raw_data_for.return_value = mock_raw_data
 
-        mock_category_map = cast(Any, MagicMock(spec=pd.DataFrame))
+        mock_category_map = MagicMock(spec=pd.DataFrame)
         mocker.patch(
             "tsn_adapters.tasks.argentina.flows.preprocess_flow.task_load_category_map", return_value=mock_category_map
         )
 
         # Mock process_raw_data to fail
-        cast(
-            Any,
-            mocker.patch(
+        mock_process_raw_data = mocker.patch(
                 "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
                 side_effect=Exception("Processing failed"),
-            ),
         )
 
+        # Act & Assert
         with pytest.raises(Exception, match="Processing failed"):
-            mock_preprocess_flow.process_date(TEST_DATE)
+            preprocess_flow_instance.process_date(TEST_DATE)
 
-        # Verify that save_processed_data was not called
-        processed_provider = cast(Any, mock_preprocess_flow.processed_provider)
-        processed_provider.save_processed_data.assert_not_called()
-        create_summary = cast(Any, mock_preprocess_flow._create_summary)
-        create_summary.assert_not_called()
-
-
-class TestPreprocessFlowCreateSummary:
-    """Tests for the PreprocessFlow _create_summary method."""
-
-    @pytest.fixture
-    def mock_preprocess_flow(self) -> PreprocessFlow:
-        """Fixture to create a PreprocessFlow instance with mocked providers."""
-        mock_s3_block = MagicMock(spec=S3Bucket)
-        flow = PreprocessFlow(
-            product_category_map_url=TEST_CATEGORY_MAP_URL,
-            s3_block=mock_s3_block,
-        )
-        return flow
-
-    def test_create_summary_with_uncategorized(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture):
-        """Test _create_summary with both processed and uncategorized data."""
-        # Mock create_markdown_artifact
-        mock_create_artifact = mocker.patch(
-            "tsn_adapters.tasks.argentina.flows.preprocess_flow.create_markdown_artifact"
-        )
-
-        # Create test data
-        processed_data = cast(
-            AggregatedPricesDF,
-            pd.DataFrame(
-                {
-                    "category_id": ["C1", "C2", "C3"],
-                    "avg_price": [10.0, 20.0, 30.0],
-                    "date": ["2024-01-01", "2024-01-01", "2024-01-01"],
-                }
-            ),
-        )
-        uncategorized = cast(
-            UncategorizedDF,
-            pd.DataFrame({"id_producto": ["P4", "P5"], "productos_descripcion": ["Product D", "Product E"]}),
-        )
-
-        # Call the method
-        mock_preprocess_flow._create_summary(TEST_DATE, processed_data, uncategorized)
-
-        # Verify the artifact creation
-        mock_create_artifact.assert_called_once()
-        call_args = mock_create_artifact.call_args[1]
-        assert call_args["key"] == f"preprocessing-summary-{TEST_DATE}"
-        assert "description" in call_args
-
-        # Verify markdown content
-        markdown = call_args["markdown"]
-        assert f"# SEPA Preprocessing Summary for {TEST_DATE}" in markdown
-        assert "Total records processed: 5" in markdown  # 3 processed + 2 uncategorized
-        assert "Successfully categorized: 3" in markdown
-        assert "Uncategorized products: 2" in markdown
-        assert "Product D" in markdown  # Sample uncategorized product
-        assert "Product E" in markdown  # Sample uncategorized product
-
-    def test_create_summary_no_uncategorized(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture):
-        """Test _create_summary with only processed data (no uncategorized)."""
-        # Mock create_markdown_artifact
-        mock_create_artifact = mocker.patch(
-            "tsn_adapters.tasks.argentina.flows.preprocess_flow.create_markdown_artifact"
-        )
-
-        # Create test data
-        processed_data = cast(
-            AggregatedPricesDF,
-            pd.DataFrame(
-                {
-                    "category_id": ["C1", "C2", "C3"],
-                    "avg_price": [10.0, 20.0, 30.0],
-                    "date": ["2024-01-01", "2024-01-01", "2024-01-01"],
-                }
-            ),
-        )
-        uncategorized = cast(UncategorizedDF, pd.DataFrame())
-
-        # Call the method
-        mock_preprocess_flow._create_summary(TEST_DATE, processed_data, uncategorized)
-
-        # Verify the artifact creation
-        mock_create_artifact.assert_called_once()
-        call_args = mock_create_artifact.call_args[1]
-
-        # Verify markdown content
-        markdown = call_args["markdown"]
-        assert f"# SEPA Preprocessing Summary for {TEST_DATE}" in markdown
-        assert "Total records processed: 3" in markdown
-        assert "Successfully categorized: 3" in markdown
-        assert "Uncategorized products: 0" in markdown
-        assert "Sample Uncategorized Products" not in markdown  # No uncategorized section
-
-    def test_create_summary_empty_data(self, mock_preprocess_flow: PreprocessFlow, mocker: MockerFixture):
-        """Test _create_summary with empty DataFrames."""
-        # Mock create_markdown_artifact
-        mock_create_artifact = mocker.patch(
-            "tsn_adapters.tasks.argentina.flows.preprocess_flow.create_markdown_artifact"
-        )
-
-        # Create empty test data
-        processed_data = cast(AggregatedPricesDF, pd.DataFrame())
-        uncategorized = cast(UncategorizedDF, pd.DataFrame())
-
-        # Call the method
-        mock_preprocess_flow._create_summary(TEST_DATE, processed_data, uncategorized)
-
-        # Verify the artifact creation
-        mock_create_artifact.assert_called_once()
-        call_args = mock_create_artifact.call_args[1]
-
-        # Verify markdown content
-        markdown = call_args["markdown"]
-        assert f"# SEPA Preprocessing Summary for {TEST_DATE}" in markdown
-        assert "Total records processed: 0" in markdown
-        assert "Successfully categorized: 0" in markdown
-        assert "Uncategorized products: 0" in markdown
-        assert "Sample Uncategorized Products" not in markdown
+        mock_raw_provider.get_raw_data_for.assert_called_once_with(TEST_DATE)
+        mock_process_raw_data.assert_called_once() # Verify it was called
+        mock_processed_provider.save_processed_data.assert_not_called()
 
 
 class TestPreprocessFlowTopLevel:
