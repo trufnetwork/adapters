@@ -440,7 +440,7 @@ def disable_prefect_retries():
         'tsn_adapters.flows.fmp.historical_flow.fetch_historical_data',
         'tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date',
         # Stream Deploy Flow
-        'tsn_adapters.flows.stream_deploy_flow.check_and_deploy_stream',
+        'tsn_adapters.flows.stream_deploy_flow.check_deploy_and_init_stream',
         # Primitive Source Descriptor
         'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url',
         'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github',
