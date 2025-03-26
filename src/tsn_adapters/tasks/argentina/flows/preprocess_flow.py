@@ -11,6 +11,7 @@ This flow handles:
 from typing import cast
 
 import pandas as pd
+from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.cache_policies as CachePolicies
@@ -19,6 +20,7 @@ from prefect_aws import S3Bucket
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
+from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
 from tsn_adapters.tasks.argentina.task_wrappers import task_load_category_map
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, CategoryMapDF, DateStr, SepaDF, UncategorizedDF
@@ -29,26 +31,30 @@ from tsn_adapters.utils import deroutine
 def process_raw_data(
     raw_data: SepaDF,
     category_map_df: CategoryMapDF,
-) -> tuple[AggregatedPricesDF, UncategorizedDF]:
-    """Process raw SEPA data.
+) -> tuple[AggregatedPricesDF, UncategorizedDF, DataFrame[SepaAvgPriceProductModel]]:
+    """Process raw SEPA data, calculate product averages, and aggregate by category.
 
     Args:
-        data_item: Raw data item to process
-        category_map_df: Category mapping DataFrame
+        raw_data: Raw SEPA data DataFrame.
+        category_map_df: Category mapping DataFrame.
 
     Returns:
-        Tuple of (processed data, uncategorized products)
+        Tuple of (category aggregated data, uncategorized products, product average data).
     """
     # Process the raw data
     if raw_data.empty:
-        return cast(AggregatedPricesDF, pd.DataFrame()), cast(UncategorizedDF, pd.DataFrame())
+        # Return empty DataFrames with correct types if raw data is empty
+        empty_avg_price_df = DataFrame[SepaAvgPriceProductModel](pd.DataFrame(columns=list(SepaAvgPriceProductModel.to_schema().columns.keys())))
+        return cast(AggregatedPricesDF, pd.DataFrame()), cast(UncategorizedDF, pd.DataFrame()), empty_avg_price_df
 
-    # get average price per product
+    # Get average price per product (This is the SepaAvgPriceProductModel DataFrame)
     avg_price_df = SepaAvgPriceProductModel.from_sepa_product_data(raw_data)
 
-    # Apply category mapping
+    # Apply category mapping and aggregation
     categorized, uncategorized = aggregate_prices_by_category(category_map_df, avg_price_df)
-    return categorized, uncategorized
+
+    # Return all three DataFrames
+    return categorized, uncategorized, avg_price_df
 
 
 @task(name="List Available Dates", cache_policy=CachePolicies.RUN_ID)
@@ -69,11 +75,14 @@ class PreprocessFlow(ArgentinaFlowController):
 
         Args:
             product_category_map_url: URL to product category mapping
-            s3_block: Optional preconfigured S3 block
+            s3_block: Preconfigured S3 block
         """
         super().__init__(s3_block=s3_block)
         self.category_map_url = product_category_map_url
         self.raw_provider = RawDataProvider(s3_block=s3_block)
+        # Instantiate the new provider
+        self.product_averages_provider = ProductAveragesProvider(s3_block=s3_block)
+        # Note: self.processed_provider is inherited from ArgentinaFlowController
 
     def run_flow(self) -> None:
         """
@@ -106,23 +115,37 @@ class PreprocessFlow(ArgentinaFlowController):
         # Get raw data
         raw_data = self.raw_provider.get_raw_data_for(date)
         if raw_data.empty:
-            logger.error(f"No data available for date: {date}")
+            logger.warning(f"No data available for date: {date}, skipping processing.")
             return
 
         # Load category mapping
         logger.info("Loading category mapping")
         category_map_df = task_load_category_map(url=self.category_map_url)
 
-        # Process the data
-        logger.info("Processing data")
-        processed_data, uncategorized = process_raw_data(
+        # Process the data - unpack all three results
+        logger.info("Processing raw data and aggregating categories")
+        processed_data, uncategorized, avg_price_df = process_raw_data(
             raw_data=raw_data,
             category_map_df=category_map_df,
             return_state=True,
         ).result()
 
-        # Save to S3
-        logger.info("Saving processed data")
+        # --- New Step: Save Product Averages ---
+        if not avg_price_df.empty:
+            logger.info("Saving product averages")
+            try:
+                self.product_averages_provider.save_product_averages(date_str=date, data=avg_price_df)
+                logger.info("Successfully saved product averages")
+            except Exception as e:
+                logger.error(f"Failed to save product averages for {date}: {e}", exc_info=True)
+                # Decide if this error should halt processing or just be logged
+                # For now, we log and continue to save category data
+        else:
+            logger.info("Skipping saving product averages as the DataFrame is empty.")
+        # --- End New Step ---
+
+        # Save category aggregated data to S3 (using self.processed_provider from base class)
+        logger.info("Saving processed category data")
         self.processed_provider.save_processed_data(
             date_str=date,
             data=processed_data,
