@@ -12,7 +12,7 @@ dependencies = [
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
     "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@bdc4d187add38228b8051ef7faade0d19ee974be",
     "PyGithub",
-    "pandera",
+    "pandera>=0.23.1",
     "pandas",
 ]
 
@@ -33,6 +33,7 @@ dev = [
     "isort",
     "ruff",
     "mypy",
+    "moto",
 ]
 
 [tool.setuptools]
