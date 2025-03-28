@@ -22,14 +22,14 @@ from tsn_adapters.tasks.argentina.models import (
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks import (
     determine_date_range_to_process,
-    load_aggregation_state,  # Imported for later use
-    save_aggregation_state,  # Import save_aggregation_state for Step 7
+    load_aggregation_state,
+    save_aggregation_state,
 )
 
 # Import the helper function directly, not as a task
 # Also import the helper to create an empty DataFrame
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
-    create_empty_aggregated_data,  # Corrected import name
+    create_empty_aggregated_data,
     process_single_date_products,
 )
 
@@ -78,7 +78,6 @@ async def aggregate_argentina_products_flow(
         # If force_reprocess is True, start with an empty dataframe, ignoring loaded state
         if force_reprocess:
             logger.info("`force_reprocess` is True. Resetting aggregated data to empty.")
-            # Cast the result to satisfy the type checker
             aggregated_data = cast(DataFrame[DynamicPrimitiveSourceModel], create_empty_aggregated_data())
             # Optionally reset metadata count, though it gets updated in the loop
             # metadata.total_products_count = 0
@@ -94,7 +93,6 @@ async def aggregate_argentina_products_flow(
             product_averages_provider=product_averages_provider,
             metadata=metadata,
             force_reprocess=force_reprocess,
-            # wait_for=[aggregated_data, metadata] # wait for state load
         )
         if not dates_to_process:
             logger.info("No new dates to process. Flow finished early.")
@@ -112,7 +110,7 @@ async def aggregate_argentina_products_flow(
         logger.error(f"Failed to determine date range to process: {e}", exc_info=True)
         raise  # Cannot proceed if date range fails
 
-    # 4. Initialize Reporting Counters (Placeholder)
+    # 4. Initialize Reporting Counters
     new_products_added_total = 0
     processed_dates_count = 0
     logger.debug("Reporting counters initialized.")
@@ -120,8 +118,8 @@ async def aggregate_argentina_products_flow(
     # 5. Loop Through Dates
     logger.info(f"Starting processing loop for {len(dates_to_process)} dates...")
     # Start with the correctly typed aggregated_data from state load
-    processed_aggregated_data: DataFrame[DynamicPrimitiveSourceModel] = aggregated_data
-    for date_str in dates_to_process:
+    processed_aggregated_data: DataFrame[DynamicPrimitiveSourceModel] = aggregated_data # type: ignore[assignment]
+    for date_str in dates_to_process: # type: ignore[assignment]
         logger.debug(f"Processing date: {date_str}...")
         try:
             # Store pre-processing count for comparison
@@ -150,7 +148,6 @@ async def aggregate_argentina_products_flow(
                 s3_block=s3_block,
                 aggregated_data=processed_aggregated_data,
                 metadata=metadata,
-                # No explicit wait_for needed here as loop is sequential
             )
             logger.debug(f"Saved intermediate state for date {date_str}.")
 
@@ -163,7 +160,7 @@ async def aggregate_argentina_products_flow(
     logger.info("Finished processing all dates.")
 
     # 7. Reporting
-    final_total_products = metadata.total_products_count
+    final_total_products = metadata.total_products_count # type: ignore[assignment]
     logger.info(
         f"Flow finished. Processed {processed_dates_count} dates. Added {new_products_added_total} new products in total. Final product count: {final_total_products}."
     )

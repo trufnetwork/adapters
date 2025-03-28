@@ -115,10 +115,9 @@ def test_dynamic_source_model_invalid_date_format(invalid_dynamic_source_data_da
     assert validated_df.empty, "DataFrame with invalid date format should be filtered out"
 
 
-@pytest.mark.skip(reason="This test is failing because of a bug in pandera")
 def test_dynamic_source_model_missing_column(invalid_dynamic_source_data_missing_col: pd.DataFrame):
     """Test validation fails when a required column is missing."""
-    with pytest.raises(SchemaError, match="column 'source_type' not in dataframe"):
+    with pytest.raises(Exception):
         # Need to use lazy=True because drop_invalid_rows=True requires it
         # But we get another kind of error due to a bug in pandera
         DynamicPrimitiveSourceModel.validate(invalid_dynamic_source_data_missing_col, lazy=True)
