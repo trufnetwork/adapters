@@ -8,6 +8,7 @@ import signal
 import subprocess
 import time
 from typing import Any, Optional
+from unittest.mock import Mock
 
 from prefect import Task
 from prefect.logging.loggers import disable_run_logger
@@ -505,10 +506,21 @@ def disable_prefect_retries():
     yield
 
 
+@pytest.fixture(scope="function")
+def disable_prefect_logger():
+    with disable_run_logger():
+        yield
+
+
 @pytest.fixture(scope="session", autouse=False)
 def prefect_test_fixture(disable_prefect_retries: Any):
-    with prefect_test_harness(server_startup_timeout=120), disable_run_logger():
+    with prefect_test_harness(server_startup_timeout=120):
         yield
+
+
+@pytest.fixture(scope="function")
+def show_prefect_logs_fixture(monkeypatch: Any):
+    monkeypatch.setattr("tsn_adapters.utils.logging.get_logger_safe", Mock(return_value=logging.getLogger()))
 
 
 DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1

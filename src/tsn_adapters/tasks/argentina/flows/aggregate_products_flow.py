@@ -6,6 +6,8 @@ iterates through those dates calling the processing logic, and placeholders for
 saving state and reporting.
 """
 
+from typing import cast
+
 from pandera.typing import DataFrame
 from prefect import flow, get_run_logger
 
@@ -24,8 +26,12 @@ from tsn_adapters.tasks.argentina.tasks import (
     save_aggregation_state,  # Import save_aggregation_state for Step 7
 )
 
-# Import the RENAMED helper function directly, not as a task
-from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import process_single_date_products
+# Import the helper function directly, not as a task
+# Also import the helper to create an empty DataFrame
+from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
+    create_empty_aggregated_data,  # Corrected import name
+    process_single_date_products,
+)
 
 
 @flow(name="Aggregate Argentina SEPA Products")
@@ -59,7 +65,6 @@ async def aggregate_argentina_products_flow(
 
     # 2. Load Initial State
     try:
-        # Use deroutine and ignore type check errors for this specific assignment
         aggregated_data, metadata = await load_aggregation_state(
             s3_block=s3_block,
             wait_for=[product_averages_provider],
@@ -70,6 +75,14 @@ async def aggregate_argentina_products_flow(
         logger.info(
             f"Initial state loaded. Last processed: {metadata.last_processed_date}, Total products: {metadata.total_products_count}"
         )
+        # If force_reprocess is True, start with an empty dataframe, ignoring loaded state
+        if force_reprocess:
+            logger.info("`force_reprocess` is True. Resetting aggregated data to empty.")
+            # Cast the result to satisfy the type checker
+            aggregated_data = cast(DataFrame[DynamicPrimitiveSourceModel], create_empty_aggregated_data())
+            # Optionally reset metadata count, though it gets updated in the loop
+            # metadata.total_products_count = 0
+
     except Exception as e:
         logger.error(f"Failed to load initial aggregation state: {e}", exc_info=True)
         raise  # Cannot proceed without initial state
@@ -114,8 +127,8 @@ async def aggregate_argentina_products_flow(
             # Store pre-processing count for comparison
             count_before = len(processed_aggregated_data)
 
-            # Call the RENAMED helper function (NOT as a task)
-            processed_aggregated_data = process_single_date_products(
+            # Call the async process_single_date_products function with await
+            processed_aggregated_data = await process_single_date_products(
                 date_to_process=date_str,
                 current_aggregated_data=processed_aggregated_data,  # Should be correctly typed now
                 product_averages_provider=product_averages_provider,
@@ -141,11 +154,8 @@ async def aggregate_argentina_products_flow(
             )
             logger.debug(f"Saved intermediate state for date {date_str}.")
 
-            # Placeholders removed as logic is implemented above
-
         except Exception as e:
             logger.error(f"Failed to process date {date_str}: {e}", exc_info=True)
-            # Decide on error strategy: continue, break, or raise?
             # For now, log error and continue to next date
             continue
 

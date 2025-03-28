@@ -87,18 +87,23 @@ async def _load_metadata_from_s3(
         raise
 
 
-def _create_empty_aggregated_data() -> pd.DataFrame:
-    """Creates an empty DataFrame matching DynamicPrimitiveSourceModel columns."""
-    columns = list(DynamicPrimitiveSourceModel.to_schema().columns.keys())
+def create_empty_aggregated_data() -> pd.DataFrame:
+    """Creates an empty DataFrame matching DynamicPrimitiveSourceModel columns and dtypes."""
+    logger = get_logger_safe(__name__)
+    schema = DynamicPrimitiveSourceModel.to_schema()
+    columns = list(schema.columns.keys())
+    
+    # Create empty DataFrame with columns derived from the schema
     df = pd.DataFrame(columns=columns)
-    # Attempt setting dtypes on the empty DataFrame based on the model
-    for col, props in DynamicPrimitiveSourceModel.to_schema().columns.items():
-        if col in df.columns and props.dtype:
-            try:
-                df[col] = df[col].astype(props.dtype.type) # type: ignore
-            except Exception:
-                df[col] = df[col].astype(object) # type: ignore
-    return df
+    
+    try:
+        # Validate the empty DataFrame against the schema
+        validated_df = DynamicPrimitiveSourceModel.validate(df, lazy=True)
+        return validated_df
+    except (SchemaError, SchemaDefinitionError) as e:
+        logger.error(f"Failed to validate empty DataFrame schema: {e}")
+        # Return unvalidated dataframe as fallback if validation fails (indicates schema issue)
+        return df
 
 
 @task(name="Load Data from S3")
@@ -138,7 +143,6 @@ async def _load_data_from_s3(
         for col in DynamicPrimitiveSourceModel.to_schema().columns.keys():
              if col not in dtypes: dtypes[col] = object
 
-        # Note: type checker might flag read_csv with buffer due to complex overloads
         loaded_df: pd.DataFrame = pd.read_csv( # type: ignore[call-overload]
             data_buffer,
             compression="gzip",
@@ -156,7 +160,7 @@ async def _load_data_from_s3(
     except ClientError as e:
         if _is_client_error_not_found(e):
             logger.warning("Data file not found. Returning empty DataFrame.")
-            empty_df = _create_empty_aggregated_data()
+            empty_df = create_empty_aggregated_data()
             try:
                 # Must validate empty DF with lazy=True due to model config
                 return DynamicPrimitiveSourceModel.validate(empty_df, lazy=True)
@@ -165,7 +169,7 @@ async def _load_data_from_s3(
                  raise sde # Indicates a code/model definition issue
         else:
             logger.error(f"S3 Error loading data: {e}", exc_info=True)
-            raise
+            raise # Re-raise the original S3 error instead of returning non-existent data
     except (SchemaError, SchemaDefinitionError) as e:
         logger.error(f"Pandera validation failed for data: {e}", exc_info=True)
         raise
@@ -377,7 +381,7 @@ def _generate_argentina_product_stream_id(source_id: str) -> str:
     return generate_stream_id(stream_name)
 
 
-def process_single_date_products(
+async def process_single_date_products(
     date_to_process: DateStr,
     current_aggregated_data: DataFrame[DynamicPrimitiveSourceModel],
     product_averages_provider: ProductAveragesProvider,
@@ -395,18 +399,43 @@ def process_single_date_products(
     """
     logger = get_logger_safe(__name__)
     logger.info(f"Processing products for date: {date_to_process}")
+    
+    # Log initial state for debugging
+    if current_aggregated_data.empty:
+        logger.info("Current aggregated data is empty - starting with fresh state")
+    else:
+        logger.info(f"Current aggregated data: {len(current_aggregated_data)} rows.")
 
     try:
-        # 1. Load daily product data
-        daily_products_df = product_averages_provider.get_product_averages_for(date_to_process)
-        logger.debug(f"Loaded {len(daily_products_df)} product records for {date_to_process}.")
+        # 1. Load daily product data - access to S3 is now properly awaited
+        # Use S3 bucket methods directly to avoid deroutine issues
+        file_key = product_averages_provider.to_product_averages_file_key(date_to_process)
+        full_path = product_averages_provider.get_full_path(file_key)
+        
+        try:
+            logger.debug(f"Reading S3 file: {full_path}")
+            content_in_bytes = await product_averages_provider.s3_block.aread_path(full_path)
+            buffer = io.BytesIO(content_in_bytes)
+            # Explicitly set dtype and NA handling to prevent conversion issues
+            daily_products_df = pd.read_csv(
+                buffer,
+                compression="gzip",
+                dtype={'id_producto': str},
+                keep_default_na=False, # Treat empty strings as strings, not NaN
+            )
+            logger.info(f"Loaded {len(daily_products_df)} product records for {date_to_process}.")
+            
+        except Exception as e:
+            logger.error(f"Error loading product averages for {date_to_process}: {e}", exc_info=True)
+            return current_aggregated_data
+            
     except FileNotFoundError:
         logger.warning(f"Product averages file not found for date: {date_to_process}. Skipping date.")
         return current_aggregated_data
     except Exception as e:
         logger.error(f"Error loading product averages for {date_to_process}: {e}", exc_info=True)
         # Depending on desired robustness, could return current_aggregated_data or re-raise
-        return current_aggregated_data # Fail gracefully for this date
+        return current_aggregated_data
 
     # 2. Get existing product IDs for quick lookup
     # Ensure 'source_id' column exists before accessing
@@ -417,14 +446,14 @@ def process_single_date_products(
         existing_product_ids = set(unique_ids_list)
     else:
         existing_product_ids = set()
-    logger.debug(f"Found {len(existing_product_ids)} existing unique product IDs.")
 
     # --- Pre-filter daily data for valid product IDs ---
     initial_daily_count = len(daily_products_df)
-    # Ensure 'id_producto' is treated as string for filtering empty strings correctly
-    daily_products_df['id_producto'] = daily_products_df['id_producto'].astype(str)
+    
+    # The column is already read as string with dtype=str in read_csv
+    # daily_products_df['id_producto'] = daily_products_df['id_producto'].astype(str)
     valid_daily_df = daily_products_df[
-        daily_products_df['id_producto'].notna() & \
+        # Rely on non-empty string check now that read_csv handles NA correctly
         (daily_products_df['id_producto'] != "") & \
         (daily_products_df['id_producto'] != "None") # Also explicitly filter the string "None"
     ].copy() # Use .copy() to avoid SettingWithCopyWarning
@@ -438,9 +467,7 @@ def process_single_date_products(
     processed_daily_ids: set[str] = set() # Track IDs processed within this daily file
 
     # 3. Iterate through VALID daily products
-    # Cast daily_products_df to pd.DataFrame to help with iterrows typing, though it's often imprecise
-    valid_daily_pd_df = cast(pd.DataFrame, valid_daily_df)
-    for index, product_row in valid_daily_pd_df.iterrows():
+    for index, product_row in valid_daily_df.iterrows(): # {Use valid_daily_df directly}
         # Try dictionary-style access - Should be safer now after filtering
         try:
             product_id = str(product_row['id_producto']) # Already validated as non-empty/non-None string
@@ -475,8 +502,6 @@ def process_single_date_products(
                 # Add to sets to prevent re-adding
                 existing_product_ids.add(product_id)
                 processed_daily_ids.add(product_id)
-                logger.debug(f"Identified new product: ID={product_id}, Date={date_to_process}")
-
             except ValueError as ve:
                  logger.error(f"Error generating stream ID for product {product_id}: {ve}", exc_info=True)
                  continue # Skip this product if ID generation fails
@@ -486,47 +511,115 @@ def process_single_date_products(
 
     # 8. Concatenate new products if any were found
     if new_product_records:
+        logger.info(f"Found {len(new_product_records)} new products to add for date {date_to_process}.")
+        
         # Create DataFrame with explicit types where possible
-        new_products_df = pd.DataFrame(new_product_records).astype({
-            'stream_id': str,
-            'source_id': str,
-            'source_type': str,
-            'productos_descripcion': str,
-            'first_shown_at': str # Pandera handles date check
-        })
-        # Ensure the new DataFrame conforms to the model before concatenating
         try:
-            # Use lazy=True as per model config, and handle potential empty df case
-            validated_new_df = DynamicPrimitiveSourceModel.validate(new_products_df, lazy=True) if not new_products_df.empty else new_products_df
+            # Create new products DataFrame
+            new_products_df = pd.DataFrame(new_product_records)
             
-            # Ensure columns align before concat, crucial if current_aggregated_data is empty
-            if current_aggregated_data.empty:
-                 # Ensure the empty DF has the correct columns before validating
-                 empty_validated_df = _create_empty_aggregated_data()
-                 updated_aggregated_data = pd.concat([empty_validated_df, validated_new_df], ignore_index=True)
-            else:
-                 updated_aggregated_data = pd.concat([current_aggregated_data, validated_new_df], ignore_index=True)
+            # Apply types explicitly to avoid potential issues
+            type_mapping = {
+                'stream_id': 'string',
+                'source_id': 'string',
+                'source_type': 'string',
+                'productos_descripcion': 'string',
+                'first_shown_at': 'string'
+            }
             
-            # Final validation of the combined DataFrame
-            validated_updated_data = DynamicPrimitiveSourceModel.validate(updated_aggregated_data, lazy=True)
+            for col, dtype in type_mapping.items():
+                if col in new_products_df.columns:
+                    try:
+                        new_products_df[col] = new_products_df[col].astype(dtype)
+                    except Exception as e:
+                        logger.warning(f"Failed to set dtype for '{col}' in new products DataFrame: {e}")
             
-            logger.info(f"Added {len(validated_new_df)} new products for date {date_to_process}.")
-            return validated_updated_data
+            # Check and log any missing columns that might be required by the model
+            schema_columns = set(DynamicPrimitiveSourceModel.to_schema().columns.keys())
+            df_columns = set(new_products_df.columns)
+            missing_cols = schema_columns - df_columns
+            if missing_cols:
+                logger.warning(f"New products DataFrame is missing columns required by schema: {missing_cols}")
+                # Add missing columns with None values
+                for col in missing_cols:
+                    new_products_df[col] = None
 
-        except (SchemaError, SchemaDefinitionError) as e:
-             logger.error(f"Pandera validation failed after adding new products for {date_to_process}: {e}", exc_info=True)
-             # Return original data to prevent saving corrupted state
-             return current_aggregated_data
+            # Ensure the new DataFrame conforms to the model before concatenating
+            updated_aggregated_data = None # Initialize here to ensure it's always bound
+            try:
+                # Use lazy=True as per model config, and handle potential empty df case
+                validated_new_df = DynamicPrimitiveSourceModel.validate(new_products_df, lazy=True) if not new_products_df.empty else new_products_df
+                logger.debug("New products DataFrame validated successfully")
+
+                # Ensure columns align before concat, crucial if current_aggregated_data is empty
+                if current_aggregated_data.empty:
+                     logger.info("Current aggregated data is empty, creating properly typed empty DataFrame")
+                     # Create and validate empty frame
+                     try:
+                         empty_validated_df = create_empty_aggregated_data()
+                         logger.debug(f"Empty DataFrame created with dtypes: {empty_validated_df.dtypes}")
+                         
+                         # Validate the empty frame immediately to catch definition errors early
+                         empty_validated_df = DynamicPrimitiveSourceModel.validate(empty_validated_df, lazy=True)
+                         logger.debug("Empty DataFrame validated successfully")
+                         
+                         logger.debug("Concatenating empty DataFrame with new products...")
+                         updated_aggregated_data = pd.concat([empty_validated_df, validated_new_df], ignore_index=True)
+                     except Exception as e:
+                         logger.error(f"Error preparing empty DataFrame for concatenation: {e}", exc_info=True)
+                         return current_aggregated_data
+                else:
+                     logger.debug("Concatenating existing data with new products...")
+                     updated_aggregated_data = pd.concat([current_aggregated_data, validated_new_df], ignore_index=True)
+                
+                logger.debug(f"Concatenated DataFrame has {len(updated_aggregated_data)} rows and columns: {updated_aggregated_data.columns.tolist()}")
+                logger.debug(f"Concatenated DataFrame dtypes: {updated_aggregated_data.dtypes}")
+
+                # Final validation of the combined DataFrame
+                logger.info(f"Performing final validation on {len(updated_aggregated_data)} records for date {date_to_process}...")
+                
+                # Check for any nulls in required columns before validation
+                for col_name, col_props in DynamicPrimitiveSourceModel.to_schema().columns.items():
+                    if not col_props.nullable and col_name in updated_aggregated_data.columns:
+                        null_count = updated_aggregated_data[col_name].isna().sum()
+                        if null_count > 0:
+                            logger.warning(f"Column '{col_name}' is required but has {null_count} null values before validation")
+                
+                # Perform the final validation
+                validated_updated_data = DynamicPrimitiveSourceModel.validate(updated_aggregated_data, lazy=True)
+                logger.info(f"Final validation successful. Total product count: {len(validated_updated_data)}")
+                logger.debug(f"Final validated data dtypes: {validated_updated_data.dtypes}")
+                return validated_updated_data
+            except (SchemaError, SchemaDefinitionError) as final_err:
+                logger.error(f"Final validation failed: {final_err}")
+                # More detailed analysis of the failure
+                schema = DynamicPrimitiveSourceModel.to_schema()
+                for col_name, col_props in schema.columns.items():
+                    if col_name in updated_aggregated_data.columns:
+                        actual_dtype = updated_aggregated_data[col_name].dtype
+                        if col_props.dtype:
+                            expected_dtype = col_props.dtype.type if hasattr(col_props.dtype, 'type') else object
+                            expected_name = expected_dtype.__name__ if hasattr(expected_dtype, '__name__') else str(expected_dtype)
+                            logger.error(f"Column '{col_name}': expected={expected_name}, actual={actual_dtype}")
+                    else:
+                        logger.error(f"Required column '{col_name}' is missing from DataFrame")
+                
+                # Return original data to prevent saving corrupted state
+                return current_aggregated_data
+
         except Exception as e:
-            logger.error(f"Unexpected error during concatenation or validation for {date_to_process}: {e}", exc_info=True)
-            return current_aggregated_data
+             # General exception for anything not caught above
+             logger.error(f"Unexpected error during concatenation or validation for {date_to_process}: {e}", exc_info=True)
+             logger.info(f"Returning previous state with {len(current_aggregated_data)} records due to the error.")
+             return current_aggregated_data
 
     else:
         logger.info(f"No new products found for date {date_to_process}.")
         # Return the original dataframe, ensuring it's validated if it was empty initially
         if current_aggregated_data.empty:
              try:
-                 return DynamicPrimitiveSourceModel.validate(_create_empty_aggregated_data(), lazy=True)
+                 validated_empty = DynamicPrimitiveSourceModel.validate(create_empty_aggregated_data(), lazy=True)
+                 return validated_empty
              except (SchemaError, SchemaDefinitionError) as e:
                  logger.error(f"Pandera validation failed for empty DataFrame: {e}", exc_info=True)
                  raise # Re-raise if validating the empty state fails - indicates model issue
