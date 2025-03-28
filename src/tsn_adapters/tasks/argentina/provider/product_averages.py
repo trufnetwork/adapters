@@ -19,15 +19,19 @@ class ProductAveragesProvider(SepaS3BaseProvider[DataFrame[SepaAvgPriceProductMo
     Note: This provider does not support listing available keys based on date patterns.
     """
 
+    # Define the regex pattern to extract YYYY-MM-DD from the path
+    # Example path: processed/2024-03-15/product_averages.zip
+    DATE_REGEX = re.compile(r"(\d{4}-\d{2}-\d{2})/product_averages\.zip$")
+
     @property
     def _date_pattern(self) -> re.Pattern[str]:
         """
-        Abstract property implementation. Not used by this provider.
-        Raises NotImplementedError if accessed.
+        Returns the compiled regex pattern to find date strings (YYYY-MM-DD)
+        in the S3 keys relative to the provider's prefix.
         """
-        # This provider works with specific dates provided to its methods,
-        # it doesn't list available dates based on a pattern.
-        raise NotImplementedError("ProductAveragesProvider does not support listing keys by date pattern.")
+        # This pattern assumes keys like 'YYYY-MM-DD/product_averages.zip'
+        # relative to the 'processed/' prefix.
+        return self.DATE_REGEX
 
     def __init__(self, s3_block: S3Bucket):
         """
