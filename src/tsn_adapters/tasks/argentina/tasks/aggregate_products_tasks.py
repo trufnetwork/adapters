@@ -43,6 +43,7 @@ def _is_client_error_not_found(exception: ClientError) -> bool:
     return error_code == "NoSuchKey" or status_code == 404
 
 
+@task(name="Load Metadata from S3")
 async def _load_metadata_from_s3(
     s3_block: S3Bucket, metadata_path: str
 ) -> ProductAggregationMetadata:
@@ -100,6 +101,7 @@ def _create_empty_aggregated_data() -> pd.DataFrame:
     return df
 
 
+@task(name="Load Data from S3")
 async def _load_data_from_s3(
     s3_block: S3Bucket, data_path: str
 ) -> DataFrame[DynamicPrimitiveSourceModel]:

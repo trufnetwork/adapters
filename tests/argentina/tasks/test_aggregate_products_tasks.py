@@ -26,9 +26,9 @@ from tsn_adapters.tasks.argentina.provider.product_averages import ProductAverag
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
     _create_empty_aggregated_data,
     _generate_argentina_product_stream_id,
-    _process_single_date_products,
     determine_date_range_to_process,
     load_aggregation_state,
+    process_single_date_products,
     save_aggregation_state,
 )
 from tsn_adapters.tasks.argentina.types import DateStr
@@ -211,7 +211,7 @@ async def test_load_state_both_exist_valid(
     await s3_bucket_block.awrite_path(DATA_PATH, valid_agg_data_csv_gz)
 
     # Act
-    loaded_data, loaded_metadata = await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
+    loaded_data, loaded_metadata = load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
     # Assert
     assert loaded_metadata == valid_metadata
@@ -224,7 +224,7 @@ async def test_load_state_neither_exist(s3_bucket_block: S3Bucket):
     # Arrange: No files uploaded
 
     # Act
-    loaded_data, loaded_metadata = await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
+    loaded_data, loaded_metadata = load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
     # Assert
     assert loaded_metadata == ProductAggregationMetadata()  # Defaults
@@ -244,7 +244,7 @@ async def test_load_state_only_metadata_exists(
     await s3_bucket_block.awrite_path(METADATA_PATH, valid_metadata_json)
 
     # Act
-    loaded_data, loaded_metadata = await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
+    loaded_data, loaded_metadata = load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
     # Assert
     assert loaded_metadata == valid_metadata
@@ -263,7 +263,7 @@ async def test_load_state_only_data_exists(
     await s3_bucket_block.awrite_path(DATA_PATH, valid_agg_data_csv_gz)
 
     # Act
-    loaded_data, loaded_metadata = await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
+    loaded_data, loaded_metadata = load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
     # Assert
     assert loaded_metadata == ProductAggregationMetadata()  # Defaults
@@ -283,7 +283,7 @@ async def test_load_state_invalid_metadata_json(
 
     # Act & Assert
     with pytest.raises(Exception):  # Pydantic's ValidationError inherits from Exception
-        await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
+        load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
 
 @pytest.mark.asyncio
@@ -299,7 +299,7 @@ async def test_load_state_corrupted_metadata_json(
 
     # Act & Assert
     with pytest.raises(json.JSONDecodeError):
-        await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
+        load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
 
 @pytest.mark.asyncio
@@ -315,7 +315,7 @@ async def test_load_state_invalid_agg_data_schema(
 
     # Act & Assert
     with pytest.raises(Exception):
-        await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
+        load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
 
 @pytest.mark.asyncio
@@ -331,7 +331,7 @@ async def test_load_state_corrupted_agg_data(
 
     # Act & Assert
     with pytest.raises(Exception):
-        await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
+        load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
 
 # --- Test Cases for save_aggregation_state ---
@@ -554,7 +554,7 @@ def test_determine_dates_invalid_metadata_date(mock_provider: MagicMock, caplog:
     assert "Invalid last_processed_date 'invalid-date' in metadata" in caplog.text
 
 
-# --- Test Cases for _process_single_date_products ---
+# --- Test Cases for process_single_date_products ---
 
 
 def test_process_only_new_products(
@@ -569,7 +569,7 @@ def test_process_only_new_products(
     initial_data = empty_agg_data
 
     # Act
-    result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+    result_df = process_single_date_products(date_to_process, initial_data, mock_provider)
 
     # Assert
     mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
@@ -599,7 +599,7 @@ def test_process_only_existing_products(
     initial_length = len(initial_data)
 
     # Act
-    result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+    result_df = process_single_date_products(date_to_process, initial_data, mock_provider)
 
     # Assert
     mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
@@ -626,7 +626,7 @@ def test_process_mix_new_and_existing(
     initial_length = len(initial_data)
 
     # Act
-    result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+    result_df = process_single_date_products(date_to_process, initial_data, mock_provider)
 
     # Assert
     mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
@@ -657,7 +657,7 @@ def test_process_duplicates_in_daily_file(
     initial_length = len(initial_data)
 
     # Act
-    result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+    result_df = process_single_date_products(date_to_process, initial_data, mock_provider)
 
     # Assert
     mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
@@ -686,7 +686,7 @@ def test_process_missing_daily_file(
 
     # Act
     with caplog.at_level(logging.WARNING):
-        result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+        result_df = process_single_date_products(date_to_process, initial_data, mock_provider)
 
     # Assert
     mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
@@ -711,7 +711,7 @@ def test_process_invalid_records_in_daily_file(
 
     # Act
     with caplog.at_level(logging.WARNING):
-        result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+        result_df = process_single_date_products(date_to_process, initial_data, mock_provider)
 
     # Assert
     mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
