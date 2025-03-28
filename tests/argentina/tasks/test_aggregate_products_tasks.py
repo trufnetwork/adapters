@@ -8,7 +8,7 @@ import io
 import json
 import logging
 from typing import Any
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from _pytest.logging import LogCaptureFixture
 from moto import mock_aws
@@ -16,6 +16,7 @@ import pandas as pd
 from pandera.typing import DataFrame
 from prefect_aws import S3Bucket
 import pytest
+from botocore.exceptions import ClientError
 
 from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
     DynamicPrimitiveSourceModel,
@@ -24,7 +25,7 @@ from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
-    _generate_argentina_product_stream_id,
+    _generate_argentina_product_stream_id,  # type: ignore
     create_empty_aggregated_data,
     determine_date_range_to_process,
     load_aggregation_state,
@@ -225,7 +226,7 @@ def mock_provider() -> MagicMock:
 
     # Define helper for side effect with type hint
     def _get_path(key: str) -> str:
-        return f"processed/{key}" # Assuming default prefix
+        return f"processed/{key}"  # Assuming default prefix
 
     # Mock the methods using the helper functions
     provider.to_product_averages_file_key = MagicMock(side_effect=_to_key)
@@ -234,6 +235,42 @@ def mock_provider() -> MagicMock:
     # Also mock list_available_keys for other tests using this fixture
     provider.list_available_keys = MagicMock()
     return provider
+
+
+@pytest.fixture
+def setup_mock_aread_path(mock_provider: MagicMock):
+    """Fixture providing a function to configure mock_provider.s3_block.aread_path."""
+
+    def _setup(date_str: DateStr, data: pd.DataFrame | None = None, side_effect: Exception | None = None):
+        """
+        Configures aread_path mock for a specific date, data, or side effect.
+
+        Args:
+            date_str: The date to mock for.
+            data: The DataFrame to return (will be converted to gzipped CSV bytes).
+                  If None and side_effect is None, implies no data found (raises FileNotFoundError).
+            side_effect: An exception instance to raise when aread_path is called.
+        """
+        expected_file_key = mock_provider.to_product_averages_file_key(date_str)
+        expected_full_path = mock_provider.get_full_path(expected_file_key)
+
+        if side_effect:
+            mock_provider.s3_block.aread_path.side_effect = side_effect
+        elif data is not None:
+            mock_provider.s3_block.aread_path.return_value = _df_to_csv_gz_bytes(data)
+            mock_provider.s3_block.aread_path.side_effect = None
+        else:
+            # Simulate S3 'Not Found' using ClientError
+            error_response = {
+                'Error': {'Code': 'NoSuchKey', 'Message': 'The specified key does not exist.'},
+                'ResponseMetadata': {'HTTPStatusCode': 404}
+            }
+            operation_name = 'GetObject'
+            mock_provider.s3_block.aread_path.side_effect = ClientError(error_response, operation_name)
+
+        return expected_full_path
+
+    return _setup
 
 
 # --- Test Cases for load_aggregation_state ---
@@ -394,34 +431,28 @@ async def test_save_state_valid(
         s3_block=s3_bucket_block, aggregated_data=valid_agg_data, metadata=valid_metadata, base_path=BASE_PATH
     )
 
-    # Assert: Read back the files from mock S3 and verify content
-
+    # Assert: Read back files and verify
     # Verify Metadata
     metadata_bytes = await s3_bucket_block.aread_path(METADATA_PATH)
-    loaded_metadata_dict = json.loads(metadata_bytes.decode("utf-8"))
-    reloaded_metadata = ProductAggregationMetadata(**loaded_metadata_dict)
-    assert reloaded_metadata == valid_metadata
+    assert json.loads(metadata_bytes.decode("utf-8")) == valid_metadata.model_dump()
 
     # Verify Data
-    data_bytes_gz = await s3_bucket_block.aread_path(DATA_PATH)
-    # Decompress and read CSV
-    with gzip.open(io.BytesIO(data_bytes_gz), "rt", encoding="utf-8") as f:
-        # Specify dtypes during read based on the model to ensure consistency
-        dtypes = {
-            col: props.dtype.type if props.dtype else object
-            for col, props in DynamicPrimitiveSourceModel.to_schema().columns.items()
-        }
-        for col in DynamicPrimitiveSourceModel.to_schema().columns.keys():
-            if col not in dtypes:
-                dtypes[col] = object
-
-        reloaded_df = pd.read_csv(f, dtype=dtypes, keep_default_na=False, na_values=[""])
-
-    # Validate reloaded data schema
-    reloaded_validated_df = DynamicPrimitiveSourceModel.validate(reloaded_df, lazy=True)
-
-    # Compare DataFrames
-    pd.testing.assert_frame_equal(reloaded_validated_df, valid_agg_data, check_dtype=False)
+    data_bytes = await s3_bucket_block.aread_path(DATA_PATH)
+    data_buffer: io.BytesIO = io.BytesIO(data_bytes)  # Add explicit type hint
+    # Specify dtype explicitly based on model for robustness
+    dtypes = {
+        col: props.dtype.type if props.dtype else object
+        for col, props in DynamicPrimitiveSourceModel.to_schema().columns.items()
+    }
+    loaded_df = pd.read_csv(
+        data_buffer,
+        compression="gzip",
+        dtype=dtypes,
+        keep_default_na=False,  # Match how data is loaded in tasks
+        na_values=[""],  # Standard Python list with empty string
+    )
+    # Use check_dtype=True for stricter comparison, requires careful dtype handling
+    pd.testing.assert_frame_equal(loaded_df, valid_agg_data, check_dtype=True)
 
 
 @pytest.mark.asyncio
@@ -595,13 +626,12 @@ async def test_process_only_new_products(
     mock_provider: MagicMock,
     empty_agg_data: DataFrame[DynamicPrimitiveSourceModel],
     sample_daily_data_1: DataFrame[SepaAvgPriceProductModel],
+    setup_mock_aread_path: Any,
 ):
     """Test processing a date with only new products starting from empty state."""
     # Arrange
     date_to_process = DateStr("2024-03-11")
-    expected_file_key = f"{date_to_process}/product_averages.zip"
-    expected_full_path = f"processed/{expected_file_key}"
-    mock_provider.s3_block.aread_path.return_value = _df_to_csv_gz_bytes(sample_daily_data_1)
+    expected_full_path = setup_mock_aread_path(date_to_process, data=sample_daily_data_1)
     initial_data = empty_agg_data
 
     # Act
@@ -614,7 +644,7 @@ async def test_process_only_new_products(
     assert set(result_df["source_id"].astype(str).tolist()) == {"001", "101", "102"}
 
     # Check details of a new product
-    new_prod_101 = result_df[result_df["source_id"] == "101"].iloc[0] # type: ignore
+    new_prod_101 = result_df[result_df["source_id"] == "101"].iloc[0]  # type: ignore
     # Cast values accessed from the row Series
     assert str(new_prod_101["productos_descripcion"]) == "New Prod 1"
     assert str(new_prod_101["first_shown_at"]) == date_to_process
@@ -627,15 +657,14 @@ async def test_process_only_existing_products(
     mock_provider: MagicMock,
     valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],  # Has 001, 002
     sample_daily_data_1: DataFrame[SepaAvgPriceProductModel],  # Has 001, 101, 102
+    setup_mock_aread_path: Any,
 ):
     """Test processing a date where only previously seen products appear."""
     # Arrange
     date_to_process = DateStr("2024-03-11")
-    expected_file_key = f"{date_to_process}/product_averages.zip"
-    expected_full_path = f"processed/{expected_file_key}"
-    # Modify daily data to only contain existing IDs (001)
-    daily_data_existing_only = sample_daily_data_1[sample_daily_data_1["id_producto"] == "001"].copy()
-    mock_provider.s3_block.aread_path.return_value = _df_to_csv_gz_bytes(daily_data_existing_only)
+    expected_full_path = setup_mock_aread_path(
+        date_to_process, data=sample_daily_data_1[sample_daily_data_1["id_producto"] == "001"].copy()
+    )
     initial_data = valid_agg_data.copy()  # Has 001, 002
     initial_length = len(initial_data)
 
@@ -653,7 +682,9 @@ async def test_process_only_existing_products(
     original_prod_001 = initial_data[initial_data["source_id"] == "001"].iloc[0]
     # Cast values accessed from the row Series
     assert str(existing_prod_001["first_shown_at"]) == str(original_prod_001["first_shown_at"])
-    assert str(existing_prod_001["productos_descripcion"]) == str(original_prod_001["productos_descripcion"])  # Should not update
+    assert str(existing_prod_001["productos_descripcion"]) == str(
+        original_prod_001["productos_descripcion"]
+    )  # Should not update
 
 
 @pytest.mark.asyncio
@@ -661,13 +692,12 @@ async def test_process_mix_new_and_existing(
     mock_provider: MagicMock,
     valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],  # Has 001, 002
     sample_daily_data_1: DataFrame[SepaAvgPriceProductModel],  # Has 001, 101, 102
+    setup_mock_aread_path: Any,
 ):
     """Test processing a date with a mix of new and existing products."""
     # Arrange
     date_to_process = DateStr("2024-03-11")
-    expected_file_key = f"{date_to_process}/product_averages.zip"
-    expected_full_path = f"processed/{expected_file_key}"
-    mock_provider.s3_block.aread_path.return_value = _df_to_csv_gz_bytes(sample_daily_data_1)
+    expected_full_path = setup_mock_aread_path(date_to_process, data=sample_daily_data_1)
     initial_data = valid_agg_data.copy()
     initial_length = len(initial_data)
 
@@ -698,13 +728,12 @@ async def test_process_duplicates_in_daily_file(
     mock_provider: MagicMock,
     valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],  # Has 001, 002
     sample_daily_data_2: DataFrame[SepaAvgPriceProductModel],  # Has 102 (dup), 103 (dup), 104
+    setup_mock_aread_path: Any,
 ):
     """Test processing a daily file containing duplicate product IDs."""
     # Arrange
     date_to_process = DateStr("2024-03-12")
-    expected_file_key = f"{date_to_process}/product_averages.zip"
-    expected_full_path = f"processed/{expected_file_key}"
-    mock_provider.s3_block.aread_path.return_value = _df_to_csv_gz_bytes(sample_daily_data_2)
+    expected_full_path = setup_mock_aread_path(date_to_process, data=sample_daily_data_2)
     initial_data = valid_agg_data.copy()
     initial_length = len(initial_data)
 
@@ -731,14 +760,12 @@ async def test_process_missing_daily_file(
     mock_provider: MagicMock,
     valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
     caplog: LogCaptureFixture,
+    setup_mock_aread_path: Any,
 ):
     """Test processing when the daily product file is missing."""
     # Arrange
     date_to_process = DateStr("2024-03-15")
-    expected_file_key = f"{date_to_process}/product_averages.zip"
-    expected_full_path = f"processed/{expected_file_key}"
-    # Mock S3 access to raise an error similar to what S3 would raise for not found
-    mock_provider.s3_block.aread_path.side_effect = FileNotFoundError("Simulated S3 file not found")
+    expected_full_path = setup_mock_aread_path(date_to_process, data=None)
     initial_data = valid_agg_data.copy()
     initial_length = len(initial_data)
 
@@ -750,9 +777,12 @@ async def test_process_missing_daily_file(
     mock_provider.s3_block.aread_path.assert_awaited_once_with(expected_full_path)
     assert len(result_df) == initial_length  # Should return original data
     pd.testing.assert_frame_equal(result_df, initial_data)
-    # Check for the specific error log message
-    assert f"Error loading product averages for {date_to_process}" in caplog.text
-    assert "Simulated S3 file not found" in caplog.text
+    # Check for the WARNING message when ClientError(NoSuchKey/404) is caught
+    assert f"Product averages file not found for date: {date_to_process}. Skipping date." in caplog.text
+    # Ensure the ERROR message is NOT present for this specific case
+    assert f"Unexpected error loading daily data for {date_to_process}" not in caplog.text
+    # Ensure the subsequent WARNING about returning current data is present
+    assert f"Failed to load or parse daily data for {date_to_process}. Returning current aggregated data." in caplog.text
 
 
 @pytest.mark.asyncio
@@ -761,14 +791,12 @@ async def test_process_invalid_records_in_daily_file(
     valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
     sample_daily_data_invalid: pd.DataFrame,  # Raw DF with invalid records
     caplog: LogCaptureFixture,
+    setup_mock_aread_path: Any,
 ):
     """Test processing a daily file with invalid product records (missing/empty IDs)."""
     # Arrange
     date_to_process = DateStr("2024-03-13")
-    expected_file_key = f"{date_to_process}/product_averages.zip"
-    expected_full_path = f"processed/{expected_file_key}"
-    # Return the raw DataFrame bytes directly to test the function's internal handling
-    mock_provider.s3_block.aread_path.return_value = _df_to_csv_gz_bytes(sample_daily_data_invalid)
+    expected_full_path = setup_mock_aread_path(date_to_process, data=sample_daily_data_invalid)
     initial_data = valid_agg_data.copy()
     initial_length = len(initial_data)
 
@@ -786,7 +814,7 @@ async def test_process_invalid_records_in_daily_file(
     # Check logs for warnings about filtered records (new behavior after refactor)
     assert f"Filtered out 2 records with invalid 'id_producto' for date {date_to_process}" in caplog.text
     # Ensure the old message is *not* present
-    assert "Skipping record with" not in caplog.text # This might still appear if description is missing
+    assert "Skipping record with" not in caplog.text  # This might still appear if description is missing
 
     # Check details of successfully added product
     new_prod_105 = result_df[result_df["source_id"] == "105"].iloc[0]
