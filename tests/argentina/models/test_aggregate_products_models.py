@@ -140,3 +140,41 @@ def test_dynamic_source_model_coercion(valid_dynamic_source_data: pd.DataFrame):
     validated_df = DynamicPrimitiveSourceModel.validate(df_mixed_types, lazy=True)
     assert validated_df["source_id"].dtype == "object"  # Pandas uses 'object' for strings
     assert validated_df["source_id"].tolist() == ["123", "456"]
+
+
+def test_dynamic_source_model_empty_dataframe():
+    """Test validation with an empty DataFrame."""
+    empty_df = pd.DataFrame(columns=list(DynamicPrimitiveSourceModel.to_schema().columns.keys()))
+    try:
+        validated_df = DynamicPrimitiveSourceModel.validate(empty_df, lazy=True)
+        assert validated_df.empty, "Validation of empty DataFrame should result in an empty DataFrame"
+        assert list(validated_df.columns) == list(DynamicPrimitiveSourceModel.to_schema().columns.keys())
+    except SchemaError as e:
+        pytest.fail(f"Validation of empty DataFrame failed unexpectedly: {e}")
+
+
+def test_dynamic_source_model_with_nulls_filtered(valid_dynamic_source_data: pd.DataFrame):
+    """Test that rows with nulls in non-nullable columns are filtered out due to strict='filter'."""
+    df_with_nulls = valid_dynamic_source_data.copy()
+    # Introduce None/NaN into required columns (non-nullable)
+    df_with_nulls.loc[0, "stream_id"] = None  # stream_id is non-nullable
+    df_with_nulls.loc[1, "source_id"] = pd.NA  # source_id is non-nullable
+
+    # Add a fully valid row to ensure the filtering happens per-row
+    valid_row = pd.DataFrame(
+        {
+            "stream_id": ["arg_sepa_prod_789"],
+            "source_id": ["789"],
+            "source_type": ["argentina_sepa_product"],
+            "productos_descripcion": ["Product C"],
+            "first_shown_at": ["2023-11-03"],
+        }
+    )
+    df_to_validate = pd.concat([df_with_nulls, valid_row], ignore_index=True)
+
+    validated_df = DynamicPrimitiveSourceModel.validate(df_to_validate, lazy=True)
+
+    # Expected: Only the fully valid row should remain
+    assert len(validated_df) == 1
+    assert validated_df.iloc[0]["source_id"] == "789"
+    assert "stream_id" in validated_df.columns # Ensure column still exists

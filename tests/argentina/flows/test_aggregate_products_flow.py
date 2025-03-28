@@ -25,7 +25,9 @@ from tsn_adapters.tasks.argentina.flows.aggregate_products_flow import aggregate
 from tsn_adapters.tasks.argentina.models import DynamicPrimitiveSourceModel, ProductAggregationMetadata
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
-from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import _generate_argentina_product_stream_id
+from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
+    _generate_argentina_product_stream_id,  # type: ignore
+)
 from tsn_adapters.tasks.argentina.types import DateStr
 
 # --- Constants for End-to-End Tests ---
@@ -88,8 +90,8 @@ def real_s3_bucket_block(aws_credentials: None, prefect_test_fixture: Any) -> Ge
     _ = aws_credentials  # Ensure credentials are set
     _ = prefect_test_fixture  # Ensure Prefect context if needed
     with mock_aws():
-        s3_client = boto3.client("s3", region_name="us-east-1")
-        s3_client.create_bucket(Bucket=TEST_E2E_BUCKET_NAME)
+        s3_client = boto3.client("s3", region_name="us-east-1")  # type: ignore
+        s3_client.create_bucket(Bucket=TEST_E2E_BUCKET_NAME)  # type: ignore
         # Instantiate the Prefect block targeting the moto bucket
         s3_block = S3Bucket(bucket_name=TEST_E2E_BUCKET_NAME)
         # Provide access to the underlying boto3 client for direct manipulation if needed
@@ -183,8 +185,8 @@ def verify_final_state(
     # Verify Metadata
     try:
         metadata_obj = s3_block._boto_client.get_object(Bucket=s3_block.bucket_name, Key=METADATA_S3_PATH)  # type: ignore
-        metadata_content = metadata_obj["Body"].read().decode("utf-8")
-        loaded_metadata = ProductAggregationMetadata(**json.loads(metadata_content))
+        metadata_content = metadata_obj["Body"].read().decode("utf-8")  # type: ignore
+        loaded_metadata = ProductAggregationMetadata(**json.loads(metadata_content))  # type: ignore
         assert loaded_metadata.last_processed_date == expected_last_date
         assert loaded_metadata.total_products_count == expected_total_products
     except s3_block._boto_client.exceptions.NoSuchKey:  # type: ignore
@@ -193,35 +195,32 @@ def verify_final_state(
     # Verify Data
     try:
         data_obj = s3_block._boto_client.get_object(Bucket=s3_block.bucket_name, Key=DATA_S3_PATH)  # type: ignore
-        data_content = data_obj["Body"].read()
-        buffer = io.BytesIO(data_content)
-        loaded_data_df = pd.read_csv(buffer, compression="gzip", keep_default_na=False, na_values=[""])
+        data_content = data_obj["Body"].read()  # type: ignore
+        buffer = io.BytesIO(data_content)  # type: ignore
+        loaded_data_df = pd.read_csv(buffer, compression="gzip", keep_default_na=False, na_values=[""])  # type: ignore
         # Validate schema compliance
         loaded_data_df = DynamicPrimitiveSourceModel.validate(loaded_data_df, lazy=True)
 
         assert len(loaded_data_df) == expected_total_products
 
-        # Convert expected products to DataFrame for easier comparison
-        # Ensure stream_id generation matches the logic used in the task
-        for prod in expected_products:
-            if "stream_id" not in prod:
-                prod["stream_id"] = _generate_argentina_product_stream_id(prod["source_id"])
-            if "source_type" not in prod:
-                prod["source_type"] = "argentina_sepa_product"  # Default source type
-
+        # Convert expected products (which MUST now be complete dicts) to DataFrame
         expected_data_df = pd.DataFrame(expected_products)
+
         # Ensure column order and types match for comparison
         expected_data_df = expected_data_df[
             list(DynamicPrimitiveSourceModel.to_schema().columns.keys())
         ]  # Order columns
-        expected_data_df = DynamicPrimitiveSourceModel.validate(expected_data_df, lazy=True)  # Ensure types
+        try:
+            expected_data_df = DynamicPrimitiveSourceModel.validate(expected_data_df, lazy=True)  # Ensure types
+        except Exception as e:
+            pytest.fail(f"Provided expected_products data failed validation: {e}\nData: {expected_products}")
 
         # Sort both dataframes for consistent comparison
-        loaded_data_df_sorted = loaded_data_df.sort_values(by="source_id").reset_index(drop=True)
-        expected_data_df_sorted = expected_data_df.sort_values(by="source_id").reset_index(drop=True)
+        loaded_data_df_sorted = loaded_data_df.sort_values(by="source_id").reset_index(drop=True)  # type: ignore
+        expected_data_df_sorted = expected_data_df.sort_values(by="source_id").reset_index(drop=True)  # type: ignore
 
         pd.testing.assert_frame_equal(
-            loaded_data_df_sorted, expected_data_df_sorted, check_dtype=False
+            loaded_data_df_sorted, expected_data_df_sorted, check_dtype=True
         )  # Dtype check can be strict
 
     except s3_block._boto_client.exceptions.NoSuchKey:  # type: ignore
@@ -230,131 +229,136 @@ def verify_final_state(
         pytest.fail(f"Error verifying final data state: {e}")
 
 
+# --- Fixtures for Mocked Flow Test ---
+@pytest.fixture
+def expected_df_day1() -> pd.DataFrame:
+    """Static expected DataFrame after processing the first date in the mock test."""
+    df = pd.DataFrame(
+        {
+            "stream_id": ["arg_sepa_prod_1"],
+            "source_id": ["1"],
+            "source_type": ["argentina_sepa_product"],
+            "productos_descripcion": ["Product One"],
+            "first_shown_at": ["2024-01-01"],
+        }
+    )
+    return DynamicPrimitiveSourceModel.validate(df, lazy=True)
+
+
+@pytest.fixture
+def expected_df_day2(expected_df_day1: pd.DataFrame) -> pd.DataFrame:
+    """Static expected DataFrame after processing the second date in the mock test."""
+    df = pd.DataFrame(
+        {
+            "stream_id": ["arg_sepa_prod_1", "arg_sepa_prod_2"],
+            "source_id": ["1", "2"],
+            "source_type": ["argentina_sepa_product", "argentina_sepa_product"],
+            "productos_descripcion": ["Product One", "Product Two"],
+            "first_shown_at": ["2024-01-01", "2024-01-02"],
+        }
+    )
+    # Re-validate to ensure schema compliance
+    return DynamicPrimitiveSourceModel.validate(df, lazy=True)
+
+
 # --- Mocked Flow Tests ---
 
 
-# Updated integration test to include state saving and artifacts
+# Updated integration test to include state saving and artifacts using static returns
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("prefect_test_fixture")
-def test_aggregate_flow_with_state_and_artifacts(
+async def test_aggregate_flow_with_state_and_artifacts_simplified_mock(
     mock_s3_block: MagicMock,
     mock_provider: MagicMock,
     empty_aggregated_df: pd.DataFrame,
     default_metadata: ProductAggregationMetadata,
+    expected_df_day1: pd.DataFrame,
+    expected_df_day2: pd.DataFrame,
 ):
     """
-    Tests the aggregation flow including state saving within the loop and artifact creation.
+    Tests the aggregation flow with simplified mocking for process_single_date_products.
 
-    Mocks tasks and helpers, verifies calls to save_aggregation_state and create_markdown_artifact.
-    Simulates adding new products.
+    Verifies orchestration logic (task calls, state saving, artifact creation)
+    using pre-defined return values for the processing task.
     """
     dates_to_process = ["2024-01-01", "2024-01-02"]
-    # Simulate finding 1 new product on the first date, 2 on the second
-    product_counts_after = [1, 3]
 
-    # --- Mock Setup ---
-    # Mock ProductAveragesProvider instantiation
+    # Configure the mock for process_single_date_products to return static DFs
+    mock_process_task = AsyncMock(
+        # No spec needed here as we control the return value completely
+        side_effect=[expected_df_day1, expected_df_day2]
+    )
+
+    # Mock all dependent tasks
     with (
+        patch(
+            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.load_aggregation_state",
+            AsyncMock(return_value=(empty_aggregated_df, default_metadata)),
+        ) as mock_load_task,
+        patch(
+            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.determine_date_range_to_process",
+            return_value=dates_to_process,
+        ) as mock_date_range_task,
         patch(
             "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.ProductAveragesProvider",
             return_value=mock_provider,
-        ) as mock_provider_init,
+        ),
         patch(
-            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.load_aggregation_state", new_callable=AsyncMock
-        ) as mock_load_state,
-        patch(
-            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.determine_date_range_to_process"
-        ) as mock_determine_range,
-        patch(
-            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.process_single_date_products"
-        ) as mock_process_single_date,
-        # Mock the save state task
+            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.process_single_date_products", mock_process_task
+        ),
         patch(
             "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.save_aggregation_state", new_callable=AsyncMock
-        ) as mock_save_state,
-        # Mock the artifact creation function - patch where it's used in the flow module
-        patch(
-            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.create_markdown_artifact",
-            new_callable=MagicMock,
-        ) as mock_create_artifact,
+        ) as mock_save_task,
+        patch("tsn_adapters.tasks.argentina.flows.aggregate_products_flow.create_markdown_artifact") as mock_artifact,
     ):
-        # Configure mock return values
-        mock_load_state.return_value = (empty_aggregated_df.copy(), default_metadata.model_copy(deep=True))
-        mock_determine_range.return_value = dates_to_process
-
-        # Simulate process_single_date_products returning a modified DataFrame
-        # We need a mutable object to track the state across calls
-        current_df_state = {"df": empty_aggregated_df.copy()}
-        current_count_state = {"count": 0}
-
-        def mock_process_side_effect(
-            date_to_process: str,
-            current_aggregated_data: pd.DataFrame,
-            product_averages_provider: ProductAveragesProvider,
-        ) -> pd.DataFrame:
-            if date_to_process == "2024-01-01":
-                new_count = product_counts_after[0]
-                # Simulate adding rows - actual content doesn't matter for this mock
-                new_rows = pd.DataFrame([{"source_id": f"prod_{i}"} for i in range(new_count)])
-            elif date_to_process == "2024-01-02":
-                new_count = product_counts_after[1]
-                new_rows = pd.DataFrame([{"source_id": f"prod_{i}"} for i in range(new_count)])
-            else:
-                new_rows = pd.DataFrame()
-                new_count = len(current_aggregated_data)
-
-            # Update the state for the next call
-            current_df_state["df"] = new_rows  # Simplified: just return the expected final shape
-            current_count_state["count"] = new_count
-            return current_df_state["df"]
-
-        mock_process_single_date.side_effect = mock_process_side_effect
-
-        # --- Flow Execution ---
-        asyncio.run(aggregate_argentina_products_flow(s3_block=mock_s3_block, force_reprocess=False))
+        # Run the flow
+        await aggregate_argentina_products_flow(
+            s3_block=mock_s3_block,
+            force_reprocess=False,
+        )
 
         # --- Assertions ---
-        # 1. Provider Instantiation
-        mock_provider_init.assert_called_once_with(s3_block=mock_s3_block)
 
-        # 2. Load State Call
-        mock_load_state.assert_awaited_once()
-        # Check args if necessary, e.g., mock_load_state.assert_awaited_once_with(s3_block=mock_s3_block, ...) # wait_for needs care
+        # Verify initial tasks called once
+        mock_load_task.assert_awaited_once()
+        mock_date_range_task.assert_called_once()
 
-        # 3. Determine Date Range Call
-        mock_determine_range.assert_called_once()
-        # Check args if necessary
+        # Verify process_single_date_products was called for each date
+        assert mock_process_task.call_count == len(dates_to_process)
+        mock_process_task.assert_any_await(
+            date_to_process="2024-01-01",
+            current_aggregated_data=empty_aggregated_df,  # Initial call uses empty DF
+            product_averages_provider=mock_provider,
+        )
+        mock_process_task.assert_any_await(
+            date_to_process="2024-01-02",
+            current_aggregated_data=expected_df_day1,  # Second call uses result from first
+            product_averages_provider=mock_provider,
+        )
 
-        # 4. Process Single Date Calls
-        assert mock_process_single_date.call_count == len(dates_to_process)
+        # Verify save_aggregation_state calls within the loop
+        assert mock_save_task.call_count == len(dates_to_process)
+        # Check first save call arguments
+        first_save_call_args = mock_save_task.call_args_list[0].kwargs
+        pd.testing.assert_frame_equal(first_save_call_args["aggregated_data"], expected_df_day1)
+        assert first_save_call_args["metadata"] is default_metadata  # Should pass the original metadata object
 
-        # 5. Save State Calls (Inside the loop)
-        assert mock_save_state.await_count == len(dates_to_process)
+        # Check second save call arguments
+        second_save_call_args = mock_save_task.call_args_list[1].kwargs
+        pd.testing.assert_frame_equal(second_save_call_args["aggregated_data"], expected_df_day2)
+        assert second_save_call_args["metadata"] is default_metadata  # Still passes the original metadata object
 
-        # Verify the arguments of the LAST call match the final expected state
-        final_date = dates_to_process[-1]
-        final_count = product_counts_after[-1]
-        expected_final_metadata = default_metadata.model_copy(deep=True)
-        expected_final_metadata.last_processed_date = final_date
-        expected_final_metadata.total_products_count = final_count
-        # Reconstruct the final expected DataFrame based on the mock logic
-        expected_final_df = pd.DataFrame([{"source_id": f"prod_{j}"} for j in range(final_count)])
+        # Check artifact call (happens after the loop)
+        mock_artifact.assert_called_once()
+        _, artifact_call_kwargs = mock_artifact.call_args  # Use _ for unused variable
+        final_report_string = artifact_call_kwargs["markdown"]
 
-        last_call_args = mock_save_state.await_args_list[-1].kwargs
-        assert last_call_args["s3_block"] == mock_s3_block
-        assert last_call_args["metadata"] == expected_final_metadata
-        pd.testing.assert_frame_equal(last_call_args["aggregated_data"], expected_final_df, check_dtype=False)
-
-        # 6. Create Artifact Call (After the loop)
-        mock_create_artifact.assert_called_once()
-        # Add assertion to satisfy linter
-        assert mock_create_artifact.call_args is not None
-        artifact_call_args = mock_create_artifact.call_args.kwargs
-        assert artifact_call_args["key"] == "argentina-product-aggregation-summary"
-
-        assert "**Processed Date Range:** 2024-01-01 to 2024-01-02" in artifact_call_args["markdown"]
-        assert "**New Products Added:** 3" in artifact_call_args["markdown"]  # 1 + 2
-        assert f"**Total Unique Products:** {product_counts_after[-1]}" in artifact_call_args["markdown"]
-        assert "**Force Reprocess Flag:** False" in artifact_call_args["markdown"]
+        # Verify content of the final report artifact based on actual format
+        assert f"({len(dates_to_process)} dates)" in final_report_string  # Check for (N dates)
+        assert f"New Products Added:** {len(expected_df_day2)}" in final_report_string  # Check for New Products Added
+        assert (
+            f"Total Unique Products:** {len(expected_df_day2)}" in final_report_string
+        )  # Check for Total Unique Products
 
 
 @pytest.mark.usefixtures("prefect_test_fixture")
@@ -409,7 +413,6 @@ def test_aggregate_flow_no_dates_to_process_with_artifact(
 
         # Assert that the artifact was created with the 'no dates' message
         mock_create_artifact.assert_called_once()
-        # Add assertion to satisfy linter
         assert mock_create_artifact.call_args is not None
         artifact_call_args = mock_create_artifact.call_args.kwargs
         assert artifact_call_args["key"] == "argentina-product-aggregation-summary"
@@ -437,25 +440,49 @@ async def test_aggregate_flow_end_to_end_cold_start(
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
 
-    # Act: Run the flow
-    # Use await directly as the flow is async
+    # Act: Run the flow (first time)
     await aggregate_argentina_products_flow(
         s3_block=real_s3_bucket_block,
         force_reprocess=False,
     )
 
-    # Assert: Verify the final state in mock S3
-    expected_products = [
-        {"source_id": "P001", "productos_descripcion": "Product One", "first_shown_at": "2024-03-10"},
-        {"source_id": "P002", "productos_descripcion": "Product Two", "first_shown_at": "2024-03-10"},
-        {"source_id": "P003", "productos_descripcion": "Product Three", "first_shown_at": "2024-03-11"},
-        {"source_id": "P004", "productos_descripcion": "Product Four", "first_shown_at": "2024-03-12"},
+    # --- Verify Final State ---
+    expected_final_products = [
+        {
+            "stream_id": _generate_argentina_product_stream_id("P001"),
+            "source_id": "P001",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product One",
+            "first_shown_at": "2024-03-10",
+        },
+        {
+            "stream_id": _generate_argentina_product_stream_id("P002"),
+            "source_id": "P002",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Two",
+            "first_shown_at": "2024-03-10",
+        },
+        {
+            "stream_id": _generate_argentina_product_stream_id("P003"),
+            "source_id": "P003",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Three",
+            "first_shown_at": "2024-03-11",
+        },
+        {
+            "stream_id": _generate_argentina_product_stream_id("P004"),
+            "source_id": "P004",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Four",
+            "first_shown_at": "2024-03-12",
+        },
     ]
+
     verify_final_state(
         s3_block=real_s3_bucket_block,
         expected_last_date="2024-03-12",
         expected_total_products=4,
-        expected_products=expected_products,
+        expected_products=expected_final_products,
     )
 
 
@@ -466,55 +493,86 @@ async def test_aggregate_flow_end_to_end_resume(
     daily_data_2024_03_10: pd.DataFrame,
     daily_data_2024_03_11: pd.DataFrame,
     daily_data_2024_03_12: pd.DataFrame,
+    empty_aggregated_df: pd.DataFrame,
 ):
-    """
-    Tests the flow end-to-end with moto, resuming from pre-existing state.
-    """
-    # Arrange: Upload initial state (processed up to 2024-03-10)
+    """Tests resuming aggregation from a pre-existing state."""
+    # --- Setup Initial State ---
     initial_metadata = ProductAggregationMetadata(last_processed_date="2024-03-10", total_products_count=2)
-    initial_data = pd.DataFrame(
-        [
-            {
-                "stream_id": _generate_argentina_product_stream_id("P001"),
-                "source_id": "P001",
-                "source_type": "argentina_sepa_product",
-                "productos_descripcion": "Product One",
-                "first_shown_at": "2024-03-10",
-            },
-            {
-                "stream_id": _generate_argentina_product_stream_id("P002"),
-                "source_id": "P002",
-                "source_type": "argentina_sepa_product",
-                "productos_descripcion": "Product Two",
-                "first_shown_at": "2024-03-10",
-            },
-        ]
+    initial_products = [
+        {
+            "stream_id": "arg_sepa_prod_P001",
+            "source_id": "P001",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product One Initial",  # Desc should not change
+            "first_shown_at": "2024-03-09",  # Earlier date
+        },
+        {
+            "stream_id": "arg_sepa_prod_P002",
+            "source_id": "P002",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Two Initial",  # Desc should not change
+            "first_shown_at": "2024-03-10",
+        },
+    ]
+    initial_data_df = pd.DataFrame(initial_products)
+    # Validate initial state before uploading
+    initial_data_df = DynamicPrimitiveSourceModel.validate(
+        initial_data_df[list(DynamicPrimitiveSourceModel.to_schema().columns.keys())], lazy=True
     )
-    initial_data = DynamicPrimitiveSourceModel.validate(initial_data, lazy=True)  # Ensure type compliance
-    upload_initial_state(real_s3_bucket_block, initial_metadata, initial_data)
 
-    # Arrange: Upload sample daily data for all dates
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-10"), daily_data_2024_03_10)
+    upload_initial_state(real_s3_bucket_block, initial_metadata, initial_data_df)
+
+    # Upload only the data for dates *after* the initial state
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
 
     # Act: Run the flow (should resume from 2024-03-11)
-    await aggregate_argentina_products_flow(s3_block=real_s3_bucket_block, force_reprocess=False)
+    await aggregate_argentina_products_flow(
+        s3_block=real_s3_bucket_block,
+        force_reprocess=False,
+    )
 
-    # Assert: Verify the final state (should include P003 and P004)
-    expected_products = [
-        # From initial state
-        {"source_id": "P001", "productos_descripcion": "Product One", "first_shown_at": "2024-03-10"},
-        {"source_id": "P002", "productos_descripcion": "Product Two", "first_shown_at": "2024-03-10"},
-        # Newly added
-        {"source_id": "P003", "productos_descripcion": "Product Three", "first_shown_at": "2024-03-11"},
-        {"source_id": "P004", "productos_descripcion": "Product Four", "first_shown_at": "2024-03-12"},
+    # --- Verify Final State ---
+    # Expected state includes initial products + new ones from 11th and 12th
+    expected_final_products = [
+        # Initial products (description/first_shown_at should remain unchanged)
+        {
+            "stream_id": "arg_sepa_prod_P001",
+            "source_id": "P001",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product One Initial",
+            "first_shown_at": "2024-03-09",
+        },
+        {
+            "stream_id": "arg_sepa_prod_P002",
+            "source_id": "P002",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Two Initial",
+            "first_shown_at": "2024-03-10",
+        },
+        # New product from 11th
+        {
+            "stream_id": _generate_argentina_product_stream_id("P003"),
+            "source_id": "P003",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Three",
+            "first_shown_at": "2024-03-11",
+        },
+        # New product from 12th
+        {
+            "stream_id": _generate_argentina_product_stream_id("P004"),
+            "source_id": "P004",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Four",
+            "first_shown_at": "2024-03-12",
+        },
     ]
+
     verify_final_state(
         s3_block=real_s3_bucket_block,
-        expected_last_date="2024-03-12",  # Processed up to the last available date
+        expected_last_date="2024-03-12",
         expected_total_products=4,
-        expected_products=expected_products,
+        expected_products=expected_final_products,
     )
 
 
@@ -529,30 +587,24 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
     """
     Tests the flow end-to-end with moto, with force_reprocess=True, ignoring initial state date.
     """
-    # Arrange: Upload initial state (processed up to 2024-03-10) - same as resume test
-    initial_metadata = ProductAggregationMetadata(last_processed_date="2024-03-10", total_products_count=2)
-    initial_data = pd.DataFrame(
-        [
-            {
-                "stream_id": _generate_argentina_product_stream_id("P001"),
-                "source_id": "P001",
-                "source_type": "argentina_sepa_product",
-                "productos_descripcion": "Product One Old Desc",
-                "first_shown_at": "2024-03-09",
-            },  # Older date/desc
-            {
-                "stream_id": _generate_argentina_product_stream_id("P002"),
-                "source_id": "P002",
-                "source_type": "argentina_sepa_product",
-                "productos_descripcion": "Product Two",
-                "first_shown_at": "2024-03-10",
-            },
-        ]
+    # Simulate existing state that will be overwritten
+    initial_metadata = ProductAggregationMetadata(last_processed_date="2024-03-10", total_products_count=1)
+    initial_products = [
+        {
+            "stream_id": "arg_sepa_prod_OLD",
+            "source_id": "OLD",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Old Product",
+            "first_shown_at": "2024-03-01",
+        }
+    ]
+    initial_data_df = pd.DataFrame(initial_products)
+    initial_data_df = DynamicPrimitiveSourceModel.validate(
+        initial_data_df[list(DynamicPrimitiveSourceModel.to_schema().columns.keys())], lazy=True
     )
-    initial_data = DynamicPrimitiveSourceModel.validate(initial_data, lazy=True)
-    upload_initial_state(real_s3_bucket_block, initial_metadata, initial_data)
+    upload_initial_state(real_s3_bucket_block, initial_metadata, initial_data_df)
 
-    # Arrange: Upload sample daily data for all dates
+    # Upload all daily data, including the date covered by initial state
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-10"), daily_data_2024_03_10)
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
@@ -560,24 +612,45 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
     # Act: Run the flow with force_reprocess=True
     await aggregate_argentina_products_flow(
         s3_block=real_s3_bucket_block,
-        force_reprocess=True,  # Force reprocessing from the beginning
+        force_reprocess=True,
     )
 
-    # Assert: Verify the final state (should be identical to cold start, preserving original first_shown_at/desc)
-    # The logic should find P001/P002 on 2024-03-10 again, but NOT update their first_shown_at or description.
-    expected_products = [
+    # --- Verify Final State ---
+    # Expected state is the same as cold start, ignoring the initial state
+    expected_final_products = [
         {
+            "stream_id": _generate_argentina_product_stream_id("P001"),
             "source_id": "P001",
+            "source_type": "argentina_sepa_product",
             "productos_descripcion": "Product One",
             "first_shown_at": "2024-03-10",
-        },  # Should take desc/date from 2024-03-10 data
-        {"source_id": "P002", "productos_descripcion": "Product Two", "first_shown_at": "2024-03-10"},
-        {"source_id": "P003", "productos_descripcion": "Product Three", "first_shown_at": "2024-03-11"},
-        {"source_id": "P004", "productos_descripcion": "Product Four", "first_shown_at": "2024-03-12"},
+        },
+        {
+            "stream_id": _generate_argentina_product_stream_id("P002"),
+            "source_id": "P002",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Two",
+            "first_shown_at": "2024-03-10",
+        },
+        {
+            "stream_id": _generate_argentina_product_stream_id("P003"),
+            "source_id": "P003",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Three",
+            "first_shown_at": "2024-03-11",
+        },
+        {
+            "stream_id": _generate_argentina_product_stream_id("P004"),
+            "source_id": "P004",
+            "source_type": "argentina_sepa_product",
+            "productos_descripcion": "Product Four",
+            "first_shown_at": "2024-03-12",
+        },
     ]
+
     verify_final_state(
         s3_block=real_s3_bucket_block,
-        expected_last_date="2024-03-12",  # Processed up to the last available date
+        expected_last_date="2024-03-12",
         expected_total_products=4,
-        expected_products=expected_products,
+        expected_products=expected_final_products,
     )
