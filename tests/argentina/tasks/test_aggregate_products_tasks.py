@@ -14,7 +14,6 @@ from _pytest.logging import LogCaptureFixture
 from moto import mock_aws
 import pandas as pd
 from pandera.typing import DataFrame
-from prefect.logging.loggers import disable_run_logger
 from prefect_aws import S3Bucket
 import pytest
 
@@ -22,8 +21,12 @@ from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
     DynamicPrimitiveSourceModel,
     ProductAggregationMetadata,
 )
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
+    _create_empty_aggregated_data,
+    _generate_argentina_product_stream_id,
+    _process_single_date_products,
     determine_date_range_to_process,
     load_aggregation_state,
     save_aggregation_state,
@@ -138,6 +141,57 @@ def corrupted_agg_data_csv_gz() -> bytes:
     with gzip.GzipFile(fileobj=buffer, mode="wb") as gz_file:
         gz_file.write(b"this is not a csv file")
     return buffer.getvalue()
+
+
+@pytest.fixture
+def empty_agg_data() -> DataFrame[DynamicPrimitiveSourceModel]:
+    """Empty but validated aggregated data DataFrame."""
+    df = _create_empty_aggregated_data()
+    return DynamicPrimitiveSourceModel.validate(df, lazy=True)
+
+
+@pytest.fixture
+def sample_daily_data_1() -> DataFrame[SepaAvgPriceProductModel]:
+    """Sample daily product data for testing (date 1)."""
+    df = pd.DataFrame(
+        {
+            "id_producto": ["001", "101", "102"],
+            "productos_descripcion": ["Existing Prod 1 Updated Desc", "New Prod 1", "New Prod 2"],
+            "productos_precio_lista_avg": [10.5, 20.0, 30.5],
+            "date": ["2024-03-11", "2024-03-11", "2024-03-11"],
+        }
+    )
+    return SepaAvgPriceProductModel.validate(df)
+
+
+@pytest.fixture
+def sample_daily_data_2() -> DataFrame[SepaAvgPriceProductModel]:
+    """Sample daily product data for testing (date 2). Includes duplicates."""
+    df = pd.DataFrame(
+        {
+            "id_producto": ["102", "103", "103", "104"],
+            "productos_descripcion": ["New Prod 2 Again", "New Prod 3", "New Prod 3 Duplicate", "New Prod 4"],
+            "productos_precio_lista_avg": [31.0, 40.0, 40.1, 50.0],
+            "date": ["2024-03-12", "2024-03-12", "2024-03-12", "2024-03-12"],
+        }
+    )
+    return SepaAvgPriceProductModel.validate(df)
+
+
+@pytest.fixture
+def sample_daily_data_invalid() -> DataFrame[SepaAvgPriceProductModel]:
+    """Sample daily product data with invalid records."""
+    df = pd.DataFrame(
+        {
+            "id_producto": ["105", None, "106", ""],  # Invalid IDs
+            "productos_descripcion": ["Valid New 5", "Invalid Prod No ID", "Valid New 6", "Invalid Prod Empty ID"],
+            "productos_precio_lista_avg": [60.0, 70.0, 80.0, 90.0],
+            "date": ["2024-03-13", "2024-03-13", "2024-03-13", "2024-03-13"],
+        }
+    )
+    # Note: Pandera validation happens *inside* the tested function for loaded data
+    # We return it unvalidated to simulate loading raw data
+    return df  # type: ignore
 
 
 # --- Test Cases for load_aggregation_state ---
@@ -486,15 +540,191 @@ def test_determine_dates_invalid_metadata_date(mock_provider: MagicMock, caplog:
     mock_provider.list_available_keys.return_value = available_dates
     metadata = ProductAggregationMetadata()
     metadata.last_processed_date = "invalid-date"
-    metadata.total_products_count=10
+    metadata.total_products_count = 10
     force_reprocess = False
     expected_dates = available_dates
 
     # Act
-    with caplog.at_level(logging.WARNING): # Use logging.WARNING
+    with caplog.at_level(logging.WARNING):  # Use logging.WARNING
         result = determine_date_range_to_process.fn(mock_provider, metadata, force_reprocess)
 
     # Assert
     assert result == expected_dates
     mock_provider.list_available_keys.assert_called_once()
     assert "Invalid last_processed_date 'invalid-date' in metadata" in caplog.text
+
+
+# --- Test Cases for _process_single_date_products ---
+
+
+def test_process_only_new_products(
+    mock_provider: MagicMock,
+    empty_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    sample_daily_data_1: DataFrame[SepaAvgPriceProductModel],
+):
+    """Test processing a date with only new products starting from empty state."""
+    # Arrange
+    date_to_process = DateStr("2024-03-11")
+    mock_provider.get_product_averages_for.return_value = sample_daily_data_1
+    initial_data = empty_agg_data
+
+    # Act
+    result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+
+    # Assert
+    mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
+    assert len(result_df) == 3
+    assert set(result_df["source_id"]) == {"001", "101", "102"}
+
+    # Check details of a new product
+    new_prod_101 = result_df[result_df["source_id"] == "101"].iloc[0]
+    assert new_prod_101["productos_descripcion"] == "New Prod 1"
+    assert new_prod_101["first_shown_at"] == date_to_process
+    assert new_prod_101["stream_id"] == _generate_argentina_product_stream_id("101")
+    assert new_prod_101["source_type"] == "argentina_sepa_product"
+
+
+def test_process_only_existing_products(
+    mock_provider: MagicMock,
+    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],  # Has 001, 002
+    sample_daily_data_1: DataFrame[SepaAvgPriceProductModel],  # Has 001, 101, 102
+):
+    """Test processing a date where only previously seen products appear."""
+    # Arrange
+    date_to_process = DateStr("2024-03-11")
+    # Modify daily data to only contain existing IDs (001)
+    daily_data_existing_only = sample_daily_data_1[sample_daily_data_1["id_producto"] == "001"].copy()
+    mock_provider.get_product_averages_for.return_value = daily_data_existing_only
+    initial_data = valid_agg_data.copy()  # Has 001, 002
+    initial_length = len(initial_data)
+
+    # Act
+    result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+
+    # Assert
+    mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
+    assert len(result_df) == initial_length  # No new products added
+    assert set(result_df["source_id"]) == {"001", "002"}
+
+    # Verify existing product wasn't modified (check first_shown_at)
+    existing_prod_001 = result_df[result_df["source_id"] == "001"].iloc[0]
+    original_prod_001 = initial_data[initial_data["source_id"] == "001"].iloc[0]
+    assert existing_prod_001["first_shown_at"] == original_prod_001["first_shown_at"]
+    assert existing_prod_001["productos_descripcion"] == original_prod_001["productos_descripcion"]  # Should not update
+
+
+def test_process_mix_new_and_existing(
+    mock_provider: MagicMock,
+    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],  # Has 001, 002
+    sample_daily_data_1: DataFrame[SepaAvgPriceProductModel],  # Has 001, 101, 102
+):
+    """Test processing a date with a mix of new and existing products."""
+    # Arrange
+    date_to_process = DateStr("2024-03-11")
+    mock_provider.get_product_averages_for.return_value = sample_daily_data_1
+    initial_data = valid_agg_data.copy()
+    initial_length = len(initial_data)
+
+    # Act
+    result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+
+    # Assert
+    mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
+    assert len(result_df) == initial_length + 2  # Added 101, 102
+    assert set(result_df["source_id"]) == {"001", "002", "101", "102"}
+
+    # Check new product details
+    new_prod_102 = result_df[result_df["source_id"] == "102"].iloc[0]
+    assert new_prod_102["productos_descripcion"] == "New Prod 2"
+    assert new_prod_102["first_shown_at"] == date_to_process
+
+    # Check existing product wasn't modified
+    existing_prod_001 = result_df[result_df["source_id"] == "001"].iloc[0]
+    original_prod_001 = initial_data[initial_data["source_id"] == "001"].iloc[0]
+    assert existing_prod_001["first_shown_at"] == original_prod_001["first_shown_at"]
+
+
+def test_process_duplicates_in_daily_file(
+    mock_provider: MagicMock,
+    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],  # Has 001, 002
+    sample_daily_data_2: DataFrame[SepaAvgPriceProductModel],  # Has 102 (dup), 103 (dup), 104
+):
+    """Test processing a daily file containing duplicate product IDs."""
+    # Arrange
+    date_to_process = DateStr("2024-03-12")
+    mock_provider.get_product_averages_for.return_value = sample_daily_data_2
+    initial_data = valid_agg_data.copy()
+    initial_length = len(initial_data)
+
+    # Act
+    result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+
+    # Assert
+    mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
+    # Should add 102, 103, 104 only once each
+    assert len(result_df) == initial_length + 3
+    assert set(result_df["source_id"]) == {"001", "002", "102", "103", "104"}
+
+    # Check details of product 103 (added once)
+    new_prod_103 = result_df[result_df["source_id"] == "103"]
+    assert len(new_prod_103) == 1
+    assert new_prod_103.iloc[0]["productos_descripcion"] == "New Prod 3"  # Takes first description
+    assert new_prod_103.iloc[0]["first_shown_at"] == date_to_process
+
+
+def test_process_missing_daily_file(
+    mock_provider: MagicMock,
+    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    caplog: LogCaptureFixture,
+):
+    """Test processing when the daily product file is missing."""
+    # Arrange
+    date_to_process = DateStr("2024-03-15")
+    mock_provider.get_product_averages_for.side_effect = FileNotFoundError
+    initial_data = valid_agg_data.copy()
+    initial_length = len(initial_data)
+
+    # Act
+    with caplog.at_level(logging.WARNING):
+        result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+
+    # Assert
+    mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
+    assert len(result_df) == initial_length  # Should return original data
+    pd.testing.assert_frame_equal(result_df, initial_data)
+    assert f"Product averages file not found for date: {date_to_process}" in caplog.text
+
+
+def test_process_invalid_records_in_daily_file(
+    mock_provider: MagicMock,
+    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    sample_daily_data_invalid: pd.DataFrame,  # Raw DF with invalid records
+    caplog: LogCaptureFixture,
+):
+    """Test processing a daily file with invalid product records (missing/empty IDs)."""
+    # Arrange
+    date_to_process = DateStr("2024-03-13")
+    # Return the raw DataFrame directly to test the function's internal handling
+    mock_provider.get_product_averages_for.return_value = sample_daily_data_invalid
+    initial_data = valid_agg_data.copy()
+    initial_length = len(initial_data)
+
+    # Act
+    with caplog.at_level(logging.WARNING):
+        result_df = _process_single_date_products(date_to_process, initial_data, mock_provider)
+
+    # Assert
+    mock_provider.get_product_averages_for.assert_called_once_with(date_to_process)
+    # Should add only valid new products (105, 106)
+    assert len(result_df) == initial_length + 2
+    assert set(result_df["source_id"]) == {"001", "002", "105", "106"}
+
+    # Check logs for warnings about filtered records (new behavior after refactor)
+    assert f"Filtered out 2 records with invalid 'id_producto' for date {date_to_process}" in caplog.text
+    # Ensure the old message is *not* present
+    assert "Skipping record with" not in caplog.text
+
+    # Check details of successfully added product
+    new_prod_105 = result_df[result_df["source_id"] == "105"].iloc[0]
+    assert new_prod_105["productos_descripcion"] == "Valid New 5"
+    assert new_prod_105["first_shown_at"] == date_to_process

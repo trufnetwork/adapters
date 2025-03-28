@@ -7,7 +7,7 @@ validation and default creation if files are missing.
 
 import io
 import json
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 from datetime import date, timedelta, datetime
 
 from botocore.exceptions import ClientError  # type: ignore
@@ -17,6 +17,7 @@ from pandera.typing import DataFrame
 from prefect import task
 from prefect_aws import S3Bucket  # type: ignore
 import gzip # Add gzip import
+from trufnetwork_sdk_py.utils import generate_stream_id # Use SDK function
 
 from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
     DynamicPrimitiveSourceModel,
@@ -28,6 +29,7 @@ from tsn_adapters.utils.logging import get_logger_safe
 
 T = TypeVar("T")
 
+STREAM_NAME_PREFIX = "arg_sepa_prod_"
 
 # --- State Loading Helper Functions ---
 
@@ -351,3 +353,180 @@ def determine_date_range_to_process(
         logger.info("No new dates to process based on the start date criteria.")
 
     return dates_to_process
+
+
+# --- Single Date Processing Helper ---
+
+def _generate_argentina_product_stream_id(source_id: str) -> str:
+    """
+    Generates a stream ID specific to Argentina SEPA products.
+
+    Args:
+        source_id: The product ID (id_producto).
+
+    Returns:
+        The generated stream ID (e.g., "arg_sepa_prod_123").
+    """
+    # Basic validation to prevent malformed IDs
+    if not source_id:
+        raise ValueError("Invalid source_id for generating stream ID.")
+    # Use the SDK's generate_stream_id function with the required prefix
+    stream_name = f"{STREAM_NAME_PREFIX}{source_id}"
+    return generate_stream_id(stream_name)
+
+
+def process_single_date_products(
+    date_to_process: DateStr,
+    current_aggregated_data: DataFrame[DynamicPrimitiveSourceModel],
+    product_averages_provider: ProductAveragesProvider,
+) -> DataFrame[DynamicPrimitiveSourceModel]:
+    """
+    Processes product data for a single date, adding new products to the aggregated set.
+
+    Args:
+        date_to_process: The date (YYYY-MM-DD) to process.
+        current_aggregated_data: DataFrame with existing aggregated product data.
+        product_averages_provider: Provider to fetch daily product average data.
+
+    Returns:
+        Updated DataFrame containing both existing and newly added products.
+    """
+    logger = get_logger_safe(__name__)
+    logger.info(f"Processing products for date: {date_to_process}")
+
+    try:
+        # 1. Load daily product data
+        daily_products_df = product_averages_provider.get_product_averages_for(date_to_process)
+        logger.debug(f"Loaded {len(daily_products_df)} product records for {date_to_process}.")
+    except FileNotFoundError:
+        logger.warning(f"Product averages file not found for date: {date_to_process}. Skipping date.")
+        return current_aggregated_data
+    except Exception as e:
+        logger.error(f"Error loading product averages for {date_to_process}: {e}", exc_info=True)
+        # Depending on desired robustness, could return current_aggregated_data or re-raise
+        return current_aggregated_data # Fail gracefully for this date
+
+    # 2. Get existing product IDs for quick lookup
+    # Ensure 'source_id' column exists before accessing
+    existing_product_ids: set[str]
+    if 'source_id' in current_aggregated_data.columns and not current_aggregated_data.empty:
+        # Convert unique IDs to a list of strings first, then to a set
+        unique_ids_list = list(current_aggregated_data['source_id'].astype(str).unique())
+        existing_product_ids = set(unique_ids_list)
+    else:
+        existing_product_ids = set()
+    logger.debug(f"Found {len(existing_product_ids)} existing unique product IDs.")
+
+    # --- Pre-filter daily data for valid product IDs ---
+    initial_daily_count = len(daily_products_df)
+    # Ensure 'id_producto' is treated as string for filtering empty strings correctly
+    daily_products_df['id_producto'] = daily_products_df['id_producto'].astype(str)
+    valid_daily_df = daily_products_df[
+        daily_products_df['id_producto'].notna() & \
+        (daily_products_df['id_producto'] != "") & \
+        (daily_products_df['id_producto'] != "None") # Also explicitly filter the string "None"
+    ].copy() # Use .copy() to avoid SettingWithCopyWarning
+
+    filtered_count = initial_daily_count - len(valid_daily_df)
+    if filtered_count > 0:
+        logger.warning(f"Filtered out {filtered_count} records with invalid 'id_producto' for date {date_to_process}.")
+    # --------------------------------------------------
+
+    new_product_records: list[dict[str, Any]] = []
+    processed_daily_ids: set[str] = set() # Track IDs processed within this daily file
+
+    # 3. Iterate through VALID daily products
+    # Cast daily_products_df to pd.DataFrame to help with iterrows typing, though it's often imprecise
+    valid_daily_pd_df = cast(pd.DataFrame, valid_daily_df)
+    for index, product_row in valid_daily_pd_df.iterrows():
+        # Try dictionary-style access - Should be safer now after filtering
+        try:
+            product_id = str(product_row['id_producto']) # Already validated as non-empty/non-None string
+            description = str(product_row['productos_descripcion'])
+        except KeyError as ke:
+            # This is less likely now but kept for robustness
+            logger.error(f"Unexpected KeyError processing supposedly valid row on {date_to_process} at index {index}: {ke}")
+            continue
+
+        # Basic Validation for description (ID is already pre-validated)
+        if not description:
+             logger.warning(f"Skipping record with missing 'productos_descripcion' for ID {product_id} on {date_to_process}.")
+             continue
+
+        # 5. Check if product is new and not already processed today
+        # No need to check 'if not product_id' as it's pre-filtered
+        if product_id not in existing_product_ids and product_id not in processed_daily_ids:
+            try:
+                # 6. Generate Stream ID
+                stream_id = _generate_argentina_product_stream_id(product_id)
+
+                # 7. Create new record dictionary
+                new_record = {
+                    "stream_id": stream_id,
+                    "source_id": product_id,
+                    "source_type": "argentina_sepa_product", # Constant as per spec
+                    "productos_descripcion": description,
+                    "first_shown_at": date_to_process,
+                }
+                new_product_records.append(new_record)
+
+                # Add to sets to prevent re-adding
+                existing_product_ids.add(product_id)
+                processed_daily_ids.add(product_id)
+                logger.debug(f"Identified new product: ID={product_id}, Date={date_to_process}")
+
+            except ValueError as ve:
+                 logger.error(f"Error generating stream ID for product {product_id}: {ve}", exc_info=True)
+                 continue # Skip this product if ID generation fails
+            except Exception as e:
+                logger.error(f"Unexpected error processing product {product_id} on {date_to_process}: {e}", exc_info=True)
+                continue # Skip this product on unexpected errors
+
+    # 8. Concatenate new products if any were found
+    if new_product_records:
+        # Create DataFrame with explicit types where possible
+        new_products_df = pd.DataFrame(new_product_records).astype({
+            'stream_id': str,
+            'source_id': str,
+            'source_type': str,
+            'productos_descripcion': str,
+            'first_shown_at': str # Pandera handles date check
+        })
+        # Ensure the new DataFrame conforms to the model before concatenating
+        try:
+            # Use lazy=True as per model config, and handle potential empty df case
+            validated_new_df = DynamicPrimitiveSourceModel.validate(new_products_df, lazy=True) if not new_products_df.empty else new_products_df
+            
+            # Ensure columns align before concat, crucial if current_aggregated_data is empty
+            if current_aggregated_data.empty:
+                 # Ensure the empty DF has the correct columns before validating
+                 empty_validated_df = _create_empty_aggregated_data()
+                 updated_aggregated_data = pd.concat([empty_validated_df, validated_new_df], ignore_index=True)
+            else:
+                 updated_aggregated_data = pd.concat([current_aggregated_data, validated_new_df], ignore_index=True)
+            
+            # Final validation of the combined DataFrame
+            validated_updated_data = DynamicPrimitiveSourceModel.validate(updated_aggregated_data, lazy=True)
+            
+            logger.info(f"Added {len(validated_new_df)} new products for date {date_to_process}.")
+            return validated_updated_data
+
+        except (SchemaError, SchemaDefinitionError) as e:
+             logger.error(f"Pandera validation failed after adding new products for {date_to_process}: {e}", exc_info=True)
+             # Return original data to prevent saving corrupted state
+             return current_aggregated_data
+        except Exception as e:
+            logger.error(f"Unexpected error during concatenation or validation for {date_to_process}: {e}", exc_info=True)
+            return current_aggregated_data
+
+    else:
+        logger.info(f"No new products found for date {date_to_process}.")
+        # Return the original dataframe, ensuring it's validated if it was empty initially
+        if current_aggregated_data.empty:
+             try:
+                 return DynamicPrimitiveSourceModel.validate(_create_empty_aggregated_data(), lazy=True)
+             except (SchemaError, SchemaDefinitionError) as e:
+                 logger.error(f"Pandera validation failed for empty DataFrame: {e}", exc_info=True)
+                 raise # Re-raise if validating the empty state fails - indicates model issue
+        else:
+             return current_aggregated_data
