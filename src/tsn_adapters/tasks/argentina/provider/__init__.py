@@ -16,8 +16,10 @@ For detailed documentation and usage examples:
 """
 
 from .s3 import RawDataProvider, ProcessedDataProvider
+from .product_averages import ProductAveragesProvider
 
 __all__ = [
     "RawDataProvider",
     "ProcessedDataProvider",
+    "ProductAveragesProvider",
 ]

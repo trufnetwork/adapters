@@ -8,8 +8,10 @@ import signal
 import subprocess
 import time
 from typing import Any, Optional
+from unittest.mock import Mock
 
 from prefect import Task
+from prefect.logging.loggers import disable_run_logger
 from prefect.testing.utilities import prefect_test_harness
 from pydantic import SecretStr
 import pytest
@@ -32,10 +34,11 @@ class ContainerSpec:
     name: str
     image: str
     tmpfs_path: Optional[str] = None
-    env_vars: ( list[str] ) = field(default_factory=list)
+    env_vars: list[str] = field(default_factory=list)
     ports: dict[str, str] = field(default_factory=dict)
     entrypoint: Optional[str] = None
     args: list[str] = field(default_factory=list)
+
 
 # Container specifications
 POSTGRES_CONTAINER = ContainerSpec(
@@ -391,7 +394,8 @@ class TestTrufNetworkFixtures:
         assert tn_provider.api_endpoint.startswith("http://")
         assert tn_provider.get_provider() is tn_provider
 
-@pytest.fixture(scope='session', autouse=True)
+
+@pytest.fixture(scope="session", autouse=True)
 def term_handler():
     """
     Fixture to transform SIGTERM into SIGINT. This permit us to gracefully stop the suite uppon SIGTERM.
@@ -400,7 +404,8 @@ def term_handler():
     yield
     signal.signal(signal.SIGTERM, orig)
 
-@pytest.fixture(scope='session', autouse=True)
+
+@pytest.fixture(scope="session", autouse=True)
 def disable_prefect_retries():
     from importlib import import_module
     from typing import Any
@@ -412,81 +417,100 @@ def disable_prefect_retries():
     def patch_task_options(task_fn: Task[Any, Any]) -> Task[Any, Any]:
         # Always override retries, cache_key_fn, and cache_expiration
         # regardless of how the task was created
-        if hasattr(task_fn, 'with_options'):
-            patched_task = task_fn.with_options(retries=0, cache_key_fn=None, cache_expiration=None, retry_condition_fn=None)
-            
+        if hasattr(task_fn, "with_options"):
+            patched_task = task_fn.with_options(
+                retries=0, cache_key_fn=None, cache_expiration=None, retry_condition_fn=None
+            )
+
             # Also patch the with_options method of the returned task to ensure
             # any subsequent calls also have these options overridden
             original_with_options = patched_task.with_options
-            
+
             # Use a simple function that ignores type checking
             def ensure_no_retries_or_cache(**kwargs: Any) -> Any:
                 # Force these options regardless of what was passed
-                kwargs['retries'] = 0
-                kwargs['cache_key_fn'] = None
-                kwargs['cache_expiration'] = None
-                kwargs['retry_condition_fn'] = None
+                kwargs["retries"] = 0
+                kwargs["cache_key_fn"] = None
+                kwargs["cache_expiration"] = None
+                kwargs["retry_condition_fn"] = None
                 return original_with_options(**kwargs)  # type: ignore
-            
+
             # Use setattr to avoid type checking issues
-            setattr(patched_task, 'with_options', ensure_no_retries_or_cache)
-            
+            setattr(patched_task, "with_options", ensure_no_retries_or_cache)
+
             return patched_task
         return task_fn
 
     # All tasks with retries and their import paths
     tasks_to_patch = [
         # FMP Historical Flow
-        'tsn_adapters.flows.fmp.historical_flow.fetch_historical_data',
-        'tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date',
+        "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
+        "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
         # Stream Deploy Flow
-        'tsn_adapters.flows.stream_deploy_flow.check_deploy_and_init_stream',
+        "tsn_adapters.flows.stream_deploy_flow.check_deploy_and_init_stream",
         # Primitive Source Descriptor
-        'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url',
-        'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github',
+        "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url",
+        "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github",
         # FMP Real Time Flow
-        'tsn_adapters.flows.fmp.real_time_flow.fetch_quotes_for_batch',
+        "tsn_adapters.flows.fmp.real_time_flow.fetch_quotes_for_batch",
         # Argentina Task Wrappers
-        'tsn_adapters.tasks.argentina.task_wrappers.task_create_stream_fetcher',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_streams',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_create_sepa_provider',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_latest_records',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_and_transform_data',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_now_date',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_dates_already_processed',
-        # TN Access
-        'tsn_adapters.blocks.tn_access.task_wait_for_tx',
-        'tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx',
-        'tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx',
-        'tsn_adapters.blocks.tn_access._task_only_batch_insert_records',
-        'tsn_adapters.blocks.tn_access.task_split_and_insert_records',
-        'tsn_adapters.blocks.tn_access.task_filter_initialized_streams',
-        # TN Common
-        'tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records',
-        'tsn_adapters.common.trufnetwork.tn.task_deploy_primitive',
-        'tsn_adapters.common.trufnetwork.tn.task_init_stream',
-        'tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records',
-        # GSheet Tasks
-        'tsn_adapters.tasks.gsheet.task_read_gsheet',
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_reconciliation_strategy",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_sepa_provider",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_stream_fetcher",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_transformer",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_dates_already_processed",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_determine_needed_keys",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_and_transform_data",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_latest_records",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_now_date",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_streams",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_insert_data",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_transform_data",
         # Argentina Preprocess Flow
-        'tsn_adapters.tasks.argentina.flows.preprocess_flow.task_list_available_dates'
+        "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_and_transform_data",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_now_date",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_dates_already_processed",
+        # TN Access
+        "tsn_adapters.blocks.tn_access.task_wait_for_tx",
+        "tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx",
+        "tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx",
+        "tsn_adapters.blocks.tn_access._task_only_batch_insert_records",
+        "tsn_adapters.blocks.tn_access.task_split_and_insert_records",
+        "tsn_adapters.blocks.tn_access.task_filter_initialized_streams",
+        # TN Common
+        "tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records",
+        "tsn_adapters.common.trufnetwork.tn.task_deploy_primitive",
+        "tsn_adapters.common.trufnetwork.tn.task_init_stream",
+        "tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records",
+        # GSheet Tasks
+        "tsn_adapters.tasks.gsheet.task_read_gsheet",
+        # Argentina Preprocess Flow
+        "tsn_adapters.tasks.argentina.flows.preprocess_flow.task_list_available_dates",
     ]
 
     # Patch the task decorator to apply our options
-    with patch('prefect.task', side_effect=original_task) as mock_task:
+    with patch("prefect.task", side_effect=original_task) as mock_task:
         for import_path in tasks_to_patch:
             # Split the import path into module path and attribute name
-            module_path, attr_name = import_path.rsplit('.', 1)
+            module_path, attr_name = import_path.rsplit(".", 1)
             # Import the module and get the task function
             module = import_module(module_path)
             task_fn = getattr(module, attr_name)
             # Patch the task
             mock_task.return_value = patch_task_options(task_fn)
             patch(import_path, new=patch_task_options(task_fn)).start()
-    
+
     yield
+
+
+@pytest.fixture(scope="function")
+def disable_prefect_logger():
+    with disable_run_logger():
+        yield
+
 
 @pytest.fixture(scope="session", autouse=False)
 def prefect_test_fixture(disable_prefect_retries: Any):
@@ -494,14 +518,17 @@ def prefect_test_fixture(disable_prefect_retries: Any):
         yield
 
 
+@pytest.fixture(scope="function")
+def show_prefect_logs_fixture(monkeypatch: Any):
+    monkeypatch.setattr("tsn_adapters.utils.logging.get_logger_safe", Mock(return_value=logging.getLogger()))
+
+
 DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1
 
 
 @pytest.fixture(scope="session")
 def tn_block(
-    tn_provider: TrufNetworkProvider, 
-    prefect_test_fixture: Any, 
-    disable_prefect_retries: Any
+    tn_provider: TrufNetworkProvider, prefect_test_fixture: Any, disable_prefect_retries: Any
 ) -> TNAccessBlock:
     """Create a TNAccessBlock with test node and default credentials."""
     return TNAccessBlock(
@@ -509,6 +536,7 @@ def tn_block(
         tn_private_key=SecretStr(os.environ.get("TN_PRIVATE_KEY", DEFAULT_TN_PRIVATE_KEY)),
         helper_contract_name="sthelpercontract0000000000000001",
     )
+
 
 @pytest.fixture(scope="session")
 def helper_contract_id(tn_block: TNAccessBlock) -> Generator[str, None, None]:
