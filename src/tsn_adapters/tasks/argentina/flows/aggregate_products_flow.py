@@ -11,11 +11,9 @@ from typing import cast
 from pandera.typing import DataFrame
 from prefect import flow, get_run_logger
 
-# Import artifact creation function
 from prefect.artifacts import create_markdown_artifact
 from prefect_aws import S3Bucket  # type: ignore
 
-# Add back model imports
 from tsn_adapters.tasks.argentina.models import (
     DynamicPrimitiveSourceModel,
 )
@@ -26,8 +24,6 @@ from tsn_adapters.tasks.argentina.tasks import (
     save_aggregation_state,
 )
 
-# Import the helper function directly, not as a task
-# Also import the helper to create an empty DataFrame
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
     create_empty_aggregated_data,
     process_single_date_products,
@@ -156,10 +152,9 @@ async def aggregate_argentina_products_flow(
             # For now, log error and continue to next date
             continue
 
-    # 6. Final State Save - Removed (Done within the loop now)
     logger.info("Finished processing all dates.")
 
-    # 7. Reporting
+    # 6. Reporting
     final_total_products = metadata.total_products_count # type: ignore[assignment]
     logger.info(
         f"Flow finished. Processed {processed_dates_count} dates. Added {new_products_added_total} new products in total. Final product count: {final_total_products}."
