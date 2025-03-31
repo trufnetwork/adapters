@@ -20,16 +20,16 @@ from botocore.exceptions import ClientError
 
 from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
     DynamicPrimitiveSourceModel,
-    ProductAggregationMetadata,
+    ArgentinaProductStateMetadata,
 )
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
     _generate_argentina_product_stream_id,  # type: ignore
     create_empty_aggregated_data,
-    determine_date_range_to_process,
     load_aggregation_state,
     process_single_date_products,
+    determine_aggregation_dates,
     save_aggregation_state,
 )
 from tsn_adapters.tasks.argentina.types import DateStr
@@ -279,7 +279,7 @@ def setup_mock_aread_path(mock_provider: MagicMock):
 @pytest.mark.asyncio
 async def test_load_state_both_exist_valid(
     s3_bucket_block: S3Bucket,
-    valid_metadata: ProductAggregationMetadata,
+    valid_metadata: ArgentinaProductStateMetadata,
     valid_metadata_json: bytes,
     valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
     valid_agg_data_csv_gz: bytes,
@@ -306,7 +306,7 @@ async def test_load_state_neither_exist(s3_bucket_block: S3Bucket):
     loaded_data, loaded_metadata = await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
     # Assert
-    assert loaded_metadata == ProductAggregationMetadata()  # Defaults
+    assert loaded_metadata == ArgentinaProductStateMetadata()  # Defaults
     assert loaded_data.empty
     # Check columns match the model schema
     assert list(loaded_data.columns) == list(DynamicPrimitiveSourceModel.to_schema().columns.keys())
@@ -315,7 +315,7 @@ async def test_load_state_neither_exist(s3_bucket_block: S3Bucket):
 @pytest.mark.asyncio
 async def test_load_state_only_metadata_exists(
     s3_bucket_block: S3Bucket,
-    valid_metadata: ProductAggregationMetadata,
+    valid_metadata: ArgentinaProductStateMetadata,
     valid_metadata_json: bytes,
 ):
     """Test loading state when only the metadata file exists."""
@@ -345,7 +345,7 @@ async def test_load_state_only_data_exists(
     loaded_data, loaded_metadata = await load_aggregation_state(s3_bucket_block, base_path=BASE_PATH)
 
     # Assert
-    assert loaded_metadata == ProductAggregationMetadata()  # Defaults
+    assert loaded_metadata == ArgentinaProductStateMetadata()  # Defaults
     pd.testing.assert_frame_equal(loaded_data, valid_agg_data, check_dtype=False)
 
 
@@ -419,7 +419,7 @@ async def test_load_state_corrupted_agg_data(
 @pytest.mark.asyncio
 async def test_save_state_valid(
     s3_bucket_block: S3Bucket,
-    valid_metadata: ProductAggregationMetadata,
+    valid_metadata: ArgentinaProductStateMetadata,
     valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
 ):
     """Test saving valid metadata and aggregated data."""
@@ -458,7 +458,7 @@ async def test_save_state_valid(
 @pytest.mark.asyncio
 async def test_save_state_overwrites_existing(
     s3_bucket_block: S3Bucket,
-    valid_metadata: ProductAggregationMetadata,
+    valid_metadata: ArgentinaProductStateMetadata,
     valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
     corrupted_metadata_json: bytes,  # Some dummy initial content
     corrupted_agg_data_csv_gz: bytes,  # Some dummy initial content
@@ -475,7 +475,7 @@ async def test_save_state_overwrites_existing(
 
     # Assert: Read back and verify the *new* content
     metadata_bytes = await s3_bucket_block.aread_path(METADATA_PATH)
-    reloaded_metadata = ProductAggregationMetadata.model_validate_json(metadata_bytes)
+    reloaded_metadata = ArgentinaProductStateMetadata.model_validate_json(metadata_bytes)
     assert reloaded_metadata == valid_metadata
 
     data_bytes_gz = await s3_bucket_block.aread_path(DATA_PATH)
@@ -500,12 +500,12 @@ def test_determine_dates_no_prior_state(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11"), DateStr("2024-03-12")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ProductAggregationMetadata()
+    metadata = ArgentinaProductStateMetadata()
     force_reprocess = False
 
     # Act
     # Call the synchronous task's function directly using .fn()
-    result = determine_date_range_to_process.fn(mock_provider, metadata, force_reprocess)
+    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
 
     # Assert
     assert result == available_dates
@@ -518,11 +518,11 @@ def test_determine_dates_force_reprocess(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11"), DateStr("2024-03-12")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ProductAggregationMetadata(last_processed_date="2024-03-11", total_products_count=10)
+    metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-11", total_products_count=10)
     force_reprocess = True
 
     # Act
-    result = determine_date_range_to_process.fn(mock_provider, metadata, force_reprocess)
+    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
 
     # Assert
     assert result == available_dates
@@ -534,12 +534,12 @@ def test_determine_dates_prior_state_exists(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11"), DateStr("2024-03-12"), DateStr("2024-03-13")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ProductAggregationMetadata(last_processed_date="2024-03-11", total_products_count=10)
+    metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-11", total_products_count=10)
     force_reprocess = False
     expected_dates = [DateStr("2024-03-12"), DateStr("2024-03-13")]
 
     # Act
-    result = determine_date_range_to_process.fn(mock_provider, metadata, force_reprocess)
+    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
 
     # Assert
     assert result == expected_dates
@@ -551,12 +551,12 @@ def test_determine_dates_no_new_dates(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ProductAggregationMetadata(last_processed_date="2024-03-11", total_products_count=10)
+    metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-11", total_products_count=10)
     force_reprocess = False
     expected_dates: list[DateStr] = []
 
     # Act
-    result = determine_date_range_to_process.fn(mock_provider, metadata, force_reprocess)
+    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
 
     # Assert
     assert result == expected_dates
@@ -568,12 +568,12 @@ def test_determine_dates_gaps_in_available_dates(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-12"), DateStr("2024-03-13")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ProductAggregationMetadata(last_processed_date="2024-03-10", total_products_count=5)
+    metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-10", total_products_count=5)
     force_reprocess = False
     expected_dates = [DateStr("2024-03-12"), DateStr("2024-03-13")]
 
     # Act
-    result = determine_date_range_to_process.fn(mock_provider, metadata, force_reprocess)
+    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
 
     # Assert
     assert result == expected_dates
@@ -585,12 +585,12 @@ def test_determine_dates_no_available_dates(mock_provider: MagicMock):
     # Arrange
     available_dates: list[DateStr] = []
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ProductAggregationMetadata()
+    metadata = ArgentinaProductStateMetadata()
     force_reprocess = False
     expected_dates: list[DateStr] = []
 
     # Act
-    result = determine_date_range_to_process.fn(mock_provider, metadata, force_reprocess)
+    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
 
     # Assert
     assert result == expected_dates
@@ -602,15 +602,15 @@ def test_determine_dates_invalid_metadata_date(mock_provider: MagicMock, caplog:
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ProductAggregationMetadata()
-    metadata.last_processed_date = "invalid-date"
+    metadata = ArgentinaProductStateMetadata()
+    metadata.last_aggregation_processed_date = "invalid-date"
     metadata.total_products_count = 10
     force_reprocess = False
     expected_dates = available_dates
 
     # Act
     with caplog.at_level(logging.WARNING):  # Use logging.WARNING
-        result = determine_date_range_to_process.fn(mock_provider, metadata, force_reprocess)
+        result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
 
     # Assert
     assert result == expected_dates
