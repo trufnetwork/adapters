@@ -10,7 +10,6 @@ from typing import cast
 
 from pandera.typing import DataFrame
 from prefect import flow, get_run_logger
-
 from prefect.artifacts import create_markdown_artifact
 from prefect_aws import S3Bucket  # type: ignore
 
@@ -19,11 +18,10 @@ from tsn_adapters.tasks.argentina.models import (
 )
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks import (
-    determine_date_range_to_process,
+    determine_aggregation_dates,
     load_aggregation_state,
     save_aggregation_state,
 )
-
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
     create_empty_aggregated_data,
     process_single_date_products,
@@ -69,7 +67,7 @@ async def aggregate_argentina_products_flow(
         )
 
         logger.info(
-            f"Initial state loaded. Last processed: {metadata.last_processed_date}, Total products: {metadata.total_products_count}"
+            f"Initial state loaded. Last aggregation processed: {metadata.last_aggregation_processed_date}, Total products: {metadata.total_products_count}"
         )
         # If force_reprocess is True, start with an empty dataframe, ignoring loaded state
         if force_reprocess:
@@ -85,7 +83,7 @@ async def aggregate_argentina_products_flow(
     # 3. Determine Date Range
     try:
         # Pass provider instance, not just the block
-        dates_to_process = determine_date_range_to_process(
+        dates_to_process = determine_aggregation_dates(
             product_averages_provider=product_averages_provider,
             metadata=metadata,
             force_reprocess=force_reprocess,
@@ -133,7 +131,7 @@ async def aggregate_argentina_products_flow(
             processed_dates_count += 1
 
             # Update Metadata
-            metadata.last_processed_date = date_str
+            metadata.last_aggregation_processed_date = date_str
             metadata.total_products_count = count_after
             logger.info(
                 f"Processed date {date_str}. Found {new_this_date} new products. Total products: {count_after}."

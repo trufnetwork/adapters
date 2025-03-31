@@ -5,23 +5,23 @@ Handles state loading (metadata JSON, aggregated products CSV) including
 validation and default creation if files are missing.
 """
 
+from datetime import date, datetime, timedelta
+import gzip  # Add gzip import
 import io
 import json
 from typing import Any, TypeVar
-from datetime import date, timedelta, datetime
 
 from botocore.exceptions import ClientError  # type: ignore
 import pandas as pd
-from pandera.errors import SchemaError, SchemaDefinitionError
+from pandera.errors import SchemaDefinitionError, SchemaError
 from pandera.typing import DataFrame
 from prefect import task
 from prefect_aws import S3Bucket  # type: ignore
-import gzip # Add gzip import
-from trufnetwork_sdk_py.utils import generate_stream_id # type: ignore
+from trufnetwork_sdk_py.utils import generate_stream_id  # type: ignore
 
 from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
+    ArgentinaProductStateMetadata,
     DynamicPrimitiveSourceModel,
-    ProductAggregationMetadata,
 )
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.types import DateStr
@@ -46,9 +46,9 @@ def _is_client_error_not_found(exception: ClientError) -> bool:
 @task(name="Load Metadata from S3")
 async def _load_metadata_from_s3(
     s3_block: S3Bucket, metadata_path: str
-) -> ProductAggregationMetadata:
+) -> ArgentinaProductStateMetadata:
     """
-    Loads ProductAggregationMetadata from JSON in S3.
+    Loads ArgentinaProductStateMetadata from JSON in S3.
 
     Returns default metadata if the file is not found (404/NoSuchKey).
 
@@ -57,7 +57,7 @@ async def _load_metadata_from_s3(
         metadata_path: Path to the metadata JSON file in the bucket.
 
     Returns:
-        Loaded or default ProductAggregationMetadata.
+        Loaded or default ArgentinaProductStateMetadata.
 
     Raises:
         ClientError: For non-404 S3 errors.
@@ -68,12 +68,12 @@ async def _load_metadata_from_s3(
     try:
         logger.info(f"Loading metadata: {metadata_path}")
         metadata_bytes = await s3_block.aread_path(metadata_path)
-        metadata = ProductAggregationMetadata(**json.loads(metadata_bytes.decode("utf-8")))
+        metadata = ArgentinaProductStateMetadata(**json.loads(metadata_bytes.decode("utf-8")))
         logger.info("Metadata loaded successfully.")
         return metadata
     except ClientError as e:
         if _is_client_error_not_found(e):
-            default_metadata = ProductAggregationMetadata()
+            default_metadata = ArgentinaProductStateMetadata()
             logger.warning(f"Metadata file not found. Using defaults: {default_metadata}")
             return default_metadata
         else:
@@ -186,7 +186,7 @@ async def _load_data_from_s3(
 @task(name="Load Aggregation State from S3")
 async def load_aggregation_state(
     s3_block: S3Bucket, base_path: str = "aggregated"
-) -> tuple[DataFrame[DynamicPrimitiveSourceModel], ProductAggregationMetadata]:
+) -> tuple[DataFrame[DynamicPrimitiveSourceModel], ArgentinaProductStateMetadata]:
     """
     Loads aggregation state (metadata and data) from S3.
 
@@ -223,7 +223,7 @@ async def load_aggregation_state(
 async def save_aggregation_state(
     s3_block: S3Bucket,
     aggregated_data: DataFrame[DynamicPrimitiveSourceModel],
-    metadata: ProductAggregationMetadata,
+    metadata: ArgentinaProductStateMetadata,
     base_path: str = "aggregated",
 ) -> None:
     """
@@ -232,7 +232,7 @@ async def save_aggregation_state(
     Args:
         s3_block: Configured Prefect S3Bucket block.
         aggregated_data: DataFrame conforming to DynamicPrimitiveSourceModel containing the products.
-        metadata: ProductAggregationMetadata object containing the latest state.
+        metadata: ArgentinaProductStateMetadata object containing the latest state.
         base_path: Base S3 directory path for aggregation files.
 
     Raises:
@@ -282,14 +282,14 @@ async def save_aggregation_state(
 
 # --- Date Range Determination Task ---
 
-@task(name="Determine Date Range to Process")
-def determine_date_range_to_process(
+@task(name="Determine Aggregation Dates")
+def determine_aggregation_dates(
     product_averages_provider: ProductAveragesProvider,
-    metadata: ProductAggregationMetadata,
+    metadata: ArgentinaProductStateMetadata,
     force_reprocess: bool = False,
 ) -> list[DateStr]:
     """
-    Determines the list of dates for which product data needs processing.
+    Determines the range of dates to aggregate based on available data and metadata.
 
     Uses the provider to list available dates and filters them based on the
     last processed date from metadata and the force_reprocess flag.
@@ -328,14 +328,14 @@ def determine_date_range_to_process(
     if force_reprocess:
         logger.info("`force_reprocess` is True. Processing all available dates.")
         start_processing_from = datetime.strptime(available_dates_str[0], "%Y-%m-%d").date()
-    elif metadata.last_processed_date and metadata.last_processed_date != "1970-01-01":
+    elif metadata.last_aggregation_processed_date:
         try:
-            last_processed_dt = datetime.strptime(metadata.last_processed_date, "%Y-%m-%d").date()
+            last_processed_dt = datetime.strptime(metadata.last_aggregation_processed_date, "%Y-%m-%d").date()
             # Start processing from the day *after* the last processed date
             start_processing_from = last_processed_dt + timedelta(days=1)
             logger.info(f"Resuming processing from {start_processing_from.isoformat()} (day after {last_processed_dt.isoformat()}).")
         except ValueError:
-            logger.warning(f"Invalid last_processed_date '{metadata.last_processed_date}' in metadata. Processing all dates.")
+            logger.warning(f"Invalid last_aggregation_processed_date '{metadata.last_aggregation_processed_date}' in metadata. Processing all dates.")
             start_processing_from = datetime.strptime(available_dates_str[0], "%Y-%m-%d").date()
     else:
         logger.info("No valid last processed date found in metadata. Processing all available dates.")

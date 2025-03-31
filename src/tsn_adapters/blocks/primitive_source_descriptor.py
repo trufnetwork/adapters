@@ -9,12 +9,12 @@ from pandera import DataFrameModel
 from pandera.typing import DataFrame, Series
 from prefect import Task, task
 from prefect.blocks.core import Block
-from prefect.logging import get_run_logger
 from prefect_aws import S3Bucket
 from pydantic import ConfigDict
 
 from tsn_adapters.blocks.github_access import GithubAccess
 from tsn_adapters.utils.deroutine import deroutine
+from tsn_adapters.utils.logging import get_logger_safe
 
 
 class PrimitiveSourceDataModel(DataFrameModel):
@@ -87,7 +87,7 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
     @property
     def logger(self):
         if not hasattr(self, "_logger"):
-            self._logger = get_run_logger()
+            self._logger = get_logger_safe(__name__)
         return self._logger
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
