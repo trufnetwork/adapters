@@ -1,8 +1,8 @@
 import os
 
 from prefect import flow
-import trufnetwork_sdk_py.client as tn_client
-import trufnetwork_sdk_py.utils as tn_utils
+import trufnetwork_sdk_py.client as tn_client  # type: ignore
+import trufnetwork_sdk_py.utils as tn_utils  # type: ignore
 
 from examples.gsheets.utils import (
     task_deploy_primitive_if_needed,
