@@ -76,6 +76,22 @@ class WritableSourceDescriptorBlock(PrimitiveSourcesDescriptorBlock):
     @abstractmethod
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
         pass
+        
+    @abstractmethod
+    def upsert_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]) -> None:
+        """
+        Inserts new sources or updates existing ones based on stream_id.
+        Updates only occur if source_id or source_type differ.
+        Sources in storage but not in the input descriptor are untouched.
+        
+        Args:
+            descriptor: DataFrame containing source descriptor data to insert or update.
+                        Must conform to PrimitiveSourceDataModel schema.
+        
+        Raises:
+            NotImplementedError: If the implementation does not support atomic upserts.
+        """
+        raise NotImplementedError
 
 
 class S3SourceDescriptor(WritableSourceDescriptorBlock):
@@ -116,6 +132,21 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
             path=self.file_path,
             content=compressed_bytes,
         )
+        
+    def upsert_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]) -> None:
+        """
+        Not implemented for S3SourceDescriptor as it does not support atomic upserts.
+        
+        S3 operations are inherently replace-only and cannot perform partial updates
+        to a file atomically. Use set_sources for full overwrite operations instead.
+        
+        Args:
+            descriptor: DataFrame containing source descriptor data.
+        
+        Raises:
+            NotImplementedError: Always raised as S3 doesn't support atomic upserts.
+        """
+        raise NotImplementedError("S3SourceDescriptor does not support atomic upserts. Use set_sources for full overwrite.")
 
 
 # --- Top Level Task Functions ---
