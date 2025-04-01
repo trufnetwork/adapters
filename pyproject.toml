@@ -32,7 +32,6 @@ dev = [
     "black",
     "isort",
     "ruff",
-    "mypy",
     "moto",
 ]
 
