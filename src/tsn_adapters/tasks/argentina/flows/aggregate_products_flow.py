@@ -18,12 +18,12 @@ from tsn_adapters.tasks.argentina.models import (
 )
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks import (
-    determine_aggregation_dates,
     load_aggregation_state,
     save_aggregation_state,
 )
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
     create_empty_aggregated_data,
+    determine_aggregation_dates,
     process_single_date_products,
 )
 

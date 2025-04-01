@@ -217,6 +217,81 @@ async def load_aggregation_state(
     logger.info("Aggregation state load completed.")
     return aggregated_data, metadata
 
+# --- Insertion Flow Specific State Tasks ---
+
+@task(name="Load Insertion Metadata from S3")
+async def load_insertion_metadata(
+    s3_block: S3Bucket, state_file_path: str
+) -> ArgentinaProductStateMetadata:
+    """
+    Loads ArgentinaProductStateMetadata specifically for the insertion flow.
+
+    Reads only the specified JSON metadata file.
+    Returns default metadata if the file is not found.
+
+    Args:
+        s3_block: S3Bucket block for S3 access.
+        state_file_path: Exact path to the metadata JSON file (e.g., 'aggregated/argentina_product_state.json').
+
+    Returns:
+        Loaded or default ArgentinaProductStateMetadata.
+
+    Raises:
+        ClientError: For non-404 S3 errors.
+        json.JSONDecodeError: For invalid JSON.
+        Exception: For other unexpected errors.
+    """
+    logger = get_logger_safe(__name__)
+    try:
+        logger.info(f"Loading insertion metadata from: {state_file_path}")
+        metadata_bytes = await s3_block.aread_path(state_file_path)
+        metadata = ArgentinaProductStateMetadata(**json.loads(metadata_bytes.decode("utf-8")))
+        logger.info("Insertion metadata loaded successfully.")
+        return metadata
+    except ClientError as e:
+        if _is_client_error_not_found(e):
+            default_metadata = ArgentinaProductStateMetadata()
+            logger.warning(f"Insertion metadata file '{state_file_path}' not found. Using defaults: {default_metadata}")
+            return default_metadata
+        else:
+            logger.error(f"S3 Error loading insertion metadata: {e}", exc_info=True)
+            raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in insertion metadata file: {e}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error loading insertion metadata: {e}", exc_info=True)
+        raise
+
+
+@task(name="Save Insertion Metadata to S3")
+async def save_insertion_metadata(
+    s3_block: S3Bucket,
+    metadata: ArgentinaProductStateMetadata,
+    state_file_path: str,
+) -> None:
+    """
+    Saves the ArgentinaProductStateMetadata to the specified JSON file in S3.
+
+    Args:
+        s3_block: Configured Prefect S3Bucket block.
+        metadata: ArgentinaProductStateMetadata object containing the latest state.
+        state_file_path: Exact path to the metadata JSON file (e.g., 'aggregated/argentina_product_state.json').
+
+    Raises:
+        Exception: If S3 write operation fails.
+    """
+    logger = get_logger_safe(__name__)
+    logger.info(f"Saving insertion metadata to: {state_file_path}")
+
+    try:
+        metadata_json = metadata.model_dump_json()
+        await s3_block.awrite_path(path=state_file_path, content=metadata_json.encode("utf-8"))
+        logger.info("Insertion metadata saved successfully.")
+    except Exception as e:
+        logger.error(f"Failed to save insertion metadata: {e}", exc_info=True)
+        raise
+
 # --- State Saving Task ---
 
 @task(name="Save Aggregation State to S3")
@@ -465,13 +540,13 @@ def _extract_existing_ids(aggregated_df: DataFrame[DynamicPrimitiveSourceModel])
 
 def _generate_argentina_product_stream_id(source_id: str) -> str:
     """
-    Generates a stream ID specific to Argentina SEPA products using the SDK utility.
+    Generates a stream ID specific to Argentina SEPA products using the SDK utility, that hashes over a name.
 
     Args:
         source_id: The product ID (id_producto). Must be non-empty.
 
     Returns:
-        The generated stream ID (e.g., "arg_sepa_prod_123").
+        The generated stream ID (e.g., "st1234...689").
 
     Raises:
         ValueError: If the source_id is empty or invalid.
@@ -701,6 +776,11 @@ def _concatenate_and_validate(
 
 # --- Main Processing Function (Refactored) ---
 
+
+@task(
+    name="process_single_date_products",
+    description="Processes product data for a single date using helper functions.",
+)
 async def process_single_date_products(
     date_to_process: DateStr,
     current_aggregated_data: DataFrame[DynamicPrimitiveSourceModel],
