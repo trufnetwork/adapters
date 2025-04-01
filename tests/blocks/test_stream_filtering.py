@@ -5,7 +5,6 @@ import pandas as pd
 from unittest.mock import MagicMock, patch
 
 from src.tsn_adapters.blocks.stream_filtering import (
-    check_single_stream_existence,
     fallback_method_filter_streams,
     batch_method_filter_streams,
     combine_divide_conquer_results,
@@ -63,36 +62,6 @@ class TestStreamFiltering:
         assert not existent.empty
         assert existent.iloc[0]["stream_id"] == "stream1"
         assert non_existent.empty
-
-    def test_check_single_stream_existence_not_exists(self):
-        """Test check_single_stream_existence when stream doesn't exist."""
-        self.mock_block.stream_exists.return_value = False
-        row = self.stream_data.iloc[0]
-        
-        existent, non_existent = check_single_stream_existence(
-            self.mock_block, row, self.mock_logger
-        )
-        
-        self.mock_block.stream_exists.assert_called_once()
-        assert existent.empty
-        assert not non_existent.empty
-        assert non_existent.iloc[0]["stream_id"] == "stream1"
-
-    def test_check_single_stream_existence_error(self):
-        """Test check_single_stream_existence when an error occurs."""
-        self.mock_block.stream_exists.side_effect = Exception("Test error")
-        row = self.stream_data.iloc[0]
-        
-        existent, non_existent = check_single_stream_existence(
-            self.mock_block, row, self.mock_logger
-        )
-        
-        self.mock_block.stream_exists.assert_called_once()
-        assert existent.empty
-        assert not non_existent.empty
-        assert non_existent.iloc[0]["stream_id"] == "stream1"
-        self.mock_logger.warning.assert_called_once()
-        self.mock_logger.debug.assert_called_once()
 
     @patch("src.tsn_adapters.blocks.stream_filtering.task_filter_batch_initialized_streams")
     def test_fallback_method_filter_streams(self, mock_batch_init):

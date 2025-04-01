@@ -4,10 +4,10 @@ Data models for the Argentina SEPA product aggregation flow.
 
 from datetime import datetime
 
-import pandera as pa
-from pandera.typing import Series as PanderaSeries
 from pandas import Series as PandasSeries
+import pandera as pa
 from pandera.api.extensions import register_check_method  # type: ignore
+from pandera.typing import Series as PanderaSeries
 from pydantic import BaseModel, Field, field_validator
 
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel
@@ -44,13 +44,11 @@ class ArgentinaProductStateMetadata(BaseModel):
 
 # Define and register the check
 @register_check_method(
-    check_type="vectorized",
-    supported_types=(PandasSeries,),
-    strategy="element_wise"
-)  # type: ignore checked it works with tests
-def check_yyyy_mm_dd(s: 'PandasSeries[str]') -> 'PandasSeries[bool]':
+    check_type="vectorized", supported_types=(PandasSeries,), strategy="element_wise"
+)  # type: ignore
+def check_yyyy_mm_dd(s: "PandasSeries[str]") -> "PandasSeries[bool]":
     """Check that the date string is in YYYY-MM-DD format."""
-    return s.str.match(r'^\d{4}-\d{2}-\d{2}$', na=False)
+    return s.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)
 
 
 class DynamicPrimitiveSourceModel(PrimitiveSourceDataModel):
@@ -65,8 +63,7 @@ class DynamicPrimitiveSourceModel(PrimitiveSourceDataModel):
         description="The description captured when the product was first seen."
     )
     first_shown_at: PanderaSeries[str] = pa.Field(
-        description="The date (YYYY-MM-DD) the product was first encountered.",
-        check_yyyy_mm_dd=True
+        description="The date (YYYY-MM-DD) the product was first encountered.", check_yyyy_mm_dd=True
     )
 
     class Config(PrimitiveSourceDataModel.Config):
@@ -75,5 +72,6 @@ class DynamicPrimitiveSourceModel(PrimitiveSourceDataModel):
 
         Inherits strict='filter' and coerce=True from the base model.
         """
+
         # inherits strict = "filter" and coerce = True
         drop_invalid_rows = True

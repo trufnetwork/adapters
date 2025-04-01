@@ -3,6 +3,7 @@ Unit tests for the Argentina SEPA product aggregation data models.
 """
 
 import json
+import re
 
 import pandas as pd
 from pandera.errors import SchemaError
@@ -10,8 +11,8 @@ from pydantic import ValidationError
 import pytest
 
 from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
+    ArgentinaProductStateMetadata,
     DynamicPrimitiveSourceModel,
-    ProductAggregationMetadata,
 )
 
 # --- Tests for ProductAggregationMetadata ---
@@ -19,39 +20,78 @@ from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
 
 def test_metadata_instantiation_defaults():
     """Test instantiation with default values."""
-    metadata = ProductAggregationMetadata()
-    assert metadata.last_processed_date == "1970-01-01"
+    metadata = ArgentinaProductStateMetadata()
+    assert metadata.last_aggregation_processed_date == "1970-01-01"
+    assert metadata.last_product_deployment_date == "1970-01-01"
+    assert metadata.last_insertion_processed_date == "1970-01-01"
     assert metadata.total_products_count == 0
 
 
 def test_metadata_instantiation_valid():
-    """Test instantiation with valid data."""
-    metadata = ProductAggregationMetadata(last_processed_date="2023-10-26", total_products_count=150)
-    assert metadata.last_processed_date == "2023-10-26"
+    """Test instantiation with valid data for all fields."""
+    metadata = ArgentinaProductStateMetadata(
+        last_aggregation_processed_date="2023-10-26",
+        last_product_deployment_date="2023-11-15",
+        last_insertion_processed_date="2023-11-01",
+        total_products_count=150,
+    )
+    assert metadata.last_aggregation_processed_date == "2023-10-26"
+    assert metadata.last_product_deployment_date == "2023-11-15"
+    assert metadata.last_insertion_processed_date == "2023-11-01"
     assert metadata.total_products_count == 150
 
 
-def test_metadata_instantiation_invalid_date():
-    """Test instantiation with invalid date format raises ValidationError."""
-    with pytest.raises(ValidationError, match="last_processed_date must be in YYYY-MM-DD format"):
-        ProductAggregationMetadata(last_processed_date="26-10-2023", total_products_count=10)
+@pytest.mark.parametrize(
+    "field_name, invalid_date",
+    [
+        ("last_aggregation_processed_date", "26-10-2023"),
+        ("last_product_deployment_date", "2023/11/15"),
+        ("last_insertion_processed_date", "Nov 1, 2023"),
+        ("last_aggregation_processed_date", ""), # Test empty string
+        ("last_product_deployment_date", "invalid"), # Test non-date string
+    ],
+)
+def test_metadata_instantiation_invalid_date(field_name: str, invalid_date: str):
+    """Test instantiation with invalid date format raises ValidationError for each date field."""
+    valid_data = {
+        "last_aggregation_processed_date": "2023-01-01",
+        "last_product_deployment_date": "2023-01-01",
+        "last_insertion_processed_date": "2023-01-01",
+        "total_products_count": 10,
+    }
+    invalid_data = {**valid_data, field_name: invalid_date}
+
+    # Use re.compile with DOTALL to match field name and message across lines
+    with pytest.raises(ValidationError, match=re.compile(f"{field_name}.*Date must be in YYYY-MM-DD format", re.DOTALL)):
+        ArgentinaProductStateMetadata(**invalid_data) # type: ignore[arg-type]
 
 
 def test_metadata_serialization_deserialization():
-    """Test serialization to dict/json and deserialization."""
-    metadata = ProductAggregationMetadata(last_processed_date="2024-01-15", total_products_count=500)
+    """Test serialization to dict/json and deserialization including new fields."""
+    metadata = ArgentinaProductStateMetadata(
+        last_aggregation_processed_date="2024-01-15",
+        last_product_deployment_date="2024-02-01",
+        last_insertion_processed_date="2024-01-20",
+        total_products_count=500,
+    )
     metadata_dict = metadata.model_dump()
-    assert metadata_dict == {"last_processed_date": "2024-01-15", "total_products_count": 500}
+    expected_dict = {
+        "last_aggregation_processed_date": "2024-01-15",
+        "last_product_deployment_date": "2024-02-01",
+        "last_insertion_processed_date": "2024-01-20",
+        "total_products_count": 500,
+    }
+    assert metadata_dict == expected_dict
 
     metadata_json = metadata.model_dump_json()
-    assert json.loads(metadata_json) == metadata_dict
+    assert json.loads(metadata_json) == expected_dict
 
     # Deserialize from dict
-    deserialized_from_dict = ProductAggregationMetadata(**metadata_dict)
+    deserialized_from_dict = ArgentinaProductStateMetadata(**metadata_dict)
     assert deserialized_from_dict == metadata
 
     # Deserialize from json
-    deserialized_from_json = ProductAggregationMetadata.model_validate_json(metadata_json)
+    deserialized_from_json = ArgentinaProductStateMetadata.model_validate_json(metadata_json)
     assert deserialized_from_json == metadata
 
 
