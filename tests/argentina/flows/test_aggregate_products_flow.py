@@ -22,7 +22,7 @@ from prefect_aws import S3Bucket  # type: ignore
 import pytest
 
 from tsn_adapters.tasks.argentina.flows.aggregate_products_flow import aggregate_argentina_products_flow
-from tsn_adapters.tasks.argentina.models import DynamicPrimitiveSourceModel, ProductAggregationMetadata
+from tsn_adapters.tasks.argentina.models import DynamicPrimitiveSourceModel, ArgentinaProductStateMetadata
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
@@ -67,8 +67,8 @@ def empty_aggregated_df() -> pd.DataFrame:
 
 # Fixture for default metadata
 @pytest.fixture
-def default_metadata() -> ProductAggregationMetadata:
-    return ProductAggregationMetadata()
+def default_metadata() -> ArgentinaProductStateMetadata:
+    return ArgentinaProductStateMetadata()
 
 
 # --- Fixtures for Moto-based End-to-End Tests ---
@@ -156,7 +156,7 @@ def upload_sample_data(s3_block: S3Bucket, date_str: DateStr, data: pd.DataFrame
 
 
 # Helper Function to Upload Initial State
-def upload_initial_state(s3_block: S3Bucket, metadata: ProductAggregationMetadata, data: pd.DataFrame):
+def upload_initial_state(s3_block: S3Bucket, metadata: ArgentinaProductStateMetadata, data: pd.DataFrame):
     """Uploads initial aggregated state (metadata JSON, data CSV.gz) to mock S3."""
     # Upload Metadata
     metadata_json = metadata.model_dump_json().encode("utf-8")
@@ -186,8 +186,8 @@ def verify_final_state(
     try:
         metadata_obj = s3_block._boto_client.get_object(Bucket=s3_block.bucket_name, Key=METADATA_S3_PATH)  # type: ignore
         metadata_content = metadata_obj["Body"].read().decode("utf-8")  # type: ignore
-        loaded_metadata = ProductAggregationMetadata(**json.loads(metadata_content))  # type: ignore
-        assert loaded_metadata.last_processed_date == expected_last_date
+        loaded_metadata = ArgentinaProductStateMetadata(**json.loads(metadata_content))  # type: ignore
+        assert loaded_metadata.last_aggregation_processed_date == expected_last_date
         assert loaded_metadata.total_products_count == expected_total_products
     except s3_block._boto_client.exceptions.NoSuchKey:  # type: ignore
         pytest.fail(f"Metadata file not found at {METADATA_S3_PATH}")
@@ -271,7 +271,7 @@ async def test_aggregate_flow_with_state_and_artifacts_simplified_mock(
     mock_s3_block: MagicMock,
     mock_provider: MagicMock,
     empty_aggregated_df: pd.DataFrame,
-    default_metadata: ProductAggregationMetadata,
+    default_metadata: ArgentinaProductStateMetadata,
     expected_df_day1: pd.DataFrame,
     expected_df_day2: pd.DataFrame,
 ):
@@ -296,7 +296,7 @@ async def test_aggregate_flow_with_state_and_artifacts_simplified_mock(
             AsyncMock(return_value=(empty_aggregated_df, default_metadata)),
         ) as mock_load_task,
         patch(
-            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.determine_date_range_to_process",
+            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.determine_aggregation_dates",
             return_value=dates_to_process,
         ) as mock_date_range_task,
         patch(
@@ -366,10 +366,10 @@ def test_aggregate_flow_no_dates_to_process_with_artifact(
     mock_s3_block: MagicMock,
     mock_provider: MagicMock,
     empty_aggregated_df: pd.DataFrame,
-    default_metadata: ProductAggregationMetadata,
+    default_metadata: ArgentinaProductStateMetadata,
 ):
     """
-    Tests the flow behavior when determine_date_range_to_process returns an empty list.
+    Tests the flow behavior when determine_aggregation_dates returns an empty list.
     """
     # --- Mock Setup ---
     with (
@@ -381,7 +381,7 @@ def test_aggregate_flow_no_dates_to_process_with_artifact(
             "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.load_aggregation_state", new_callable=AsyncMock
         ) as mock_load_state,
         patch(
-            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.determine_date_range_to_process"
+            "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.determine_aggregation_dates"
         ) as mock_determine_range,
         patch(
             "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.process_single_date_products"
@@ -497,7 +497,7 @@ async def test_aggregate_flow_end_to_end_resume(
 ):
     """Tests resuming aggregation from a pre-existing state."""
     # --- Setup Initial State ---
-    initial_metadata = ProductAggregationMetadata(last_processed_date="2024-03-10", total_products_count=2)
+    initial_metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-10", total_products_count=2)
     initial_products = [
         {
             "stream_id": "arg_sepa_prod_P001",
@@ -588,7 +588,7 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
     Tests the flow end-to-end with moto, with force_reprocess=True, ignoring initial state date.
     """
     # Simulate existing state that will be overwritten
-    initial_metadata = ProductAggregationMetadata(last_processed_date="2024-03-10", total_products_count=1)
+    initial_metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-10", total_products_count=1)
     initial_products = [
         {
             "stream_id": "arg_sepa_prod_OLD",
