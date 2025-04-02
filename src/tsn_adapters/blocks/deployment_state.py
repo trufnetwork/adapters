@@ -54,7 +54,7 @@ class DeploymentStateModel(DataFrameModel):
         deployment_timestamp: Non-nullable pandas Timestamp. Must be timezone-aware (UTC).
     """
     stream_id: Series[str] = Field(nullable=False)
-    deployment_timestamp: Series[pd.Timestamp] = Field(nullable=False)
+    deployment_timestamp: Series[pd.Timestamp] = Field(nullable=True)
 
     class Config:  # type: ignore
         strict = "filter"

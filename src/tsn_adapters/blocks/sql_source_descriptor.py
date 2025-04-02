@@ -7,10 +7,10 @@ from typing import cast
 import pandas as pd
 from pandera.typing import DataFrame
 from prefect_sqlalchemy import SqlAlchemyConnector
-from sqlalchemy import Table, delete, select
-from sqlalchemy.engine import Engine, Connection
+from sqlalchemy import Table, delete, select, Column
+from sqlalchemy.engine import Engine, Connection, Transaction
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.sql import Select, func
+from sqlalchemy.sql import Select, func, ColumnElement
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from tsn_adapters.blocks.models import primitive_sources_table
@@ -32,6 +32,7 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
         sql_connector: Prefect block providing SQLAlchemy connection details.
         table_name: The name of the database table to interact with.
                       Defaults to "primitive_sources".
+        source_type: The type of the source.
     """
 
     _block_type_name = "SQLAlchemy Source Descriptor"
@@ -40,6 +41,7 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
 
     sql_connector: SqlAlchemyConnector
     table_name: str = "primitive_sources" # Default table name
+    source_type: str # Add mandatory source_type parameter
 
     @property
     def logger(self):
@@ -83,24 +85,46 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
         """
         engine = self._get_engine()
         try:
-            with engine.connect() as connection:
-                stmt: Select = select(self._table)
+            # Use engine.connect() which yields a Connection
+            with engine.connect() as connection: # type: Connection
+                # Select specific columns for clarity and correctness
+                # Ensure columns exist on the table object
+                stmt: Select = select(
+                    self._table.c.stream_id,
+                    self._table.c.source_id,
+                    self._table.c.source_type
+                    # Add other necessary columns if PrimitiveSourceDataModel requires them
+                ).where(self._table.c.source_type == self.source_type) # Filter by source_type
+                
+                self.logger.debug(f"Querying table '{self.table_name}' for source_type '{self.source_type}'.")
                 # Use specific dtypes for read_sql for better type inference
-                df = pd.read_sql(sql=stmt, con=connection)
-                # Ensure correct dtypes, especially if reading an empty table
-                for col, pa_dtype in PrimitiveSourceDataModel.to_schema().columns.items():
+                df = pd.read_sql(sql=stmt, con=connection) # read_sql needs a Connection
+
+                # --- DataFrame Validation and Type Correction ---
+                # Define expected columns based on the Pandera model
+                expected_cols = list(PrimitiveSourceDataModel.to_schema().columns.keys())
+                
+                # Ensure all expected columns exist, adding missing ones with correct dtype
+                for col in expected_cols:
+                    pa_dtype = PrimitiveSourceDataModel.to_schema().columns[col]
                     pd_dtype = pa_dtype.dtype.type if pa_dtype.dtype else object
                     if col not in df.columns:
                         df[col] = pd.Series(dtype=pd_dtype)
-                    else:
-                        if not pd.api.types.is_dtype_equal(df[col].dtype, pd_dtype):
-                            try:
-                                # Use astype with error handling
-                                df[col] = df[col].astype(pd_dtype)
-                            except Exception as e:
-                                self.logger.warning(f"Could not cast column '{col}' from {df[col].dtype} to {pd_dtype}: {e}")
-                # Validate and return
+                    elif not pd.api.types.is_dtype_equal(df[col].dtype, pd_dtype):
+                        try:
+                            # Attempt conversion, handle potential errors gracefully
+                            df[col] = df[col].astype(pd_dtype)
+                        except (ValueError, TypeError) as e:
+                            self.logger.warning(f"Could not cast column '{col}' from {df[col].dtype} to {pd_dtype}. Error: {e}. Setting to object type.")
+                            df[col] = df[col].astype(object) # Fallback to object
+                
+                # Filter DataFrame to only include expected columns (handles extra columns from DB)
+                df = df[expected_cols]
+
+                # Validate final DataFrame structure and types with Pandera
                 return DataFrame[PrimitiveSourceDataModel](df)
+                # --- End Validation ---
+
         except SQLAlchemyError as e:
             self.logger.error(f"Error querying table '{self.table_name}': {e}", exc_info=True)
         except Exception as e:
@@ -108,9 +132,9 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
                 f"An unexpected error occurred retrieving descriptor from table '{self.table_name}': {e}",
                 exc_info=True,
             )
-        # Return empty DataFrame in case of any error
+            
+        # Return validated empty DataFrame in case of any error
         empty_df = pd.DataFrame(columns=list(PrimitiveSourceDataModel.to_schema().columns.keys()))
-        # Ensure empty df also has correct types before casting
         for col, pa_dtype in PrimitiveSourceDataModel.to_schema().columns.items():
             pd_dtype = pa_dtype.dtype.type if pa_dtype.dtype else object
             if col not in empty_df.columns:
@@ -121,7 +145,7 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
         """
         Overwrites the entire source descriptor table with the provided data.
 
-        This performs a DELETE operation followed by an INSERT operation.
+        This performs a DELETE operation followed by an INSERT operation within a transaction.
         Use with caution, as it removes all existing data in the table.
 
         Args:
@@ -130,26 +154,51 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
         """
         engine = self._get_engine()
         validated_descriptor = PrimitiveSourceDataModel.validate(descriptor)
-        
+
+        # Input Validation: Check if all incoming rows match self.source_type
+        if not validated_descriptor.empty and not (validated_descriptor["source_type"] == self.source_type).all():
+            mismatched = validated_descriptor[validated_descriptor["source_type"] != self.source_type]["source_type"].unique()
+            error_msg = f"Input descriptor contains rows with source_type(s) {list(mismatched)} which do not match the block's configured source_type '{self.source_type}'."
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+
         try:
-            with engine.begin() as connection: # type: Connection
-                # Delete all existing rows
-                self.logger.info(f"Deleting all existing rows from table '{self.table_name}'.")
-                delete_stmt = delete(self._table)
-                connection.execute(delete_stmt)
-                self.logger.info("Existing rows deleted.")
-                
-                # Insert new data
-                self.logger.info(f"Inserting {len(validated_descriptor)} new rows into table '{self.table_name}'.")
-                # Use connection from the transaction context for to_sql
-                validated_descriptor.to_sql(
-                    name=self.table_name,
-                    con=connection,
-                    if_exists="append", # Should be safe after delete
-                    index=False,
-                    # Consider specifying dtype mapping if needed
+            # Use engine.begin() which yields a Connection within a Transaction context
+            with engine.begin() as connection:
+                # Pre-Delete Check: Ensure no conflicting source_types exist in the table
+                check_stmt = select(func.count(self._table.c.stream_id)).where(
+                    self._table.c.source_type != self.source_type
                 )
-                self.logger.info("New rows inserted successfully.")
+                conflicting_count_result = connection.execute(check_stmt).scalar()
+                conflicting_count = conflicting_count_result if conflicting_count_result is not None else 0
+
+                if conflicting_count > 0:
+                    error_msg = f"Cannot overwrite table '{self.table_name}' because it contains {conflicting_count} rows with source_type other than '{self.source_type}'."
+                    self.logger.error(error_msg)
+                    raise ValueError(error_msg)
+                else:
+                    self.logger.debug(f"Pre-delete check passed: No conflicting source_types found in '{self.table_name}'.")
+
+                # Delete only rows matching the configured source_type
+                self.logger.info(f"Deleting existing rows with source_type '{self.source_type}' from table '{self.table_name}'.")
+                delete_stmt = delete(self._table).where(self._table.c.source_type == self.source_type)
+                delete_result = connection.execute(delete_stmt) 
+                self.logger.info(f"Deleted {delete_result.rowcount} existing rows with source_type '{self.source_type}'.")
+
+                # Insert new data if the descriptor is not empty
+                if not validated_descriptor.empty:
+                    self.logger.info(f"Inserting {len(validated_descriptor)} new rows into table '{self.table_name}'.")
+                    # Use the connection provided by engine.begin() for pandas to_sql
+                    validated_descriptor.to_sql(
+                        name=self.table_name,
+                        con=connection, # Pass the connection
+                        if_exists="append", # Safe after delete
+                        index=False,
+                        # dtype=PrimitiveSourceDataModel.to_sqlalchemy_types() # Optional: Specify types if needed
+                    )
+                    self.logger.info("New rows inserted successfully.")
+                else:
+                    self.logger.info("Input descriptor is empty, no rows to insert after delete.")
         except SQLAlchemyError as e:
             self.logger.error(
                 f"Database error during set_sources for table '{self.table_name}': {e}", exc_info=True
@@ -175,6 +224,8 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
                         containing the data to upsert.
 
         Raises:
+            ValueError: If the input descriptor contains source_types 
+                        mismatched with the block's configured source_type.
             SQLAlchemyError: If a database error occurs during the upsert.
             Exception: For other unexpected errors.
         """
@@ -185,39 +236,56 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
             self.logger.info("Input descriptor is empty, nothing to upsert.")
             return
 
+        # Input Validation: Check if all incoming rows match self.source_type
+        if not (validated_descriptor["source_type"] == self.source_type).all():
+            mismatched = validated_descriptor[validated_descriptor["source_type"] != self.source_type]["source_type"].unique()
+            error_msg = f"Input descriptor contains rows with source_type(s) {list(mismatched)} which do not match the block's configured source_type '{self.source_type}'. Upsert aborted."
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+
         # Convert DataFrame to list of dictionaries for SQLAlchemy Core API
-        rows_to_upsert = validated_descriptor.to_dict(orient="records")
+        # Ensure only columns present in the table model are included
+        table_cols = [c.name for c in self._table.columns]
+        # Filter DataFrame columns before converting to dict
+        cols_to_upsert = [col for col in validated_descriptor.columns if col in table_cols]
+        rows_to_upsert = validated_descriptor[cols_to_upsert].to_dict(orient="records")
+        
+        if not rows_to_upsert:
+             self.logger.warning("DataFrame columns do not match table columns, nothing to upsert.")
+             return
 
         # Construct the base insert statement
         insert_stmt = pg_insert(self._table).values(rows_to_upsert)
 
         # Define the ON CONFLICT DO UPDATE clause
-        # Specify the conflict target (the primary key column)
         # Use the 'excluded' pseudo-table to refer to the values proposed for insertion
+        excluded = insert_stmt.excluded
         update_columns = {
             # Update 'source_id' and 'source_type' if they differ from existing values
-            # Also update 'updated_at' automatically via the table definition
-            "source_id": insert_stmt.excluded.source_id,
-            "source_type": insert_stmt.excluded.source_type,
+            # Use excluded.column_name to reference incoming values
+            "source_id": excluded.source_id,
+            "source_type": excluded.source_type,
             "updated_at": func.now(), # Explicitly update updated_at
         }
-        
+
         # The WHERE clause ensures updates only happen if values actually changed
         # Accessing the table columns directly for the comparison
-        table = self._table
-        where_clause = (table.c.source_id != insert_stmt.excluded.source_id) | \\
-                       (table.c.source_type != insert_stmt.excluded.source_type)
+        table: Table = self._table
+        # Corrected where_clause without syntax error
+        where_clause: ColumnElement[bool] = (table.c.source_id != excluded.source_id) | \
+                       (table.c.source_type != excluded.source_type)
 
         upsert_stmt = insert_stmt.on_conflict_do_update(
-            index_elements=["stream_id"],  # Conflict target constraint (PK)
-            set_=update_columns,           # Columns to update
-            where=where_clause              # Condition for update
+            index_elements=[table.c.stream_id],  # Use Column object for index_elements (PK)
+            set_=update_columns,                 # Columns to update
+            where=where_clause                    # Condition for update
         )
 
         try:
+            # Use engine.begin() which yields a Connection within a Transaction context
             with engine.begin() as connection: # type: Connection
                 self.logger.info(f"Executing upsert for {len(rows_to_upsert)} rows into table '{self.table_name}'.")
-                connection.execute(upsert_stmt)
+                connection.execute(upsert_stmt) # Execute on the connection
                 self.logger.info("Upsert operation completed successfully.")
         except SQLAlchemyError as e:
             self.logger.error(
