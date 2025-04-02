@@ -11,7 +11,7 @@ from pandera.typing import DataFrame
 import pytest
 
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
-from tsn_adapters.tasks.argentina.models import ArgentinaProductStateMetadata, DynamicPrimitiveSourceModel
+from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks.date_processing_tasks import (
@@ -100,15 +100,8 @@ async def test_determine_dates_to_process_scenarios(
     """Test determine_dates_to_process with various scenarios."""
     # Arrange
     mock_product_averages_provider.list_available_keys.return_value = available_dates
-    # Create metadata instance, handling potential validation errors during test setup if needed
-    try:
-        metadata = ArgentinaProductStateMetadata(**metadata_dict)
-    except ValueError as e:
-        # If metadata itself is invalid in the test parameters, fail the test setup
-        pytest.fail(f"Invalid metadata provided in test parameters: {metadata_dict} - {e}")
-
     # Act
-    result_dates = await determine_dates_to_insert.fn(metadata=metadata, provider=mock_product_averages_provider)
+    result_dates = await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
 
     # Assert
     mock_product_averages_provider.list_available_keys.assert_called_once()
@@ -143,11 +136,10 @@ async def test_determine_dates_to_process_provider_error(mock_product_averages_p
     # Arrange
     test_exception = OSError("Simulated S3 connection error")
     mock_product_averages_provider.list_available_keys.side_effect = test_exception
-    metadata = ArgentinaProductStateMetadata()  # Default metadata
 
     # Act & Assert
     with pytest.raises(IOError) as exc_info:
-        await determine_dates_to_insert.fn(metadata=metadata, provider=mock_product_averages_provider)
+        await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
 
     # Check that the original exception is raised
     assert exc_info.value is test_exception
@@ -222,34 +214,30 @@ def sample_daily_avg_df() -> DataFrame[SepaAvgPriceProductModel]:
 
 # Fixture for sample Descriptor DataFrame
 @pytest.fixture
-def sample_descriptor_df() -> DataFrame[DynamicPrimitiveSourceModel]:
+def sample_descriptor_df() -> DataFrame[PrimitiveSourceDataModel]:
     data = {
         "stream_id": ["stream-1", "stream-2", "stream-3"],
         "source_id": ["p1", "p2", "p3"],  # Matches sample_daily_avg_df for success case
         "source_type": ["arg_sepa_prod"] * 3,
-        "productos_descripcion": ["Desc 1", "Desc 2", "Desc 3"],
-        "first_shown_at": ["2023-01-01"] * 3,
     }
-    return DynamicPrimitiveSourceModel.validate(pd.DataFrame(data), lazy=True)
+    return PrimitiveSourceDataModel.validate(pd.DataFrame(data), lazy=True)
 
 
 # Fixture for sample Descriptor DataFrame with missing mappings
 @pytest.fixture
-def sample_descriptor_missing_df() -> DataFrame[DynamicPrimitiveSourceModel]:
+def sample_descriptor_missing_df() -> DataFrame[PrimitiveSourceDataModel]:
     data = {
         "stream_id": ["stream-1", "stream-2"],  # Only p1 and p2 are mapped
         "source_id": ["p1", "p2"],
         "source_type": ["arg_sepa_prod"] * 2,
-        "productos_descripcion": ["Desc 1", "Desc 2"],
-        "first_shown_at": ["2023-01-01"] * 2,
     }
-    return DynamicPrimitiveSourceModel.validate(pd.DataFrame(data), lazy=True)
+    return PrimitiveSourceDataModel.validate(pd.DataFrame(data), lazy=True)
 
 
 @pytest.mark.asyncio
 async def test_transform_product_data_full_success(
     sample_daily_avg_df: DataFrame[SepaAvgPriceProductModel],
-    sample_descriptor_df: DataFrame[DynamicPrimitiveSourceModel],
+    sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
 ):
     """Test the full successful transformation process."""
     # Arrange
@@ -292,7 +280,7 @@ async def test_transform_product_data_full_success(
 @pytest.mark.asyncio
 async def test_transform_product_data_mapping_failure(
     sample_daily_avg_df: DataFrame[SepaAvgPriceProductModel],
-    sample_descriptor_missing_df: DataFrame[DynamicPrimitiveSourceModel],
+    sample_descriptor_missing_df: DataFrame[PrimitiveSourceDataModel],
     caplog: pytest.LogCaptureFixture,
 ):
     """Test mapping integrity check failure in transform_product_data."""
@@ -318,7 +306,7 @@ async def test_transform_product_data_mapping_failure(
 
 @pytest.mark.asyncio
 async def test_transform_product_data_empty_input(
-    sample_descriptor_df: DataFrame[DynamicPrimitiveSourceModel],
+    sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
     caplog: pytest.LogCaptureFixture,
 ):
     """Test transform_product_data with an empty input daily average DataFrame."""
@@ -345,7 +333,7 @@ async def test_transform_product_data_empty_input(
 
 @pytest.mark.asyncio
 async def test_transform_product_data_invalid_date_format(
-    sample_descriptor_df: DataFrame[DynamicPrimitiveSourceModel],
+    sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
     caplog: pytest.LogCaptureFixture,
 ):
     """Test transformation failure when date format is invalid."""
@@ -372,7 +360,7 @@ async def test_transform_product_data_invalid_date_format(
 
 @pytest.mark.asyncio
 async def test_transform_product_data_timestamp_out_of_range(
-    sample_descriptor_df: DataFrame[DynamicPrimitiveSourceModel],
+    sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
     caplog: pytest.LogCaptureFixture,
 ):
     """Test transformation failure when date results in out-of-range timestamp."""

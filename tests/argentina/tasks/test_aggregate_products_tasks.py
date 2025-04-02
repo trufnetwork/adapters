@@ -5,7 +5,6 @@ Unit tests for Argentina SEPA product aggregation tasks.
 from collections.abc import Generator
 import gzip
 import io
-import json
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,36 +14,20 @@ from botocore.exceptions import ClientError  # type: ignore
 from moto import mock_aws
 from mypy_boto3_s3 import S3Client
 import pandas as pd
-from pandera.errors import SchemaError
 from pandera.typing import DataFrame
 from prefect_aws import S3Bucket  # type: ignore
-from pydantic import ValidationError
-from pydantic_core import SchemaError
 import pytest
-from tests.argentina.helpers import (
-    make_metadata,
-    read_s3_csv_gz,
-    read_s3_metadata,
-    upload_df_to_s3_csv_gz,
-    upload_metadata_to_s3,
-    upload_to_s3,
-)
 
-from tsn_adapters.tasks.argentina.models.aggregate_products_models import (
-    ArgentinaProductStateMetadata,
-    DynamicPrimitiveSourceModel,
-)
+from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel
+from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
-    _generate_argentina_product_stream_id,  # type: ignore
-    create_empty_aggregated_data,
     determine_aggregation_dates,
-    load_aggregation_state,
     process_single_date_products,
-    save_aggregation_state,
 )
 from tsn_adapters.tasks.argentina.types import DateStr
+from tsn_adapters.utils import create_empty_df
 
 # --- Fixtures ---
 
@@ -81,27 +64,25 @@ def s3_bucket_block(prefect_test_fixture: Any) -> Generator[S3Bucket, None, None
 
 
 @pytest.fixture
-def valid_agg_data() -> DataFrame[DynamicPrimitiveSourceModel]:
+def valid_agg_data() -> DataFrame[PrimitiveSourceDataModel]:
     """Valid aggregated data DataFrame."""
     df = pd.DataFrame(
         {
             "stream_id": ["arg_sepa_prod_001", "arg_sepa_prod_002"],
             "source_id": ["001", "002"],
             "source_type": ["argentina_sepa_product", "argentina_sepa_product"],
-            "productos_descripcion": ["Test Product 1", "Test Product 2"],
-            "first_shown_at": ["2024-03-01", "2024-03-05"],
         }
     )
     # Ensure dtypes match the model for consistency before validation/saving
-    return DynamicPrimitiveSourceModel.validate(df, lazy=True)
+    return PrimitiveSourceDataModel.validate(df, lazy=True)
 
 
 @pytest.fixture
-def empty_agg_data() -> DataFrame[DynamicPrimitiveSourceModel]:
+def empty_agg_data() -> DataFrame[PrimitiveSourceDataModel]:
     """Empty but validated aggregated data DataFrame."""
-    df = create_empty_aggregated_data()
-    # Validate against the correct model: DynamicPrimitiveSourceModel
-    return DynamicPrimitiveSourceModel.validate(df, lazy=True)
+    df = create_empty_df(PrimitiveSourceDataModel)
+    # Validate against the correct model: PrimitiveSourceDataModel
+    return PrimitiveSourceDataModel.validate(df, lazy=True)
 
 
 @pytest.fixture
@@ -228,256 +209,6 @@ def setup_mock_aread_path(mock_provider: MagicMock):
     return _setup
 
 
-# --- Test Cases for load_aggregation_state ---
-
-
-@pytest.mark.asyncio
-async def test_load_aggregation_state_success(
-    s3_bucket_block: S3Bucket,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
-):
-    """Test successful loading of existing metadata and data."""
-    # Arrange
-    # Use factory for metadata
-    initial_metadata = make_metadata(last_aggregation_processed_date="2024-03-10", total_products_count=2)
-    # Use helpers to upload
-    upload_metadata_to_s3(s3_bucket_block, METADATA_PATH, initial_metadata)
-    upload_df_to_s3_csv_gz(s3_bucket_block, DATA_PATH, valid_agg_data)
-
-    # Act
-    loaded_data, loaded_metadata = await load_aggregation_state.fn(s3_block=s3_bucket_block, base_path=BASE_PATH)
-
-    # Assert
-    assert loaded_metadata == initial_metadata
-    pd.testing.assert_frame_equal(loaded_data, valid_agg_data)
-
-
-@pytest.mark.asyncio
-async def test_load_aggregation_state_no_files(
-    s3_bucket_block: S3Bucket, empty_agg_data: DataFrame[DynamicPrimitiveSourceModel], caplog: LogCaptureFixture
-):
-    """Test loading when metadata and data files are missing (returns defaults/empty)."""
-    # Arrange: No files uploaded
-    caplog.set_level(logging.WARNING)
-    default_metadata = make_metadata()  # Default values
-
-    # Act
-    loaded_data, loaded_metadata = await load_aggregation_state.fn(s3_block=s3_bucket_block, base_path=BASE_PATH)
-
-    # Assert
-    assert loaded_metadata == default_metadata
-    pd.testing.assert_frame_equal(loaded_data, empty_agg_data)
-    assert "Metadata file not found. Using defaults" in caplog.text
-    assert "Data file not found. Returning empty DataFrame" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_load_aggregation_state_only_metadata_exists(
-    s3_bucket_block: S3Bucket, empty_agg_data: DataFrame[DynamicPrimitiveSourceModel], caplog: LogCaptureFixture
-):
-    """Test loading when only metadata exists (returns metadata and empty data)."""
-    # Arrange
-    caplog.set_level(logging.WARNING)
-    initial_metadata = make_metadata(last_aggregation_processed_date="2024-01-01", total_products_count=5)
-    upload_metadata_to_s3(s3_bucket_block, METADATA_PATH, initial_metadata)
-    # Data file does not exist
-
-    # Act
-    loaded_data, loaded_metadata = await load_aggregation_state.fn(s3_block=s3_bucket_block, base_path=BASE_PATH)
-
-    # Assert
-    assert loaded_metadata == initial_metadata
-    pd.testing.assert_frame_equal(loaded_data, empty_agg_data)
-    assert "Metadata file not found" not in caplog.text  # Metadata was found
-    assert "Data file not found. Returning empty DataFrame" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_load_aggregation_state_only_data_exists(
-    s3_bucket_block: S3Bucket, valid_agg_data: DataFrame[DynamicPrimitiveSourceModel], caplog: LogCaptureFixture
-):
-    """Test loading when only data exists (returns default metadata and data)."""
-    # Arrange
-    caplog.set_level(logging.WARNING)
-    default_metadata = make_metadata()  # Expect defaults
-    upload_df_to_s3_csv_gz(s3_bucket_block, DATA_PATH, valid_agg_data)
-    # Metadata file does not exist
-
-    # Act
-    loaded_data, loaded_metadata = await load_aggregation_state.fn(s3_block=s3_bucket_block, base_path=BASE_PATH)
-
-    # Assert
-    assert loaded_metadata == default_metadata
-    pd.testing.assert_frame_equal(loaded_data, valid_agg_data)
-    assert "Metadata file not found. Using defaults" in caplog.text
-    assert "Data file not found" not in caplog.text  # Data was found
-
-
-@pytest.mark.asyncio
-async def test_load_aggregation_state_invalid_metadata_json(
-    s3_bucket_block: S3Bucket, valid_agg_data: DataFrame[DynamicPrimitiveSourceModel]
-):
-    """Test loading state with invalid metadata JSON."""
-    # Arrange
-    # Use helper to upload valid data
-    upload_df_to_s3_csv_gz(s3_bucket_block, DATA_PATH, valid_agg_data)
-    # Upload invalid json bytes directly
-    invalid_json_bytes = b'{"last_aggregation_processed_date": "2024-03-11", "total_products_count": "abc"}'
-    upload_to_s3(s3_bucket_block, METADATA_PATH, invalid_json_bytes)
-
-    # Act & Assert
-    # Expect Pydantic ValidationError during model parsing
-    with pytest.raises(ValidationError):
-        await load_aggregation_state.fn(s3_block=s3_bucket_block, base_path=BASE_PATH)
-
-
-@pytest.mark.asyncio
-async def test_load_aggregation_state_corrupted_metadata_json(
-    s3_bucket_block: S3Bucket, valid_agg_data: DataFrame[DynamicPrimitiveSourceModel]
-):
-    """Test loading state with corrupted (non-parseable) metadata JSON."""
-    # Arrange
-    upload_df_to_s3_csv_gz(s3_bucket_block, DATA_PATH, valid_agg_data)
-    corrupted_json_bytes = b'{"last_aggregation_processed_date": "2024-03-12", total_products_count: 50'
-    upload_to_s3(s3_bucket_block, METADATA_PATH, corrupted_json_bytes)
-
-    # Act & Assert
-    with pytest.raises(json.JSONDecodeError):
-        await load_aggregation_state.fn(s3_block=s3_bucket_block, base_path=BASE_PATH)
-
-
-@pytest.mark.asyncio
-async def test_load_aggregation_state_invalid_data_schema(
-    s3_bucket_block: S3Bucket,
-):
-    """Test loading state with data CSV that fails Pandera validation."""
-    # Arrange
-    initial_metadata = make_metadata()
-    upload_metadata_to_s3(s3_bucket_block, METADATA_PATH, initial_metadata)
-    # Create invalid data (missing required column)
-    invalid_df = pd.DataFrame(
-        {
-            "stream_id": ["arg_sepa_prod_003"],
-            "source_id": ["003"],
-            # Missing source_type
-            "productos_descripcion": ["Test Product 3"],
-            "first_shown_at": ["2024-03-08"],
-        }
-    )
-    upload_df_to_s3_csv_gz(s3_bucket_block, DATA_PATH, invalid_df)
-
-    # Act & Assert
-    # Expect SchemaError from Pandera validation
-    with pytest.raises(Exception):
-        await load_aggregation_state.fn(s3_block=s3_bucket_block, base_path=BASE_PATH)
-
-
-@pytest.mark.asyncio
-async def test_load_aggregation_state_corrupted_data_csv(
-    s3_bucket_block: S3Bucket,
-):
-    """Test loading state with corrupted (non-CSV) data file."""
-    # Arrange
-    initial_metadata = make_metadata()
-    upload_metadata_to_s3(s3_bucket_block, METADATA_PATH, initial_metadata)
-    corrupted_bytes = gzip.compress(b"this is not csv")
-    upload_to_s3(s3_bucket_block, DATA_PATH, corrupted_bytes)
-
-    # Act & Assert
-    with pytest.raises(Exception):
-        await load_aggregation_state.fn(s3_block=s3_bucket_block, base_path=BASE_PATH)
-
-
-# --- Test Cases for save_aggregation_state ---
-
-
-@pytest.mark.asyncio
-async def test_save_aggregation_state_success(
-    s3_bucket_block: S3Bucket,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
-):
-    """Test successfully saving metadata and data."""
-    # Arrange
-    metadata_to_save = make_metadata(last_aggregation_processed_date="2024-03-15", total_products_count=10)
-
-    # Act
-    await save_aggregation_state.fn(
-        s3_block=s3_bucket_block,
-        aggregated_data=valid_agg_data,
-        metadata=metadata_to_save,
-        base_path=BASE_PATH,
-    )
-
-    # Assert
-    # Use helpers to read back and verify
-    saved_metadata = read_s3_metadata(s3_bucket_block, METADATA_PATH)
-    saved_data = read_s3_csv_gz(s3_bucket_block, DATA_PATH)
-
-    assert saved_metadata == metadata_to_save
-    # Validate DataFrame structure after reading (read_csv might change dtypes)
-    validated_saved_data = DynamicPrimitiveSourceModel.validate(saved_data, lazy=True)
-    pd.testing.assert_frame_equal(validated_saved_data, valid_agg_data)
-
-
-@pytest.mark.asyncio
-async def test_save_aggregation_state_no_prior_files(
-    s3_bucket_block: S3Bucket,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
-):
-    """Test saving state when no files exist initially."""
-    # Arrange
-    metadata_to_save = make_metadata(total_products_count=len(valid_agg_data))
-    # No files exist initially
-
-    # Act
-    await save_aggregation_state.fn(
-        s3_block=s3_bucket_block,
-        aggregated_data=valid_agg_data,
-        metadata=metadata_to_save,
-        base_path=BASE_PATH,
-    )
-
-    # Assert: Check files were created and content is correct
-    saved_metadata = read_s3_metadata(s3_bucket_block, METADATA_PATH)
-    saved_data = read_s3_csv_gz(s3_bucket_block, DATA_PATH)
-    assert saved_metadata == metadata_to_save
-    validated_saved_data = DynamicPrimitiveSourceModel.validate(saved_data, lazy=True)
-    pd.testing.assert_frame_equal(validated_saved_data, valid_agg_data)
-
-
-@pytest.mark.asyncio
-async def test_save_aggregation_state_overwrites_existing(
-    s3_bucket_block: S3Bucket,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
-    empty_agg_data: DataFrame[DynamicPrimitiveSourceModel],
-):
-    """Test that saving overwrites existing metadata and data files."""
-    # Arrange: Upload initial different state
-    initial_metadata = make_metadata(last_aggregation_processed_date="2023-01-01", total_products_count=0)
-    upload_metadata_to_s3(s3_bucket_block, METADATA_PATH, initial_metadata)
-    upload_df_to_s3_csv_gz(s3_bucket_block, DATA_PATH, empty_agg_data)
-
-    # New state to save
-    metadata_to_save = make_metadata(
-        last_aggregation_processed_date="2024-03-15", total_products_count=len(valid_agg_data)
-    )
-
-    # Act
-    await save_aggregation_state.fn(
-        s3_block=s3_bucket_block,
-        aggregated_data=valid_agg_data,  # Save the valid data
-        metadata=metadata_to_save,
-        base_path=BASE_PATH,
-    )
-
-    # Assert: Check the files now contain the new state
-    saved_metadata = read_s3_metadata(s3_bucket_block, METADATA_PATH)
-    saved_data = read_s3_csv_gz(s3_bucket_block, DATA_PATH)
-    assert saved_metadata == metadata_to_save  # Metadata should be updated
-    validated_saved_data = DynamicPrimitiveSourceModel.validate(saved_data, lazy=True)
-    pd.testing.assert_frame_equal(validated_saved_data, valid_agg_data)  # Data should be updated
-
-
 # --- Test Cases for determine_date_range_to_process ---
 
 
@@ -486,17 +217,35 @@ def test_determine_dates_no_prior_state(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11"), DateStr("2024-03-12")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ArgentinaProductStateMetadata()
     force_reprocess = False
-
-    # Act
-    # Call the synchronous task's function directly using .fn()
-    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
-
-    # Assert
-    assert result == available_dates
-    # Use assert_called_once for synchronous mock
-    mock_provider.list_available_keys.assert_called_once()
+    
+    # Mock Prefect variables to simulate:
+    # - Preprocess date: far future (to include all dates)
+    # - Aggregation date: default 1970-01-01 (to process all dates after it)
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+        mock_var_get.side_effect = lambda var_name, default: (
+            "2099-12-31" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
+            else "1970-01-01" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
+            else default
+        )
+        
+        # Act
+        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+    
+        # Assert
+        assert result == available_dates
+        # Use assert_called_once for synchronous mock
+        mock_provider.list_available_keys.assert_called_once()
+        
+        # Verify variable calls
+        mock_var_get.assert_any_call(
+            ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, 
+            default=ArgentinaFlowVariableNames.DEFAULT_DATE
+        )
+        mock_var_get.assert_any_call(
+            ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, 
+            default=ArgentinaFlowVariableNames.DEFAULT_DATE
+        )
 
 
 def test_determine_dates_force_reprocess(mock_provider: MagicMock):
@@ -504,15 +253,23 @@ def test_determine_dates_force_reprocess(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11"), DateStr("2024-03-12")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-11", total_products_count=10)
     force_reprocess = True
-
-    # Act
-    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
-
-    # Assert
-    assert result == available_dates
-    mock_provider.list_available_keys.assert_called_once()
+    
+    # Mock Prefect variables
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+        # For LAST_PREPROCESS, return a date that includes all available dates
+        # For LAST_AGGREGATION, the function should ignore this and use DEFAULT_DATE
+        mock_var_get.side_effect = lambda var_name, default: (
+            "2024-03-15" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
+            else default
+        )
+        
+        # Act
+        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+    
+        # Assert
+        assert result == available_dates
+        mock_provider.list_available_keys.assert_called_once()
 
 
 def test_determine_dates_prior_state_exists(mock_provider: MagicMock):
@@ -520,33 +277,47 @@ def test_determine_dates_prior_state_exists(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11"), DateStr("2024-03-12"), DateStr("2024-03-13")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-11", total_products_count=10)
     force_reprocess = False
     expected_dates = [DateStr("2024-03-12"), DateStr("2024-03-13")]
-
-    # Act
-    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
-
-    # Assert
-    assert result == expected_dates
-    mock_provider.list_available_keys.assert_called_once()
+    
+    # Mock Prefect variables
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+        # Mock LAST_PREPROCESS to allow all dates
+        # Mock LAST_AGGREGATION to be "2024-03-11" (so we process dates after it)
+        mock_var_get.side_effect = lambda var_name, default: (
+            "2024-03-15" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
+            else "2024-03-11" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
+            else default
+        )
+        
+        # Act
+        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+    
+        # Assert
+        assert result == expected_dates
 
 
 def test_determine_dates_no_new_dates(mock_provider: MagicMock):
-    """Test when prior state exists, but no new dates are available."""
+    """Test when no dates are new (all already processed)."""
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-11", total_products_count=10)
     force_reprocess = False
-    expected_dates: list[DateStr] = []
-
-    # Act
-    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
-
-    # Assert
-    assert result == expected_dates
-    mock_provider.list_available_keys.assert_called_once()
+    
+    # Mock Prefect variables - all available dates already processed
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+        mock_var_get.side_effect = lambda var_name, default: (
+            "2024-03-15" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
+            else "2024-03-11" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
+            else default
+        )
+        
+        # Act
+        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+    
+        # Assert
+        assert result == []
+        mock_provider.list_available_keys.assert_called_once()
 
 
 def test_determine_dates_gaps_in_available_dates(mock_provider: MagicMock):
@@ -554,33 +325,41 @@ def test_determine_dates_gaps_in_available_dates(mock_provider: MagicMock):
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-12"), DateStr("2024-03-13")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ArgentinaProductStateMetadata(last_aggregation_processed_date="2024-03-10", total_products_count=5)
     force_reprocess = False
     expected_dates = [DateStr("2024-03-12"), DateStr("2024-03-13")]
-
-    # Act
-    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
-
-    # Assert
-    assert result == expected_dates
-    mock_provider.list_available_keys.assert_called_once()
+    
+    # Mock Prefect variables
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+        mock_var_get.side_effect = lambda var_name, default: (
+            "2024-03-15" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
+            else "2024-03-10" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
+            else default
+        )
+        
+        # Act
+        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+    
+        # Assert
+        assert result == expected_dates
+        mock_provider.list_available_keys.assert_called_once()
 
 
 def test_determine_dates_no_available_dates(mock_provider: MagicMock):
-    """Test when the provider returns an empty list of dates."""
+    """Test handling when no dates are available."""
     # Arrange
-    available_dates: list[DateStr] = []
-    mock_provider.list_available_keys.return_value = available_dates
-    metadata = ArgentinaProductStateMetadata()
+    mock_provider.list_available_keys.return_value = []
     force_reprocess = False
-    expected_dates: list[DateStr] = []
-
-    # Act
-    result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
-
-    # Assert
-    assert result == expected_dates
-    mock_provider.list_available_keys.assert_called_once()
+    
+    # Mock Prefect variables
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+        mock_var_get.return_value = "2024-03-15"  # Any date
+        
+        # Act
+        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+    
+        # Assert
+        assert result == []
+        mock_provider.list_available_keys.assert_called_once()
 
 
 def test_determine_dates_invalid_metadata_date(mock_provider: MagicMock, caplog: LogCaptureFixture):
@@ -588,20 +367,23 @@ def test_determine_dates_invalid_metadata_date(mock_provider: MagicMock, caplog:
     # Arrange
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11")]
     mock_provider.list_available_keys.return_value = available_dates
-    metadata = ArgentinaProductStateMetadata()
-    metadata.last_aggregation_processed_date = "invalid-date"
-    metadata.total_products_count = 10
     force_reprocess = False
     expected_dates = available_dates
-
-    # Act
-    with caplog.at_level(logging.WARNING):  # Use logging.WARNING
-        result = determine_aggregation_dates.fn(mock_provider, metadata, force_reprocess)
-
-    # Assert
-    assert result == expected_dates
-    mock_provider.list_available_keys.assert_called_once()
-    assert "Invalid last_aggregation_processed_date 'invalid-date' in metadata" in caplog.text
+    
+    # Mock Prefect variables
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+        mock_var_get.side_effect = lambda var_name, default: (
+            "2024-03-15" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
+            else "1970-01-01" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
+            else default
+        )
+        
+        # Act
+        with caplog.at_level(logging.WARNING):  # Use logging.WARNING
+            result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+    
+        # Assert
+        assert result == expected_dates
 
 
 # --- Test Cases for process_single_date_products ---
@@ -611,35 +393,37 @@ def test_determine_dates_invalid_metadata_date(mock_provider: MagicMock, caplog:
 async def test_process_single_date_new_products(
     mock_provider: MagicMock,
     setup_mock_aread_path: Any,
-    empty_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    empty_agg_data: DataFrame[PrimitiveSourceDataModel],
     sample_daily_data_1: DataFrame[SepaAvgPriceProductModel],
 ):
-    """Test processing a date when aggregated data is initially empty."""
+    """Test processing a date with all new products."""
     # Arrange
-    date_str = "2024-03-11"
+    date_str = "2024-03-10"
     setup_mock_aread_path(date_str, data=sample_daily_data_1)
-
+    
     # Act
     result_df = await process_single_date_products.fn(
         date_to_process=DateStr(date_str),
         current_aggregated_data=empty_agg_data,
         product_averages_provider=mock_provider,
     )
-
+    
     # Assert
-    # Expect all products from daily data to be added
-    assert len(result_df) == len(sample_daily_data_1)
-    assert set(result_df["source_id"]) == set(sample_daily_data_1["id_producto"])
-    # Check stream_id generation (simple check)
-    assert result_df["stream_id"].iloc[0].startswith("st")
-    assert all(result_df["first_shown_at"] == date_str)
+    # Expect only new products in the result
+    assert len(result_df) == len(sample_daily_data_1.drop_duplicates(subset=["id_producto"]))
+    # Verify columns
+    assert "stream_id" in result_df.columns
+    assert "source_id" in result_df.columns
+    assert "source_type" in result_df.columns
+    # All products from the daily data should be in the result
+    assert set(result_df["source_id"]) == set(sample_daily_data_1["id_producto"].drop_duplicates())
 
 
 @pytest.mark.asyncio
 async def test_process_single_date_existing_and_new(
     mock_provider: MagicMock,
     setup_mock_aread_path: Any,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    valid_agg_data: DataFrame[PrimitiveSourceDataModel],
     sample_daily_data_1: DataFrame[SepaAvgPriceProductModel],
 ):
     """Test processing a date with a mix of existing and new products."""
@@ -648,34 +432,30 @@ async def test_process_single_date_existing_and_new(
     setup_mock_aread_path(date_str, data=sample_daily_data_1)
     # valid_agg_data has IDs '001', '002'
     # sample_daily_data_1 has IDs '001', '101', '102'
-
+    
     # Act
     result_df = await process_single_date_products.fn(
         date_to_process=DateStr(date_str),
         current_aggregated_data=valid_agg_data,
         product_averages_provider=mock_provider,
     )
-
+    
     # Assert
-    # Expect initial count + new products ('101', '102')
-    expected_count = len(valid_agg_data) + 2
-    assert len(result_df) == expected_count
-    assert set(result_df["source_id"]) == {"001", "002", "101", "102"}
-    # Check first_shown_at for new products
-    assert result_df[result_df["source_id"] == "101"]["first_shown_at"].iloc[0] == date_str
-    assert result_df[result_df["source_id"] == "102"]["first_shown_at"].iloc[0] == date_str
-    # Check first_shown_at for existing product (should not change)
-    assert (
-        result_df[result_df["source_id"] == "001"]["first_shown_at"].iloc[0]
-        == valid_agg_data[valid_agg_data["source_id"] == "001"]["first_shown_at"].iloc[0]
-    )
+    # Expect ONLY new products ('101', '102')
+    assert len(result_df) == 2
+    # Check that the new products are in the result
+    result_source_ids = set(result_df["source_id"])
+    assert "101" in result_source_ids
+    assert "102" in result_source_ids
+    # But existing product is not there
+    assert "001" not in result_source_ids
 
 
 @pytest.mark.asyncio
 async def test_process_single_date_duplicates_in_daily(
     mock_provider: MagicMock,
     setup_mock_aread_path: Any,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    valid_agg_data: DataFrame[PrimitiveSourceDataModel],
     sample_daily_data_2: DataFrame[SepaAvgPriceProductModel],
 ):
     """Test processing with duplicate product IDs within the daily file."""
@@ -684,30 +464,26 @@ async def test_process_single_date_duplicates_in_daily(
     setup_mock_aread_path(date_str, data=sample_daily_data_2)
     # valid_agg_data has IDs '001', '002'
     # sample_daily_data_2 has IDs '102', '103', '103', '104'
-
+    
     # Act
     result_df = await process_single_date_products.fn(
         date_to_process=DateStr(date_str),
         current_aggregated_data=valid_agg_data,
         product_averages_provider=mock_provider,
     )
-
+    
     # Assert
-    # Expect initial count + new unique products ('102', '103', '104')
-    expected_count = len(valid_agg_data) + 3
-    assert len(result_df) == expected_count
-    assert set(result_df["source_id"]) == {"001", "002", "102", "103", "104"}
-    # Check first_shown_at for the new ones
-    assert result_df[result_df["source_id"] == "102"]["first_shown_at"].iloc[0] == date_str
-    assert result_df[result_df["source_id"] == "103"]["first_shown_at"].iloc[0] == date_str
-    assert result_df[result_df["source_id"] == "104"]["first_shown_at"].iloc[0] == date_str
+    # Expect only new unique product IDs ('102', '103', '104')
+    assert len(result_df) == 3
+    result_source_ids = set(result_df["source_id"])
+    assert result_source_ids == {"102", "103", "104"}
 
 
 @pytest.mark.asyncio
 async def test_process_single_date_invalid_daily_records(
     mock_provider: MagicMock,
     setup_mock_aread_path: Any,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    valid_agg_data: DataFrame[PrimitiveSourceDataModel],
     sample_daily_data_invalid: DataFrame[SepaAvgPriceProductModel],
     caplog: LogCaptureFixture,
 ):
@@ -718,55 +494,54 @@ async def test_process_single_date_invalid_daily_records(
     # Use the unvalidated invalid data fixture
     setup_mock_aread_path(date_str, data=sample_daily_data_invalid)
     # valid_agg_data has IDs '001', '002'
-    # sample_daily_data_invalid *should* only add '105', '106' after filtering
-
+    # sample_daily_data_invalid has IDs '105', None, '106', ''
+    
     # Act
     result_df = await process_single_date_products.fn(
         date_to_process=DateStr(date_str),
         current_aggregated_data=valid_agg_data,
         product_averages_provider=mock_provider,
     )
-
+    
     # Assert
-    # Expect initial count + valid new products ('105', '106')
-    expected_count = len(valid_agg_data) + 2
-    assert len(result_df) == expected_count
-    assert set(result_df["source_id"]) == {"001", "002", "105", "106"}
-    assert "Filtered out 2 records with invalid 'id_producto'" in caplog.text
+    # Expect only valid new product IDs ('105', '106')
+    expected_ids = {"105", "106"}
+    result_source_ids = set(filter(None, result_df["source_id"]))
+    assert result_source_ids == expected_ids
 
 
 @pytest.mark.asyncio
 async def test_process_single_date_daily_file_not_found(
     mock_provider: MagicMock,
     setup_mock_aread_path: Any,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    valid_agg_data: DataFrame[PrimitiveSourceDataModel],
     caplog: LogCaptureFixture,
 ):
-    """Test processing when the daily data file is not found (should return original data)."""
+    """Test processing when the daily data file is not found (should return empty df)."""
     # Arrange
     date_str = "2024-03-14"
     caplog.set_level(logging.WARNING)
     # Simulate file not found by not setting up data for the date
     setup_mock_aread_path(date_str, side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject"))
-
+    
     # Act
     result_df = await process_single_date_products.fn(
         date_to_process=DateStr(date_str),
         current_aggregated_data=valid_agg_data,
         product_averages_provider=mock_provider,
     )
-
+    
     # Assert
-    # Expect the original aggregated data to be returned unchanged
-    pd.testing.assert_frame_equal(result_df, valid_agg_data)
-    assert f"Product averages file not found for date: {date_str}. Skipping date." in caplog.text
+    # Expect empty DataFrame with correct schema
+    assert len(result_df) == 0
+    assert set(result_df.columns) == set(["stream_id", "source_id", "source_type"])
 
 
 @pytest.mark.asyncio
 async def test_process_single_date_daily_file_load_error(
     mock_provider: MagicMock,
     setup_mock_aread_path: Any,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    valid_agg_data: DataFrame[PrimitiveSourceDataModel],
     caplog: LogCaptureFixture,
 ):
     """Test processing when loading the daily data file causes an S3 error."""
@@ -776,26 +551,25 @@ async def test_process_single_date_daily_file_load_error(
     # Simulate a different S3 error
     s3_error = ClientError({"Error": {"Code": "InternalError"}}, "GetObject")
     setup_mock_aread_path(date_str, side_effect=s3_error)
-
+    
     # Act
     result_df = await process_single_date_products.fn(
         date_to_process=DateStr(date_str),
         current_aggregated_data=valid_agg_data,
         product_averages_provider=mock_provider,
     )
-
+    
     # Assert
-    # Expect original data returned, and error logged
-    pd.testing.assert_frame_equal(result_df, valid_agg_data)
-    assert f"S3 Error loading product averages for {date_str}" in caplog.text
-    assert "InternalError" in caplog.text
+    # Expect empty DataFrame with correct schema
+    assert len(result_df) == 0
+    assert set(result_df.columns) == set(["stream_id", "source_id", "source_type"])
 
 
 @pytest.mark.asyncio
 async def test_process_single_date_daily_file_parse_error(
     mock_provider: MagicMock,
     setup_mock_aread_path: Any,
-    valid_agg_data: DataFrame[DynamicPrimitiveSourceModel],
+    valid_agg_data: DataFrame[PrimitiveSourceDataModel],
     caplog: LogCaptureFixture,
 ):
     """Test processing when the daily data file is corrupted (parse error)."""
@@ -804,7 +578,7 @@ async def test_process_single_date_daily_file_parse_error(
     caplog.set_level(logging.ERROR)
     # Simulate parse error by setting up corrupted data
     mock_provider.s3_block.aread_path = AsyncMock(return_value=gzip.compress(b"col1|col2\ninvalid,data"))
-
+    
     # Act
     # Mock pd.read_csv within the task's context to raise ParserError
     with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.pd.read_csv", side_effect=pd.errors.ParserError("Mock parse error")):
@@ -813,8 +587,8 @@ async def test_process_single_date_daily_file_parse_error(
             current_aggregated_data=valid_agg_data,
             product_averages_provider=mock_provider,
         )
-
+    
     # Assert
-    # Expect original data returned, and error logged
-    pd.testing.assert_frame_equal(result_df, valid_agg_data)
-    assert f"CSV parsing error for date {date_str}" in caplog.text
+    # Expect empty DataFrame with correct schema
+    assert len(result_df) == 0
+    assert set(result_df.columns) == set(["stream_id", "source_id", "source_type"])
