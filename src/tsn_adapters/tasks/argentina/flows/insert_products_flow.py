@@ -28,7 +28,9 @@ from tsn_adapters.tasks.argentina.tasks import (
 # Custom Exception for Deployment Check Failures
 class DeploymentCheckError(Exception):
     """Raised when required streams for a date are not deployed."""
+
     pass
+
 
 @flow(name="Insert Argentina SEPA Products to TN")
 async def insert_argentina_products_flow(
@@ -42,7 +44,7 @@ async def insert_argentina_products_flow(
     Inserts pre-calculated Argentina SEPA daily average product prices into TN streams.
 
     Reads daily averages, maps products using a descriptor, transforms data,
-    inserts using batching, and manages state via a shared metadata file.
+    inserts using batching, and manages state via Prefect Variables.
 
     Args:
         s3_block: Prefect S3Bucket block for accessing daily averages and state file.
@@ -53,12 +55,6 @@ async def insert_argentina_products_flow(
     """
     logger = get_run_logger()
     logger.info(f"Starting Argentina product insertion flow. Batch size: {batch_size}")
-
-    # Define state file path (consistent with spec)
-    # state_base_path = "aggregated"
-    # Note: aggregate_products_tasks uses 'argentina_products_metadata.json'
-    # Spec uses 'argentina_product_state.json'.
-    # state_file_path = f"{state_base_path}/argentina_product_state.json"
 
     # 1. Instantiate Provider
     try:
@@ -76,45 +72,53 @@ async def insert_argentina_products_flow(
         logger.info(f"Successfully loaded product descriptor with {len(descriptor_df)} entries from block.")
     except Exception as e_desc:
         # load_product_descriptor already logs critically and raises DescriptorError
-        logger.critical(f"Fatal Error: Could not load product descriptor from block: {e_desc}. Flow cannot proceed.", exc_info=True)
-        raise RuntimeError("Failed to load product descriptor") from e_desc # Fatal: Cannot proceed without descriptor
+        logger.critical(
+            f"Fatal Error: Could not load product descriptor from block: {e_desc}. Flow cannot proceed.", exc_info=True
+        )
+        raise RuntimeError("Failed to load product descriptor") from e_desc  # Fatal: Cannot proceed without descriptor
 
     # 4. Determine Dates to Process
     try:
         # Fetch the last successful aggregation date from Prefect Variables
         last_aggregation_success_date = variables.Variable.get(
-            ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, # Use correct variable
-            default=ArgentinaFlowVariableNames.DEFAULT_DATE
+            ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE,  # Use correct variable
+            default=ArgentinaFlowVariableNames.DEFAULT_DATE,
         )
         assert isinstance(last_aggregation_success_date, str)
-        logger.info(f"Retrieved {ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}: {last_aggregation_success_date}")
+        logger.info(
+            f"Retrieved {ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}: {last_aggregation_success_date}"
+        )
 
         last_insertion_success_date = variables.Variable.get(
-            ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE,
-            default=ArgentinaFlowVariableNames.DEFAULT_DATE
+            ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE
         )
         assert isinstance(last_insertion_success_date, str)
-        logger.info(f"Retrieved {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE}: {last_insertion_success_date}")
+        logger.info(
+            f"Retrieved {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE}: {last_insertion_success_date}"
+        )
 
         # Get all available dates from the provider
         available_dates = product_averages_provider.list_available_keys()
         if not available_dates:
-             logger.info("No available dates found in provider.")
-             dates_to_process = []
+            logger.info("No available dates found in provider.")
+            dates_to_process = []
         else:
-            available_dates.sort() # Ensure chronological order
+            available_dates.sort()  # Ensure chronological order
             logger.info(f"Provider listed {len(available_dates)} dates: {available_dates[0]} to {available_dates[-1]}")
 
             # Filter dates based on the last aggregation success date
             # Process only dates UP TO AND INCLUDING the last successful aggregation date
             dates_to_process = [
-                date_str for date_str in available_dates 
-                if date_str <= last_aggregation_success_date # Use <= and correct variable
+                date_str
+                for date_str in available_dates
+                if date_str <= last_aggregation_success_date  # Use <= and correct variable
                 and date_str > last_insertion_success_date
             ]
             skipped_count = len(available_dates) - len(dates_to_process)
             if skipped_count > 0:
-                logger.info(f"Skipped {skipped_count} dates later than {last_aggregation_success_date} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}) based on Prefect Variable.")
+                logger.info(
+                    f"Skipped {skipped_count} dates later than {last_aggregation_success_date} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}) based on Prefect Variable."
+                )
 
         # Note: force_reprocess flag doesn't apply to insertion flow directly
 
@@ -127,7 +131,7 @@ async def insert_argentina_products_flow(
 No available dates found to process up to {last_aggregation_success_date} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}).
 
 State is now managed by Prefect Variables.
-""" 
+"""
             create_markdown_artifact(
                 key="argentina-product-insertion-summary",
                 markdown=summary_md.strip(),
@@ -136,7 +140,8 @@ State is now managed by Prefect Variables.
             return  # Exit gracefully if no dates
 
         logger.info(
-            f"Determined {len(dates_to_process)} dates to process after gating: " f"{dates_to_process[0]} to {dates_to_process[-1]}"
+            f"Determined {len(dates_to_process)} dates to process after gating: "
+            f"{dates_to_process[0]} to {dates_to_process[-1]}"
         )
     except Exception as e:
         logger.critical(f"Fatal Error: Failed to determine dates to process: {e}", exc_info=True)
@@ -147,22 +152,21 @@ State is now managed by Prefect Variables.
     # --- Implement Steps 10-13 (Loop, Load/Transform, Insert, Save State, Report) ---
     processed_dates_count = 0
     total_records_transformed = 0
-    last_processed_date_str = "N/A" # Variable to track the last successfully processed date
+    last_processed_date_str = "N/A"  # Variable to track the last successfully processed date
 
     for date_str in dates_to_process:
         logger.info(f"--- Processing date: {date_str} ---")
         try:
             # Step 10a: Load daily averages for the current date
             daily_avg_df: DataFrame[SepaAvgPriceProductModel] = await load_daily_averages(
-                provider=product_averages_provider,
-                date_str=date_str
+                provider=product_averages_provider, date_str=date_str
             )
 
             if daily_avg_df.empty:
                 logger.info(f"No daily averages found for {date_str}. Skipping.")
                 raise ValueError(f"No daily averages found for {date_str}. Something is wrong.")
-                
-            # --- Deployment Status Check (Moved Before Transformation/Insertion) --- 
+
+            # --- Deployment Status Check (Moved Before Transformation/Insertion) ---
             # Get unique product IDs for this date
             product_ids_for_date: set[str] = set(daily_avg_df["id_producto"].unique())
 
@@ -171,13 +175,17 @@ State is now managed by Prefect Variables.
             required_stream_ids: list[str] = descriptor_subset["stream_id"].tolist()
 
             if not required_stream_ids:
-                raise ValueError(f"No stream IDs found in descriptor for product IDs on date {date_str}. Product IDs: {product_ids_for_date}.")
+                raise ValueError(
+                    f"No stream IDs found in descriptor for product IDs on date {date_str}. Product IDs: {product_ids_for_date}."
+                )
 
             # Check if all required streams are deployed
             try:
-                logger.debug(f"Checking deployment status for {len(required_stream_ids)} required streams for date {date_str}...")
+                logger.debug(
+                    f"Checking deployment status for {len(required_stream_ids)} required streams for date {date_str}..."
+                )
                 stream_deployment_status: dict[str, bool] = deployment_state.check_multiple_streams(required_stream_ids)
-                
+
                 undeployed_streams = [
                     sid for sid in required_stream_ids if not stream_deployment_status.get(sid, False)
                 ]
@@ -188,14 +196,16 @@ State is now managed by Prefect Variables.
                         f"are not marked as deployed: {undeployed_streams[:20]}..."
                     )
                     logger.error(error_msg)
-                    raise DeploymentCheckError(error_msg) # Raise exception
+                    raise DeploymentCheckError(error_msg)  # Raise exception
                 else:
-                     logger.info(f"All {len(required_stream_ids)} required streams for date {date_str} are deployed. Proceeding.")
+                    logger.info(
+                        f"All {len(required_stream_ids)} required streams for date {date_str} are deployed. Proceeding."
+                    )
 
             except Exception as e_state:
                 error_msg = f"Halting flow: Failed to check deployment status for date {date_str}: {e_state}."
                 logger.error(error_msg, exc_info=True)
-                raise DeploymentCheckError(error_msg) from e_state 
+                raise DeploymentCheckError(error_msg) from e_state
             # --- End Deployment Status Check ---
 
             # Step 10b: Transform the loaded data (Only if deployment check passed)
@@ -214,9 +224,6 @@ State is now managed by Prefect Variables.
                 logger.info(
                     f"Submitting {num_transformed} transformed records for date {date_str} to TN insertion task..."
                 )
-                # Use the imported task directly, passing the block instance and other params
-                # Make sure task_split_and_insert_records handles potential TN errors gracefully
-                # or consider adding specific error handling around this call.
                 task_split_and_insert_records(
                     block=tn_block,
                     records=transformed_data,
@@ -230,15 +237,12 @@ State is now managed by Prefect Variables.
 
             # Increment processed count only after successful processing of the date
             processed_dates_count += 1
-            last_processed_date_str = date_str # Update last successful date
-            
-            # Update last successful aggregation date
-            variables.Variable.set(
-                ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE,
-                last_processed_date_str
-            )
+            last_processed_date_str = date_str  # Update last successful date
 
-        except DeploymentCheckError: 
+            # Update last successful aggregation date
+            variables.Variable.set(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, last_processed_date_str)
+
+        except DeploymentCheckError:
             # Logged sufficiently above, re-raise to halt the flow run
             raise
         except Exception as e:
@@ -249,7 +253,7 @@ State is now managed by Prefect Variables.
     logger.info(f"--- Finished processing loop for {processed_dates_count} dates. --- ")
     logger.info(f"Total records transformed across all dates: {total_records_transformed}")
 
-    # Step 14: Final Reporting (Adjusted for removed metadata)
+    # Step 14: Final Reporting
     if processed_dates_count > 0:
         first_processed = dates_to_process[0]
         summary_md = f"""# Argentina Product Insertion Summary

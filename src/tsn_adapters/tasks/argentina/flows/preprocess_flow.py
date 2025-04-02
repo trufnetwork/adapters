@@ -134,7 +134,7 @@ class PreprocessFlow(ArgentinaFlowController):
             return_state=True,
         ).result()
 
-        # --- New Step: Save Product Averages ---
+        # --- Save Product Averages ---
         if not avg_price_df.empty:
             logger.info("Saving product averages")
             try:
@@ -146,7 +146,6 @@ class PreprocessFlow(ArgentinaFlowController):
                 # For now, we log and continue to save category data
         else:
             logger.info("Skipping saving product averages as the DataFrame is empty.")
-        # --- End New Step ---
 
         # Save category aggregated data to S3 (using self.processed_provider from base class)
         logger.info("Saving processed category data")
