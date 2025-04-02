@@ -2,15 +2,17 @@
 Tasks related to processing dates for Argentina SEPA data insertion.
 """
 
-from datetime import date, datetime
-from typing import List
+from datetime import datetime
+from typing import List, cast
 
 import pandas as pd
-from pandera.typing import DataFrame
+from pandera.typing import DataFrame, Series
 from prefect import task
+import prefect.variables as variables  # Import prefect variables
 
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel
+from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.types import DateStr
@@ -24,10 +26,11 @@ async def determine_dates_to_insert(
     provider: ProductAveragesProvider,
 ) -> List[DateStr]:
     """
-    Determines the list of dates to insert based on available data and metadata.
+    Determines the list of dates to insert based on available data and state variables.
 
-    Filters available dates based on the last successfully inserted date and
-    the last product deployment date recorded in the metadata.
+    Filters available dates based on the last successfully inserted date and the
+    last successfully aggregated date stored in Prefect Variables. Dates to insert
+    must be AFTER the last insertion and ON or BEFORE the last aggregation.
 
     Args:
         provider: The provider instance to list available daily average keys.
@@ -36,10 +39,9 @@ async def determine_dates_to_insert(
         A sorted list of date strings ('YYYY-MM-DD') to be processed.
 
     Raises:
-        Exception: If listing available keys from the provider fails.
+        Exception: If listing available keys from the provider fails or variable access fails.
     """
     logger = get_logger_safe(__name__)
-    logger.warning("Metadata-based date filtering removed from determine_dates_to_insert. Returning all available dates. Proper gating requires Prefect Variable integration.")
 
     # 1. Get available dates from provider
     try:
@@ -48,14 +50,75 @@ async def determine_dates_to_insert(
             logger.warning("No available dates found in the provider.")
             return []
         logger.info(f"Provider listed {len(available_dates_str)} available dates.")
+
         # Sort initially to ensure chronological processing if needed later
         available_dates_str.sort()
-        # Return all dates for now; gating logic will be added in Step 8
-        return available_dates_str
+
+        # 2. Fetch Prefect Variables for date filtering
+        try:
+            # Get last insertion date
+            last_insertion_processed_date = variables.get(
+                ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE,
+                default=ArgentinaFlowVariableNames.DEFAULT_DATE
+            )
+
+            # Get last *aggregation* date (corrected logic)
+            last_aggregation_processed_date = variables.get(
+                ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, # Correct variable
+                default=ArgentinaFlowVariableNames.DEFAULT_DATE
+            )
+
+            logger.info(
+                f"Using gating dates: Last Insertion = {last_insertion_processed_date}, "
+                f"Last Aggregation = {last_aggregation_processed_date}" # Corrected log
+            )
+        except Exception as e:
+            logger.error(f"Failed to retrieve Prefect variables: {e}", exc_info=True)
+            # Raise the error to halt the flow if variables can't be accessed
+            raise RuntimeError("Failed to retrieve Prefect gating variables") from e
+
+        # 3. Filter dates based on state variables
+        # Convert date strings to datetime objects for comparison
+        try:
+            insertion_dt = datetime.strptime(last_insertion_processed_date, "%Y-%m-%d").date()
+            aggregation_dt = datetime.strptime(last_aggregation_processed_date, "%Y-%m-%d").date() # Corrected variable name
+
+            # Check if aggregation date is somehow before insertion date (shouldn't happen in normal flow)
+            if aggregation_dt < insertion_dt:
+                logger.warning(
+                    f"last_aggregation_processed_date {aggregation_dt} is before "
+                    f"last_insertion_processed_date {insertion_dt}. Returning empty list."
+                )
+                return []
+
+            # Filter dates that are:
+            # 1. After the last insertion date (>)
+            # 2. On or before the last aggregation date (<=)
+            filtered_dates = []
+            for date_str in available_dates_str:
+                try:
+                    date_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    if date_dt > insertion_dt and date_dt <= aggregation_dt: # Corrected logic check
+                        filtered_dates.append(date_str)
+                except ValueError:
+                    logger.warning(f"Skipping available key '{date_str}' due to invalid date format.")
+                    continue
+
+            logger.info(
+                f"After filtering: {len(filtered_dates)} dates to process "
+                f"(from {len(available_dates_str)} available)."
+            )
+            return filtered_dates
+
+        except ValueError as e:
+            logger.error(f"Invalid date format in Prefect variables: {e}", exc_info=True)
+            # Raise error if dates in variables are corrupt
+            raise ValueError("Invalid date format found in Prefect state variables") from e
+
     except Exception as e:
         logger.error(f"Failed to list available keys from provider: {e}", exc_info=True)
         # Propagate error as this is critical
-        raise
+        raise # Re-raise other provider errors
 
 
 class DailyAverageLoadingError(Exception):
@@ -187,7 +250,7 @@ async def transform_product_data(
         # 5. Timestamp Conversion
         # Convert 'YYYY-MM-DD' date column to UTC midnight Unix timestamps (integer seconds)
         # Explicitly cast to str series to satisfy linter before passing to conversion util
-        date_str_series = transformed_df["date"].astype(str) 
+        date_str_series: Series[str] = cast(Series[str], transformed_df["date"].astype(str)) # Fix type hint issue
         int_timestamps = convert_date_str_series_to_unix_ts(date_str_series)
         # Convert integer timestamps back to string for TN
         transformed_df["date"] = int_timestamps.astype(str)

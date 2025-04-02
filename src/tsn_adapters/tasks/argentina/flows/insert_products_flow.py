@@ -19,7 +19,7 @@ from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames  # Im
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks import (
-    # determine_dates_to_insert, # This task definition needs updating/removal separately
+    determine_dates_to_insert, # Now using the task
     load_daily_averages,
     transform_product_data,
 )
@@ -66,7 +66,7 @@ async def insert_argentina_products_flow(
 
     logger.info("S3 state metadata loading removed. State will be managed by Prefect Variables.")
 
-    # 3. Load Product Descriptor
+    # 2. Load Product Descriptor
     try:
         descriptor_df: DataFrame[PrimitiveSourceDataModel] = descriptor_block.get_descriptor()
         logger.info(f"Successfully loaded product descriptor with {len(descriptor_df)} entries from block.")
@@ -77,60 +77,23 @@ async def insert_argentina_products_flow(
         )
         raise RuntimeError("Failed to load product descriptor") from e_desc  # Fatal: Cannot proceed without descriptor
 
-    # 4. Determine Dates to Process
+    # 3. Determine Dates to Process using the task
     try:
-        # Fetch the last successful aggregation date from Prefect Variables
-        last_aggregation_success_date = variables.Variable.get(
-            ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE,  # Use correct variable
-            default=ArgentinaFlowVariableNames.DEFAULT_DATE,
-        )
-        assert isinstance(last_aggregation_success_date, str)
-        logger.info(
-            f"Retrieved {ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}: {last_aggregation_success_date}"
-        )
+        dates_to_process = await determine_dates_to_insert(provider=product_averages_provider)
 
-        last_insertion_success_date = variables.Variable.get(
-            ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE
-        )
-        assert isinstance(last_insertion_success_date, str)
-        logger.info(
-            f"Retrieved {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE}: {last_insertion_success_date}"
-        )
-
-        # Get all available dates from the provider
-        available_dates = product_averages_provider.list_available_keys()
-        if not available_dates:
-            logger.info("No available dates found in provider.")
-            dates_to_process = []
-        else:
-            available_dates.sort()  # Ensure chronological order
-            logger.info(f"Provider listed {len(available_dates)} dates: {available_dates[0]} to {available_dates[-1]}")
-
-            # Filter dates based on the last aggregation success date
-            # Process only dates UP TO AND INCLUDING the last successful aggregation date
-            dates_to_process = [
-                date_str
-                for date_str in available_dates
-                if date_str <= last_aggregation_success_date  # Use <= and correct variable
-                and date_str > last_insertion_success_date
-            ]
-            skipped_count = len(available_dates) - len(dates_to_process)
-            if skipped_count > 0:
-                logger.info(
-                    f"Skipped {skipped_count} dates later than {last_aggregation_success_date} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}) based on Prefect Variable."
-                )
-
-        # Note: force_reprocess flag doesn't apply to insertion flow directly
-
-        # Check if any dates remain after filtering
         if not dates_to_process:
-            logger.info("No new dates to process after filtering based on last deployment success date. Flow finished.")
+            logger.info("No new dates to process based on insertion/aggregation state variables. Flow finished.")
             # Create artifact even if no dates processed
+            # Fetch current state variables for reporting
+            last_agg_date = variables.get(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, default="N/A")
+            last_ins_date = variables.get(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default="N/A")
             summary_md = f"""# Argentina Product Insertion Summary
 
-No available dates found to process up to {last_aggregation_success_date} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}).
+No new dates available to process.
+* Last Processed Aggregation Date: `{last_agg_date}`
+* Last Processed Insertion Date: `{last_ins_date}`
 
-State is now managed by Prefect Variables.
+State is managed by Prefect Variables.
 """
             create_markdown_artifact(
                 key="argentina-product-insertion-summary",
@@ -140,11 +103,11 @@ State is now managed by Prefect Variables.
             return  # Exit gracefully if no dates
 
         logger.info(
-            f"Determined {len(dates_to_process)} dates to process after gating: "
+            f"Determined {len(dates_to_process)} dates to process via task: "
             f"{dates_to_process[0]} to {dates_to_process[-1]}"
         )
     except Exception as e:
-        logger.critical(f"Fatal Error: Failed to determine dates to process: {e}", exc_info=True)
+        logger.critical(f"Fatal Error: Failed to determine dates to process using task: {e}", exc_info=True)
         raise  # Fatal: Cannot proceed if date determination fails
 
     logger.info("Initial setup complete. Proceeding to process dates.")
@@ -153,6 +116,7 @@ State is now managed by Prefect Variables.
     processed_dates_count = 0
     total_records_transformed = 0
     last_processed_date_str = "N/A"  # Variable to track the last successfully processed date
+    first_processed_date_str = dates_to_process[0]
 
     for date_str in dates_to_process:
         logger.info(f"--- Processing date: {date_str} ---")
@@ -163,8 +127,9 @@ State is now managed by Prefect Variables.
             )
 
             if daily_avg_df.empty:
-                logger.info(f"No daily averages found for {date_str}. Skipping.")
-                raise ValueError(f"No daily averages found for {date_str}. Something is wrong.")
+                # This might indicate an issue if a date was determined but has no data
+                logger.warning(f"No daily averages found for determined date {date_str}. Skipping, but check source data.")
+                continue # Continue to next date, but log warning
 
             # --- Deployment Status Check (Moved Before Transformation/Insertion) ---
             # Get unique product IDs for this date
@@ -175,9 +140,11 @@ State is now managed by Prefect Variables.
             required_stream_ids: list[str] = descriptor_subset["stream_id"].tolist()
 
             if not required_stream_ids:
-                raise ValueError(
-                    f"No stream IDs found in descriptor for product IDs on date {date_str}. Product IDs: {product_ids_for_date}."
+                # This indicates missing mappings in the descriptor for products present in daily data
+                logger.error(
+                    f"Skipping date {date_str}: No stream IDs found in descriptor for product IDs present in daily data. Product IDs sample: {list(product_ids_for_date)[:10]}..."
                 )
+                continue # Skip this date if crucial mappings are missing
 
             # Check if all required streams are deployed
             try:
@@ -196,7 +163,7 @@ State is now managed by Prefect Variables.
                         f"are not marked as deployed: {undeployed_streams[:20]}..."
                     )
                     logger.error(error_msg)
-                    raise DeploymentCheckError(error_msg)  # Raise exception
+                    raise DeploymentCheckError(error_msg)  # Raise exception to stop flow
                 else:
                     logger.info(
                         f"All {len(required_stream_ids)} required streams for date {date_str} are deployed. Proceeding."
@@ -205,7 +172,7 @@ State is now managed by Prefect Variables.
             except Exception as e_state:
                 error_msg = f"Halting flow: Failed to check deployment status for date {date_str}: {e_state}."
                 logger.error(error_msg, exc_info=True)
-                raise DeploymentCheckError(error_msg) from e_state
+                raise DeploymentCheckError(error_msg) from e_state # Re-raise to stop flow
             # --- End Deployment Status Check ---
 
             # Step 10b: Transform the loaded data (Only if deployment check passed)
@@ -224,6 +191,7 @@ State is now managed by Prefect Variables.
                 logger.info(
                     f"Submitting {num_transformed} transformed records for date {date_str} to TN insertion task..."
                 )
+                # No need to await here if the task runs concurrently
                 task_split_and_insert_records(
                     block=tn_block,
                     records=transformed_data,
@@ -239,30 +207,33 @@ State is now managed by Prefect Variables.
             processed_dates_count += 1
             last_processed_date_str = date_str  # Update last successful date
 
-            # Update last successful aggregation date
+            # Update last successful INSERTION date variable *after* processing the date
             variables.Variable.set(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, last_processed_date_str)
+            logger.info(f"Updated {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE} to {last_processed_date_str}")
 
         except DeploymentCheckError:
             # Logged sufficiently above, re-raise to halt the flow run
+            logger.error("Deployment check failed. Halting flow run.")
             raise
         except Exception as e:
-            # Catch other errors during load, transform, insert
+            # Catch other errors during load, transform, insert for this specific date
             logger.critical(f"Fatal Error processing date {date_str}: {e}", exc_info=True)
-            raise  # Re-raise to fail the flow run
+            # It might be desirable to continue to the next date depending on error handling strategy
+            # For now, re-raise to fail the flow run on any error within the loop
+            raise
 
     logger.info(f"--- Finished processing loop for {processed_dates_count} dates. --- ")
     logger.info(f"Total records transformed across all dates: {total_records_transformed}")
 
     # Step 14: Final Reporting
     if processed_dates_count > 0:
-        first_processed = dates_to_process[0]
         summary_md = f"""# Argentina Product Insertion Summary
 
 Successfully processed data and submitted for insertion.
 
-*   **Processed Date Range:** {first_processed} to {last_processed_date_str} ({processed_dates_count} dates)
+*   **Processed Date Range:** {first_processed_date_str} to {last_processed_date_str} ({processed_dates_count} dates)
 *   **Total Records Transformed & Submitted:** {total_records_transformed}
-*   **Final Last Processed Insertion Date:** {last_processed_date_str}
+*   **Final Last Processed Insertion Date (Variable Updated):** {last_processed_date_str}
 """
         create_markdown_artifact(
             key="argentina-product-insertion-summary",
@@ -272,4 +243,4 @@ Successfully processed data and submitted for insertion.
         logger.info("Created final summary artifact.")
     else:
         # This case should ideally be covered by the early exit, but log just in case
-        logger.info("No dates were processed in this run (loop did not execute). No final artifact created.")
+        logger.info("No dates were successfully processed in this run (loop may have been skipped or failed early). Check logs.")

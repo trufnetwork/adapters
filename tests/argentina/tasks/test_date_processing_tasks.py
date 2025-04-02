@@ -4,14 +4,15 @@ Unit tests for Argentina SEPA date processing tasks.
 
 from datetime import datetime
 import logging
-from unittest.mock import MagicMock
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from pandera.typing import DataFrame
 import pytest
 
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks.date_processing_tasks import (
@@ -32,7 +33,7 @@ def mock_product_averages_provider() -> MagicMock:
     return mock_provider
 
 
-# --- Test Cases for determine_dates_to_process ---
+# --- Test Cases for determine_dates_to_insert ---
 
 
 @pytest.mark.asyncio
@@ -42,108 +43,157 @@ def mock_product_averages_provider() -> MagicMock:
         # Scenario 1: Initial run (defaults in metadata)
         (
             ["2023-01-01", "2023-01-02", "2023-01-03"],
-            {"last_insertion_processed_date": "1970-01-01", "last_product_deployment_date": "2023-01-03"},
+            {"last_insertion_processed_date": "1970-01-01", "last_aggregation_processed_date": "2023-01-03"},
             ["2023-01-01", "2023-01-02", "2023-01-03"],
         ),
         # Scenario 2: Resumed run
         (
             ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"],
-            {"last_insertion_processed_date": "2023-01-02", "last_product_deployment_date": "2023-01-04"},
+            {"last_insertion_processed_date": "2023-01-02", "last_aggregation_processed_date": "2023-01-04"},
             ["2023-01-03", "2023-01-04"],
         ),
-        # Scenario 3: Deployment date restriction
+        # Scenario 3: Aggregation date restriction
         (
             ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"],
-            {"last_insertion_processed_date": "2023-01-01", "last_product_deployment_date": "2023-01-03"},
+            {"last_insertion_processed_date": "2023-01-01", "last_aggregation_processed_date": "2023-01-03"},
             ["2023-01-02", "2023-01-03"],
         ),
         # Scenario 4: No new dates after last insertion
         (
             ["2023-01-01", "2023-01-02"],
-            {"last_insertion_processed_date": "2023-01-02", "last_product_deployment_date": "2023-01-03"},
+            {"last_insertion_processed_date": "2023-01-02", "last_aggregation_processed_date": "2023-01-03"},
             [],
         ),
-        # Scenario 5: No dates within deployment window (deployment before insertion)
+        # Scenario 5: No dates within processing window (aggregation before insertion)
         (
             ["2023-01-01", "2023-01-02", "2023-01-03"],
-            {"last_insertion_processed_date": "2023-01-02", "last_product_deployment_date": "2023-01-01"},
-            [],  # Expect empty list as deployment date < insertion date
+            {"last_insertion_processed_date": "2023-01-02", "last_aggregation_processed_date": "2023-01-01"},
+            [],  # Expect empty list as aggregation date < insertion date
         ),
         # Scenario 6: No available dates from provider
         (
             [],
-            {"last_insertion_processed_date": "2023-01-01", "last_product_deployment_date": "2023-01-03"},
+            {"last_insertion_processed_date": "2023-01-01", "last_aggregation_processed_date": "2023-01-03"},
             [],
         ),
-        # Scenario: Available dates contain invalid formats (should be skipped)
-        # note: currently doesn't work like this. invalid dates are fatal for now, to be simplified
-        # (
-        #     ["2023-01-01", "invalid-date", "2023-01-03"],
-        #     {"last_insertion_processed_date": "1970-01-01", "last_product_deployment_date": "2023-01-04"},
-        #     ["2023-01-01", "2023-01-03"],
-        # ),
         # Scenario 7: Dates are exactly on the boundaries
         (
             ["2023-01-01", "2023-01-02", "2023-01-03"],
-            {"last_insertion_processed_date": "2023-01-01", "last_product_deployment_date": "2023-01-03"},
-            ["2023-01-02", "2023-01-03"],  # Should include end boundary, exclude start boundary
+            {"last_insertion_processed_date": "2023-01-01", "last_aggregation_processed_date": "2023-01-03"},
+            ["2023-01-02", "2023-01-03"],  # Should include end boundary (agg), exclude start boundary (ins)
         ),
     ],
 )
-async def test_determine_dates_to_process_scenarios(
+async def test_determine_dates_to_insert_scenarios(
     mock_product_averages_provider: MagicMock,
     available_dates: list[str],
     metadata_dict: dict[str, str],
     expected_dates: list[str],
     caplog: pytest.LogCaptureFixture,
 ):
-    """Test determine_dates_to_process with various scenarios."""
+    """Test determine_dates_to_insert with various scenarios using mocked variables."""
     # Arrange
     mock_product_averages_provider.list_available_keys.return_value = available_dates
-    # Act
-    result_dates = await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
 
-    # Assert
-    mock_product_averages_provider.list_available_keys.assert_called_once()
-    assert result_dates == expected_dates
+    # Mock the Prefect variables.get function
+    from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 
-    # Optional: Check logs for specific messages in certain scenarios
-    if "invalid-date" in available_dates:
-        assert "Skipping available key 'invalid-date'" in caplog.text
-    if metadata_dict.get("last_insertion_processed_date") == "invalid":
-        assert "Invalid last_insertion_processed_date 'invalid'" in caplog.text
-    # Check log for Scenario 5: deployment date < insertion date
-    try:
-        insertion_dt = datetime.strptime(
-            metadata_dict.get("last_insertion_processed_date", "1970-01-01"), "%Y-%m-%d"
-        ).date()
-        deployment_dt = datetime.strptime(
-            metadata_dict.get("last_product_deployment_date", "1970-01-01"), "%Y-%m-%d"
-        ).date()
-        if deployment_dt < insertion_dt:
-            assert (
-                "last_product_deployment_date" in caplog.text
-                and "is before" in caplog.text
-                and "last_insertion_processed_date" in caplog.text
-            )
-    except ValueError:
-        pass  # Ignore if dates in metadata_dict are invalid for this specific check
+    def mock_variable_getter(name: str, default: Any = None) -> Any:
+        """Mock implementation for variables.get that uses metadata_dict values."""
+        if name == ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE:
+            return metadata_dict.get("last_insertion_processed_date", default)
+        if name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
+            return metadata_dict.get("last_aggregation_processed_date", default)
+        return default
+
+    # Use the mock for variables.get
+    with patch("prefect.variables.get", side_effect=mock_variable_getter):
+        # Act
+        result_dates = await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
+
+        # Assert
+        mock_product_averages_provider.list_available_keys.assert_called_once()
+        assert result_dates == expected_dates
+
+        # Optional: Check logs for specific messages in certain scenarios
+        if "invalid-date" in available_dates:
+            assert "Skipping available key 'invalid-date'" in caplog.text
+        if metadata_dict.get("last_insertion_processed_date") == "invalid":
+            assert "Invalid date format in Prefect variables" in caplog.text
+        # Check log for Scenario 5: aggregation date < insertion date
+        try:
+            insertion_dt = datetime.strptime(
+                metadata_dict.get("last_insertion_processed_date", "1970-01-01"), "%Y-%m-%d"
+            ).date()
+            aggregation_dt = datetime.strptime(
+                metadata_dict.get("last_aggregation_processed_date", "1970-01-01"), "%Y-%m-%d"
+            ).date()
+            if aggregation_dt < insertion_dt:
+                assert (
+                    "last_aggregation_processed_date" in caplog.text
+                    and "is before" in caplog.text
+                    and "last_insertion_processed_date" in caplog.text
+                )
+        except ValueError:
+            pass  # Ignore if dates in metadata_dict are invalid for this specific check
 
 
 @pytest.mark.asyncio
-async def test_determine_dates_to_process_provider_error(mock_product_averages_provider: MagicMock):
+async def test_determine_dates_to_insert_provider_error(mock_product_averages_provider: MagicMock):
     """Test that an exception from the provider's list_available_keys is propagated."""
     # Arrange
     test_exception = OSError("Simulated S3 connection error")
     mock_product_averages_provider.list_available_keys.side_effect = test_exception
 
     # Act & Assert
-    with pytest.raises(IOError) as exc_info:
+    with pytest.raises(OSError) as exc_info:
         await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
 
     # Check that the original exception is raised
     assert exc_info.value is test_exception
     mock_product_averages_provider.list_available_keys.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_determine_dates_to_insert_variable_error(mock_product_averages_provider: MagicMock):
+    """Test that an exception during Prefect variable access halts the flow."""
+    # Arrange
+    mock_product_averages_provider.list_available_keys.return_value = ["2023-01-01"]
+    test_exception = KeyError("Simulated variable error")
+
+    # Act & Assert
+    with patch("prefect.variables.get", side_effect=test_exception):
+        with pytest.raises(RuntimeError, match="Failed to retrieve Prefect gating variables") as exc_info:
+            await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
+
+    # Check that the original exception is chained
+    assert exc_info.value.__cause__ is test_exception
+    mock_product_averages_provider.list_available_keys.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_determine_dates_to_insert_invalid_variable_date_format(
+    mock_product_averages_provider: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+):
+    """Test that an invalid date format in Prefect variables raises an error."""
+    # Arrange
+    mock_product_averages_provider.list_available_keys.return_value = ["2023-01-01", "2023-01-02"]
+
+    from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
+
+    def mock_variable_getter_invalid(name: str, default: Any = None) -> Any:
+        if name == ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE:
+            return "invalid-date-format"
+        return ArgentinaFlowVariableNames.DEFAULT_DATE
+
+    # Act & Assert
+    with patch("prefect.variables.get", side_effect=mock_variable_getter_invalid):
+        with pytest.raises(ValueError, match="Invalid date format found in Prefect state variables"):
+            await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
+
+    assert "Invalid date format in Prefect variables" in caplog.text
+    assert "ERROR" in caplog.text
 
 
 # --- Test Cases for load_daily_averages ---
@@ -261,14 +311,14 @@ async def test_transform_product_data_full_success(
     # Verify content and types
     assert result_df["stream_id"].tolist() == ["stream-1", "stream-2", "stream-3"]
     # Check content is the string representation of the timestamp
-    assert result_df["date"].tolist() == [str(expected_timestamp)] * 3 
+    assert result_df["date"].tolist() == [str(expected_timestamp)] * 3
     # Check the dtype is object (as pandas often represents strings)
-    assert result_df["date"].dtype == "object" 
+    assert result_df["date"].dtype == "object"
     assert result_df["value"].tolist() == ["10.0", "20.0", "30.0"]
     assert result_df["value"].dtype == "object"  # Pandas uses object for strings
     # Verify data_provider was added and is None/NaN
     assert "data_provider" in result_df.columns
-    assert result_df["data_provider"].isnull().all() # type: ignore[arg-type]
+    assert result_df["data_provider"].isnull().all()  # type: ignore[arg-type]
 
     # Explicitly validate with Pandera model again
     try:

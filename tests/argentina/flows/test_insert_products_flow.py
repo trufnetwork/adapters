@@ -321,7 +321,7 @@ async def test_insert_flow_basic_scenarios(
         assert f"({num_expected_calls} dates)" in artifact_md
         assert f"Total Records Transformed & Submitted:** {len(transformed_df) * num_expected_calls}" in artifact_md
     else:
-        assert "No available dates found to process" in artifact_md
+        assert "No new dates available to process" in artifact_md
 
 
 # --- Fatal Error Scenario Tests ---
