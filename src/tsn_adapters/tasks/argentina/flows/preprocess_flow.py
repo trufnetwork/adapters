@@ -15,9 +15,11 @@ from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.cache_policies as CachePolicies
+import prefect.variables as variables
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
+from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
@@ -44,7 +46,9 @@ def process_raw_data(
     # Process the raw data
     if raw_data.empty:
         # Return empty DataFrames with correct types if raw data is empty
-        empty_avg_price_df = DataFrame[SepaAvgPriceProductModel](pd.DataFrame(columns=list(SepaAvgPriceProductModel.to_schema().columns.keys())))
+        empty_avg_price_df = DataFrame[SepaAvgPriceProductModel](
+            pd.DataFrame(columns=list(SepaAvgPriceProductModel.to_schema().columns.keys()))
+        )
         return cast(AggregatedPricesDF, pd.DataFrame()), cast(UncategorizedDF, pd.DataFrame()), empty_avg_price_df
 
     # Get average price per product (This is the SepaAvgPriceProductModel DataFrame)
@@ -152,6 +156,18 @@ class PreprocessFlow(ArgentinaFlowController):
             uncategorized=uncategorized,
             logs=b"Placeholder for logs",
         )
+
+        # --- Set Prefect Variable on Success ---
+        try:
+            variables.Variable.set(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, date)
+            logger.info(f"Successfully set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE} to {date}")
+        except Exception as e:
+            # Log error but don't fail the flow just because variable setting failed
+            logger.error(
+                f"Failed to set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE} for date {date}: {e}",
+                exc_info=True,
+            )
+        # --- End Prefect Variable Setting ---
 
         # Create summary
         logger.info("Creating summary")

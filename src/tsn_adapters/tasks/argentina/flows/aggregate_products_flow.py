@@ -2,28 +2,20 @@
 Prefect flow for aggregating Argentina SEPA product data.
 
 This flow loads the current aggregation state, determines which dates need processing,
-iterates through those dates calling the processing logic, and placeholders for
-saving state and reporting.
+iterates through those dates calling the processing logic, and saves the state and reporting.
 """
 
-from typing import cast
-
+import pandas as pd
 from pandera.typing import DataFrame
 from prefect import flow, get_run_logger
 from prefect.artifacts import create_markdown_artifact
-from prefect_aws import S3Bucket  # type: ignore
+import prefect.variables as variables  # Import prefect variables
+from prefect_aws import S3Bucket
 
-from tsn_adapters.tasks.argentina.models import (
-    DynamicPrimitiveSourceModel,
-)
+from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, WritableSourceDescriptorBlock
+from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames  # Import config
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
-from tsn_adapters.tasks.argentina.tasks import (
-    load_aggregation_state,
-    save_aggregation_state,
-)
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
-    create_empty_aggregated_data,
-    determine_aggregation_dates,
     process_single_date_products,
 )
 
@@ -31,6 +23,7 @@ from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import (
 @flow(name="Aggregate Argentina SEPA Products")
 async def aggregate_argentina_products_flow(
     s3_block: S3Bucket,
+    descriptor_block: WritableSourceDescriptorBlock,
     force_reprocess: bool = False,
 ):
     """
@@ -43,6 +36,7 @@ async def aggregate_argentina_products_flow(
 
     Args:
         s3_block: Configured Prefect S3Bucket block for accessing S3.
+        descriptor_block: Configured WritableSourceDescriptorBlock for upserting products.
         force_reprocess: If True, ignores the last processed date and reprocesses all
                          available daily data. Defaults to False.
     """
@@ -58,47 +52,78 @@ async def aggregate_argentina_products_flow(
         raise  # Cannot proceed without the provider
 
     # 2. Load Initial State
-    try:
-        aggregated_data, metadata = await load_aggregation_state(
-            s3_block=s3_block,
-            wait_for=[product_averages_provider],
-            # This ensures the correct type is returned
-            return_state=False,
-        )
-
-        logger.info(
-            f"Initial state loaded. Last aggregation processed: {metadata.last_aggregation_processed_date}, Total products: {metadata.total_products_count}"
-        )
-        # If force_reprocess is True, start with an empty dataframe, ignoring loaded state
-        if force_reprocess:
-            logger.info("`force_reprocess` is True. Resetting aggregated data to empty.")
-            aggregated_data = cast(DataFrame[DynamicPrimitiveSourceModel], create_empty_aggregated_data())
-            # Optionally reset metadata count, though it gets updated in the loop
-            # metadata.total_products_count = 0
-
-    except Exception as e:
-        logger.error(f"Failed to load initial aggregation state: {e}", exc_info=True)
-        raise  # Cannot proceed without initial state
+    # Instead of initializing here, we will load the current descriptor later
+    logger.info("Descriptor state will be loaded from the provided block.")
 
     # 3. Determine Date Range
     try:
-        # Pass provider instance, not just the block
-        dates_to_process = determine_aggregation_dates(
-            product_averages_provider=product_averages_provider,
-            metadata=metadata,
-            force_reprocess=force_reprocess,
+        # Fetch the last successful preprocess date from Prefect Variables
+        last_preprocess_success_date = variables.Variable.get(
+            ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE
         )
+        assert isinstance(last_preprocess_success_date, str)
+        logger.info(
+            f"Retrieved {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE}: {last_preprocess_success_date}"
+        )
+
+        # Fetch the last successful aggregation date
+        last_aggregation_success_date = variables.Variable.get(
+            ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE
+        )
+        assert isinstance(last_aggregation_success_date, str)
+        logger.info(
+            f"Retrieved {ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}: {last_aggregation_success_date}"
+        )
+
+        # Get all available dates from the provider
+        available_dates = product_averages_provider.list_available_keys()
+        if not available_dates:
+            logger.info("No available dates found in provider.")
+            dates_to_process = []
+        else:
+            available_dates.sort()  # Ensure chronological order
+            logger.info(f"Provider listed {len(available_dates)} dates: {available_dates[0]} to {available_dates[-1]}")
+
+            # Filter dates: D <= last_preprocess AND D > last_aggregation
+            dates_to_process = [
+                date_str
+                for date_str in available_dates
+                if date_str <= last_preprocess_success_date and date_str > last_aggregation_success_date
+            ]
+            skipped_preprocess = sum(1 for d in available_dates if d > last_preprocess_success_date)
+            skipped_aggregation = sum(
+                1 for d in available_dates if d <= last_aggregation_success_date and d <= last_preprocess_success_date
+            )
+
+            if skipped_preprocess > 0:
+                logger.info(
+                    f"Skipped {skipped_preprocess} dates later than {last_preprocess_success_date} ({ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE})."
+                )
+            if skipped_aggregation > 0:
+                logger.info(
+                    f"Skipped {skipped_aggregation} dates up to and including {last_aggregation_success_date} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE})."
+                )
+
+        # Handle force_reprocess flag (overrides the date filtering)
+        if force_reprocess:
+            logger.warning("`force_reprocess` is True. Overriding date filtering and processing all available dates.")
+            dates_to_process = available_dates  # Reset to all available dates
+
+        # Check if any dates remain after filtering
         if not dates_to_process:
-            logger.info("No new dates to process. Flow finished early.")
+            logger.info(
+                "No new dates to process after filtering based on preprocess and aggregation dates. Flow finished early."
+            )
             # Create artifact even if no dates processed
             create_markdown_artifact(
                 key="argentina-product-aggregation-summary",
-                markdown="# Argentina Product Aggregation Summary\n\nNo new dates found to process.",
+                markdown=f"# Argentina Product Aggregation Summary\\n\\nNo new dates found to process between {last_aggregation_success_date} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}) and {last_preprocess_success_date} ({ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE}).",
                 description="Summary of the Argentina SEPA product aggregation flow run.",
             )
             return
+
         logger.info(
-            f"Determined {len(dates_to_process)} dates to process: {dates_to_process[0]} to {dates_to_process[-1]}"
+            f"Determined {len(dates_to_process)} dates to process after gating: {dates_to_process[0]} to {dates_to_process[-1]}"
         )
     except Exception as e:
         logger.error(f"Failed to determine date range to process: {e}", exc_info=True)
@@ -107,60 +132,117 @@ async def aggregate_argentina_products_flow(
     # 4. Initialize Reporting Counters
     new_products_added_total = 0
     processed_dates_count = 0
+    final_total_products = 0  # Initialize counter here
     logger.debug("Reporting counters initialized.")
 
     # 5. Loop Through Dates
     logger.info(f"Starting processing loop for {len(dates_to_process)} dates...")
-    # Start with the correctly typed aggregated_data from state load
-    processed_aggregated_data: DataFrame[DynamicPrimitiveSourceModel] = aggregated_data # type: ignore[assignment]
-    for date_str in dates_to_process: # type: ignore[assignment]
+    # Load the initial/current full descriptor once before the loop
+    try:
+        current_descriptor_df: DataFrame[PrimitiveSourceDataModel] = descriptor_block.get_descriptor()
+        logger.info(f"Loaded initial descriptor with {len(current_descriptor_df)} entries.")
+    except Exception as e_desc:
+        logger.error(f"Failed to load initial descriptor: {e_desc}", exc_info=True)
+        raise  # Cannot proceed without descriptor
+
+    # We pass the full current descriptor state to the task each time for comparison.
+    # The task now returns ONLY the new products.
+    processed_descriptor_state: DataFrame[PrimitiveSourceDataModel] = current_descriptor_df
+
+    # avoid unbound variable error
+    date_str = ""
+    for date_str in dates_to_process:
         logger.debug(f"Processing date: {date_str}...")
         try:
-            # Store pre-processing count for comparison
-            count_before = len(processed_aggregated_data)
-
-            # Call the async process_single_date_products function with await
-            processed_aggregated_data = await process_single_date_products(
+            # Pass the current full descriptor state for comparison
+            new_products_df: DataFrame[PrimitiveSourceDataModel] = await process_single_date_products(
                 date_to_process=date_str,
-                current_aggregated_data=processed_aggregated_data,  # Should be correctly typed now
+                current_aggregated_data=processed_descriptor_state,  # Pass current full state
                 product_averages_provider=product_averages_provider,
             )
-            count_after = len(processed_aggregated_data)
-            new_this_date = count_after - count_before
-            new_products_added_total += new_this_date
+
+            # Upsert new products if any were found
+            if not new_products_df.empty:
+                new_this_date = len(new_products_df)
+                logger.info(f"Found {new_this_date} new products for date {date_str}. Upserting...")
+                try:
+                    descriptor_block.upsert_sources(new_products_df)
+                    logger.debug(f"Upsert successful for date {date_str}.")
+                    # Update the locally tracked descriptor state *after* successful upsert
+                    # This ensures the *next* iteration compares against the newly added products
+                    processed_descriptor_state = pd.concat(
+                        [processed_descriptor_state, new_products_df], ignore_index=True
+                    ).drop_duplicates(subset=["stream_id"], keep="last")  # Keep last in case of re-run/overlap
+
+                    # Update reporting counters *after* successful upsert
+                    new_products_added_total += new_this_date
+                    final_total_products = len(processed_descriptor_state)  # Update total count
+
+                except Exception as e_upsert:
+                    logger.error(f"Failed to upsert new products for date {date_str}: {e_upsert}", exc_info=True)
+                    # Halt flow on upsert failure to prevent inconsistent state
+                    raise ValueError(f"Halting flow due to upsert failure for date {date_str}.") from e_upsert
+
+            else:
+                logger.info(f"No new products found for date {date_str}.")
+                new_this_date = 0
+
             processed_dates_count += 1
 
-            # Update Metadata
-            metadata.last_aggregation_processed_date = date_str
-            metadata.total_products_count = count_after
             logger.info(
-                f"Processed date {date_str}. Found {new_this_date} new products. Total products: {count_after}."
+                f"Processed date {date_str}. Found {new_this_date} new products. Total products in descriptor: {final_total_products}."
             )
-
-            # Save state after processing each date
-            await save_aggregation_state(
-                s3_block=s3_block,
-                aggregated_data=processed_aggregated_data,
-                metadata=metadata,
-            )
-            logger.debug(f"Saved intermediate state for date {date_str}.")
 
         except Exception as e:
+            # Catch errors from process_single_date_products or other issues
             logger.error(f"Failed to process date {date_str}: {e}", exc_info=True)
-            # For now, log error and continue to next date
-            continue
+            # Halt flow if a date fails, otherwise subsequent dates might rely on its output
+            raise ValueError(f"Halting flow due to failure processing date {date_str}.") from e
 
     logger.info("Finished processing all dates.")
 
-    # 6. Reporting
-    final_total_products = metadata.total_products_count # type: ignore[assignment]
+    # --- Set Prefect Variable on Success (if any dates were processed) ---
+    if processed_dates_count > 0:
+        # 'date_str' will hold the last successfully processed date from the loop
+        last_processed_date = date_str
+        try:
+            # Set Aggregation Date
+            variables.Variable.set(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, last_processed_date)
+            logger.info(
+                f"Successfully set {ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE} to {last_processed_date}"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Failed to set {ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE} for date {last_processed_date}: {e}",
+                exc_info=True,
+            )
+    else:
+        logger.info("No dates were processed successfully, skipping Prefect Variable update.")
+    # --- End Prefect Variable Setting ---
+
+    # 6. Reporting (Removed direct metadata usage)
+    # final_total_products = metadata.total_products_count # Get from loop variable now
     logger.info(
         f"Flow finished. Processed {processed_dates_count} dates. Added {new_products_added_total} new products in total. Final product count: {final_total_products}."
     )
     # Create final summary artifact
+    # Determine date range safely
+    processed_date_range_str = "N/A"
+    if dates_to_process and processed_dates_count > 0:
+        # Assuming dates_to_process is sorted, use the first one and the last successfully processed one
+        # This needs refinement when proper gating/state is implemented in Step 8/9
+        processed_date_range_str = (
+            f"{dates_to_process[0]} to {date_str}"  # date_str holds the last processed date from the loop
+        )
+    elif dates_to_process:
+        processed_date_range_str = f"{dates_to_process[0]} to {dates_to_process[-1]} (0 dates processed successfully)"
+    elif processed_dates_count == 0:
+        processed_date_range_str = "No dates processed"
+
     summary_md = f"""# Argentina Product Aggregation Summary
 
-*   **Processed Date Range:** {dates_to_process[0]} to {dates_to_process[-1]} ({processed_dates_count} dates)
+*   **Processed Date Range:** {processed_date_range_str} ({processed_dates_count} dates processed)
 *   **New Products Added:** {new_products_added_total}
 *   **Total Unique Products:** {final_total_products}
 *   **Force Reprocess Flag:** {force_reprocess}

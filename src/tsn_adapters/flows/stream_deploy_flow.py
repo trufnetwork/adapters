@@ -14,7 +14,7 @@ for transaction confirmations.
 """
 
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, Optional, Set, cast
+from typing import Literal, Optional, cast
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -34,7 +34,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 
 # Import TNAccessBlock and task_wait_for_tx so that we can use its waiting functionality.
 from tsn_adapters.blocks.tn_access import TNAccessBlock, task_filter_batch_initialized_streams, task_wait_for_tx
-from ..common.trufnetwork.models.tn_models import StreamLocatorModel
+from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel
 from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive, task_init_stream
 
 # Configuration constants
@@ -130,7 +130,7 @@ def filter_deployed_streams_task(
     logger = get_run_logger()
 
     # Get all stream IDs from the descriptor
-    all_stream_ids: List[str] = [str(sid) for sid in descriptor_df["stream_id"]]
+    all_stream_ids: list[str] = [str(sid) for sid in descriptor_df["stream_id"]]
 
     if not all_stream_ids:
         logger.info("No streams to filter, returning empty DataFrame.")
@@ -138,7 +138,7 @@ def filter_deployed_streams_task(
 
     # Step 1: Check deployment status in deployment state
     try:
-        deployed_in_state: Dict[str, bool] = deployment_state.check_multiple_streams(all_stream_ids)
+        deployed_in_state: dict[str, bool] = deployment_state.check_multiple_streams(all_stream_ids)
     except Exception as e:
         logger.warning(f"Failed to check deployment status: {e!s}. Assuming no streams are deployed.", exc_info=True)
         # If deployment status check fails, assume nothing is deployed
@@ -148,7 +148,7 @@ def filter_deployed_streams_task(
     streams_to_verify = [stream_id for stream_id in all_stream_ids if deployed_in_state.get(stream_id, False)]
 
     # Track streams that are verified to exist on the network
-    streams_verified_on_network: Set[str] = set()
+    streams_verified_on_network: set[str] = set()
 
     if streams_to_verify:
         logger.debug(f"Verifying existence of {len(streams_to_verify)} streams marked as deployed using batch task...")
@@ -199,7 +199,7 @@ def filter_deployed_streams_task(
 
 @task(name="Mark Batch as Deployed", retries=DEFAULT_RETRY_ATTEMPTS, retry_delay_seconds=DEFAULT_RETRY_DELAY_SECONDS)
 def mark_batch_deployed_task(
-    stream_ids: List[str], deployment_state: DeploymentStateBlock, timestamp: datetime
+    stream_ids: list[str], deployment_state: DeploymentStateBlock, timestamp: datetime
 ) -> None:
     """
     Mark a batch of streams as deployed in the deployment state.
@@ -231,7 +231,7 @@ def mark_batch_deployed_task(
         logger.warning(f"Failed to mark streams as deployed: {e!s}. Continuing with flow execution.", exc_info=True)
 
 
-def _create_stream_batches(stream_ids: List[str], batch_size: int, start_from_batch: int) -> List[List[str]]:
+def _create_stream_batches(stream_ids: list[str], batch_size: int, start_from_batch: int) -> list[list[str]]:
     """
     Split a list of stream IDs into batches of specified size.
 
@@ -251,7 +251,7 @@ def _create_stream_batches(stream_ids: List[str], batch_size: int, start_from_ba
 
 
 def _process_deployment_results(
-    deployment_results: List[DeployStreamResult],
+    deployment_results: list[DeployStreamResult],
     deployment_state: Optional[DeploymentStateBlock] = None,
     batch_timestamp: Optional[datetime] = None,
 ) -> None:
@@ -361,7 +361,7 @@ def deploy_streams_flow(
 
     # SECTION 3: Prepare for batch processing
     # Extract stream IDs from filtered descriptor and ensure proper typing
-    stream_ids: List[str] = [str(sid) for sid in descriptor_df["stream_id"]]
+    stream_ids: list[str] = [str(sid) for sid in descriptor_df["stream_id"]]
 
     logger.info(f"Found {len(stream_ids)} stream descriptors to process.")
 
@@ -380,21 +380,21 @@ def deploy_streams_flow(
         logger.info(f"Starting processing from batch {start_from_batch+1}/{total_batches}.")
 
     # SECTION 4: Process batches
-    all_deployment_results: List[DeployStreamResult] = []
+    all_deployment_results: list[DeployStreamResult] = []
 
     for batch_index, batch in enumerate(batches, start=start_from_batch):
         # Log batch progress
         logger.info(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch)} streams.")
 
-        # Process each stream in the batch
-        batch_futures: Dict[str, PrefectFuture[DeployStreamResult]] = {}
+        # Process each stream in the batch, in parallel
+        batch_futures: dict[str, PrefectFuture[DeployStreamResult]] = {}
         for stream_id in batch:
             # Submit the task with the new name
             future = check_deploy_and_init_stream.submit(stream_id=stream_id, tna_block=tna_block, is_unix=is_unix)
             batch_futures[stream_id] = future
 
         # Collect batch results
-        batch_results: List[DeployStreamResult] = []
+        batch_results: list[DeployStreamResult] = []
         for stream_id, future in batch_futures.items():
             try:
                 result = future.result()
