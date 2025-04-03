@@ -531,9 +531,7 @@ async def test_insert_flow_fatal_error_save_state(
     mocks["transform"].assert_called_once()
     mocks["insert"].assert_called_once()
     mocks["var_set"].assert_called_once()  # Should be called once before failing
-    # Artifact creation might happen depending on exact Prefect error handling,
-    # but we expect the flow to fail before finishing normally.
-    # mock_create_artifact.assert_called_once()
+    mocks["create_artifact"].assert_called_once()
 
 
 # --- Test for Deployment Check Failure ---

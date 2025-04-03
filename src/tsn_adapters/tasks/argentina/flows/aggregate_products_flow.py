@@ -181,8 +181,7 @@ async def aggregate_argentina_products_flow(
         logger.info("No dates were processed successfully, skipping Prefect Variable update.")
     # --- End Prefect Variable Setting ---
 
-    # 6. Reporting (Removed direct metadata usage)
-    # final_total_products = metadata.total_products_count # Get from loop variable now
+    # 6. Reporting
     logger.info(
         f"Flow finished. Processed {processed_dates_count} dates. Added {new_products_added_total} new products in total. Final product count: {final_total_products}."
     )
@@ -190,8 +189,6 @@ async def aggregate_argentina_products_flow(
     # Determine date range safely
     processed_date_range_str = "N/A"
     if dates_to_process and processed_dates_count > 0:
-        # Assuming dates_to_process is sorted, use the first one and the last successfully processed one
-        # This needs refinement when proper gating/state is implemented in Step 8/9
         processed_date_range_str = (
             f"{dates_to_process[0]} to {date_str}"  # date_str holds the last processed date from the loop
         )
