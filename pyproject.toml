@@ -45,8 +45,10 @@ packages = {find = {where = ["src"]}}
 package-dir = {"" = "."}
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
 markers = [
-    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')"
+    "integration: mark test as integration test",
+    "slow: mark test as slow to run",
 ]
 pythonpath = ["src"]
 addopts = "--import-mode=importlib -v -s"
