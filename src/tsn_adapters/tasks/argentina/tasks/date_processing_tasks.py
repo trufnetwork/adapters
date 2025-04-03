@@ -16,7 +16,7 @@ from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.types import DateStr
-from tsn_adapters.utils import convert_date_str_series_to_unix_ts
+from tsn_adapters.utils import convert_date_str_series_to_unix_ts, force_sync
 from tsn_adapters.utils.create_empty_df import create_empty_df
 from tsn_adapters.utils.logging import get_logger_safe  # Re-using logger helper
 
@@ -57,16 +57,18 @@ async def determine_dates_to_insert(
         # 2. Fetch Prefect Variables for date filtering
         try:
             # Get last insertion date
-            last_insertion_processed_date = variables.get(
+            last_insertion_processed_date = force_sync(variables.Variable.get)(
                 ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE,
                 default=ArgentinaFlowVariableNames.DEFAULT_DATE
             )
+            assert isinstance(last_insertion_processed_date, str)
 
             # Get last *aggregation* date (corrected logic)
-            last_aggregation_processed_date = variables.get(
+            last_aggregation_processed_date = force_sync(variables.Variable.get)(
                 ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, # Correct variable
                 default=ArgentinaFlowVariableNames.DEFAULT_DATE
             )
+            assert isinstance(last_aggregation_processed_date, str)
 
             logger.info(
                 f"Using gating dates: Last Insertion = {last_insertion_processed_date}, "

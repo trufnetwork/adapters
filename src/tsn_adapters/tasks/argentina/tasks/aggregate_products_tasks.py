@@ -74,7 +74,7 @@ def determine_aggregation_dates(
 
     # 2. Fetch Gating Variables (Fetch PREPROCESS always, AGGREGATION conditionally)
     try:
-        last_preprocess_success_date = variables.get(
+        last_preprocess_success_date = variables.Variable.get(
             ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE
         )
         assert isinstance(last_preprocess_success_date, str)
@@ -88,7 +88,7 @@ def determine_aggregation_dates(
             )
         else:
             # If not forcing, use the actual last aggregation date
-            last_aggregation_success_date = variables.get(
+            last_aggregation_success_date = variables.Variable.get(
                 ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE,
                 default=ArgentinaFlowVariableNames.DEFAULT_DATE,
             )
@@ -183,7 +183,7 @@ async def _load_and_parse_daily_data(
         buffer = io.BytesIO(content_in_bytes)
         daily_products_df = pd.read_csv(  # type: ignore[call-overload]
             buffer,
-            compression="gzip",
+            compression="zip",
             dtype={"id_producto": str},  # Ensure ID is read as string
             keep_default_na=False,  # Treat empty strings as strings
             na_values=[],  # Define which values are treated as NA (empty list means only standard NAs)
@@ -242,7 +242,7 @@ def _prepare_new_products_df(
     new_products_output["stream_id"] = new_products_output["source_id"].apply(_generate_stream_id)
 
     # Add source_type (Assuming constant for now)
-    new_products_output["source_type"] = "ARG_SEPA_PRODUCT"
+    new_products_output["source_type"] = "argentina_sepa_product"
 
     # Ensure only PrimitiveSourceDataModel columns remain and in correct order
     schema_columns = list(PrimitiveSourceDataModel.to_schema().columns.keys())
