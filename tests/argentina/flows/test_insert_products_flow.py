@@ -28,7 +28,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourceDataModel,
     PrimitiveSourcesDescriptorBlock,
 )
-from tsn_adapters.blocks.tn_access import TNAccessBlock
+from tsn_adapters.blocks.tn_access import SplitInsertResults, TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.flows.insert_products_flow import DeploymentCheckError, insert_argentina_products_flow
@@ -226,10 +226,11 @@ async def test_insert_flow_successful_run(
         descriptor_df=sample_descriptor_df,
         date_str=date_to_process,
     )
+
     mocks["insert"].assert_called_once_with(
-        block=mock_tn_block, records=sample_transformed_df_date1, batch_size=batch_size
+        block=mock_tn_block, records=sample_transformed_df_date1, max_batch_size=batch_size, is_unix=True, wait=True, return_state=False
     )
-    mocks["var_aset"].assert_called_once_with(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_to_process)
+    mocks["var_aset"].assert_called_once_with(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_to_process, overwrite=True)
     mocks["create_artifact"].assert_called_once()
 
 
@@ -309,7 +310,7 @@ async def test_insert_flow_basic_scenarios(
 
     if num_expected_calls > 0:
         mocks["var_aset"].assert_called_with(
-            ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, expected_processed_dates[-1]
+            ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, expected_processed_dates[-1], overwrite=True
         )
         assert mocks["var_aset"].call_count == num_expected_calls
     else:
@@ -515,7 +516,11 @@ async def test_insert_flow_fatal_error_save_state(
     }
     mocks["load_daily"].return_value = sample_daily_avg_df_date1
     mocks["transform"].return_value = sample_transformed_df_date1
-    mocks["insert"].return_value = None  # Insertion succeeds
+    mocks["insert"].return_value = SplitInsertResults(
+        success_tx_hashes=["0x123"],
+        failed_records=pd.DataFrame(), # type: ignore
+        failed_reasons=[]
+    )  # Insertion succeeds
     mocks["var_aset"].side_effect = test_exception
 
     with pytest.raises(OSError) as exc_info:
@@ -633,7 +638,11 @@ async def test_insert_flow_reporting(
     }
     mocks["load_daily"].return_value = sample_daily_avg_df_date1
     mocks["transform"].return_value = sample_transformed_df_date1
-    mocks["insert"].return_value = None  # Simulate successful insert
+    mocks["insert"].return_value = SplitInsertResults(
+        success_tx_hashes=[],
+        failed_records=pd.DataFrame(), # type: ignore
+        failed_reasons=[]
+    )  # Simulate successful insert
 
     await insert_argentina_products_flow(
         s3_block=mock_s3_block,
