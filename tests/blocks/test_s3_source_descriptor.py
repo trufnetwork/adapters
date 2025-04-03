@@ -21,22 +21,22 @@ def mock_logger():
 def fake_s3_bucket():
     mock_bucket = MagicMock(spec=S3Bucket)
     mock_bucket.bucket_name = "fake-bucket"
-    stored_content = {}
+    stored_content: dict[str, str] = {}
 
-    async def mock_write_path(path, content):
+    async def mock_write_path(path: str, content: str):
         stored_content[path] = content
         return path
 
-    async def mock_read_path(path):
+    async def mock_read_path(path: str):
         if path not in stored_content:
             raise ValueError("No content stored")
         return stored_content[path]
 
     # Use sync wrappers that handle the async operations
-    def sync_write_path(path, content):
+    def sync_write_path(path: str, content: str):
         return deroutine(mock_write_path(path, content))
 
-    def sync_read_path(path):
+    def sync_read_path(path: str) -> str:
         return deroutine(mock_read_path(path))
 
     mock_bucket.write_path = sync_write_path
@@ -57,7 +57,7 @@ def sample_dataframe():
     return DataFrame[PrimitiveSourceDataModel](data)
 
 
-def test_set_and_get_descriptor(fake_s3_bucket, sample_dataframe, mock_logger):
+def test_set_and_get_descriptor(fake_s3_bucket: S3Bucket, sample_dataframe: DataFrame[PrimitiveSourceDataModel], mock_logger: logging.Logger):
     # Mock the get_logger_safe to avoid Prefect context issues
     with patch("tsn_adapters.blocks.primitive_source_descriptor.get_logger_safe", return_value=mock_logger):
         # Initialize S3SourceDescriptor with the fake S3 bucket and a dummy file path
