@@ -8,6 +8,7 @@ This flow handles:
 4. Storage of processed data in S3
 """
 
+import asyncio
 from typing import cast
 
 import pandas as pd
@@ -26,7 +27,8 @@ from tsn_adapters.tasks.argentina.provider.product_averages import ProductAverag
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
 from tsn_adapters.tasks.argentina.task_wrappers import task_load_category_map
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, CategoryMapDF, DateStr, SepaDF, UncategorizedDF
-from tsn_adapters.utils import deroutine
+
+from ....utils.deroutine import force_sync
 
 
 @task(name="Process Raw Data")
@@ -131,8 +133,8 @@ class PreprocessFlow(ArgentinaFlowController):
         processed_data, uncategorized, avg_price_df = process_raw_data(
             raw_data=raw_data,
             category_map_df=category_map_df,
-            return_state=True,
-        ).result()
+            return_state=False,
+        )
 
         # --- Save Product Averages ---
         if not avg_price_df.empty:
@@ -219,7 +221,7 @@ async def preprocess_flow(product_category_map_url: str, s3_block_name: str) -> 
         s3_block_name: Optional name of S3 block to use
     """
     # Get S3 block if specified
-    s3_block = deroutine(S3Bucket.load(s3_block_name))
+    s3_block = force_sync(S3Bucket.load)(s3_block_name)
 
     # Create and run flow
     flow = PreprocessFlow(
@@ -230,7 +232,9 @@ async def preprocess_flow(product_category_map_url: str, s3_block_name: str) -> 
 
 
 if __name__ == "__main__":
-    preprocess_flow(
-        "https://drive.usercontent.google.com/u/2/uc?id=1phvOyaOCjQ_fz-03r00R-podmsG0Ygf4&export=download",
-        "argentina-sepa",
+    asyncio.run(
+        preprocess_flow(
+            "https://drive.usercontent.google.com/u/2/uc?id=1phvOyaOCjQ_fz-03r00R-podmsG0Ygf4&export=download",
+            "argentina-sepa",
+        )
     )

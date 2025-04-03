@@ -3,7 +3,7 @@
 from datetime import datetime
 import re
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
 import pandas as pd
 from pandera.errors import SchemaError
@@ -174,7 +174,7 @@ class TestPreprocessFlowRunFlow:
             True,  # 2024-01-03 exists
         ]
         # Mock process_date
-        process_date_mock = cast(Any, MagicMock())
+        process_date_mock = cast(Any, AsyncMock())
         mock_preprocess_flow.process_date = process_date_mock
 
         _ = await mock_preprocess_flow.run_flow()
