@@ -85,8 +85,8 @@ async def insert_argentina_products_flow(
             logger.info("No new dates to process based on insertion/aggregation state variables. Flow finished.")
             # Create artifact even if no dates processed
             # Fetch current state variables for reporting
-            last_agg_date = variables.get(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, default="N/A")
-            last_ins_date = variables.get(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default="N/A")
+            last_agg_date = variables.Variable.get(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, default="N/A")
+            last_ins_date = variables.Variable.get(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default="N/A")
             summary_md = f"""# Argentina Product Insertion Summary
 
 No new dates available to process.
@@ -192,12 +192,21 @@ State is managed by Prefect Variables.
                     f"Submitting {num_transformed} transformed records for date {date_str} to TN insertion task..."
                 )
                 # No need to await here if the task runs concurrently
-                task_split_and_insert_records(
+                results = task_split_and_insert_records(
                     block=tn_block,
                     records=transformed_data,
-                    batch_size=batch_size,
+                    max_batch_size=batch_size,
+                    is_unix=True,
+                    wait=True,
                 )
-                logger.info(f"Successfully submitted records for date {date_str} to TN insertion task.")
+                if results is None:
+                    logger.error(f"Failed to submit records for date {date_str} to TN insertion task.")
+                    raise Exception(f"Failed to submit records for date {date_str} to TN insertion task.")
+                if results.failed_records.empty:
+                    logger.info(f"Successfully submitted records for date {date_str} to TN insertion task.")
+                else:
+                    logger.error(f"Failed to submit records for date {date_str} to TN insertion task.")
+                    raise Exception(f"Failed to submit records for date {date_str} to TN insertion task.")
             else:
                 logger.info(f"No records to insert for date {date_str} after transformation, skipping TN insertion.")
 
@@ -208,7 +217,9 @@ State is managed by Prefect Variables.
             last_processed_date_str = date_str  # Update last successful date
 
             # Update last successful INSERTION date variable *after* processing the date
-            variables.Variable.set(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, last_processed_date_str)
+            await variables.Variable.aset(
+                ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, last_processed_date_str, overwrite=True
+            )
             logger.info(f"Updated {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE} to {last_processed_date_str}")
 
         except DeploymentCheckError:

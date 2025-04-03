@@ -130,9 +130,7 @@ async def aggregate_argentina_products_flow(
                     # This ensures the *next* iteration compares against the newly added products
                     processed_descriptor_state = pd.concat(  # type: ignore
                         [processed_descriptor_state, new_products_df], ignore_index=True
-                    ).drop_duplicates(
-                        subset=["stream_id"], keep="last"
-                    )  # Keep last in case of re-run/overlap
+                    ).drop_duplicates(subset=["stream_id"], keep="last")  # Keep last in case of re-run/overlap
 
                     # Update reporting counters *after* successful upsert
                     new_products_added_total += new_this_date
@@ -167,7 +165,9 @@ async def aggregate_argentina_products_flow(
         last_processed_date = date_str
         try:
             # Set Aggregation Date
-            variables.Variable.set(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, last_processed_date)
+            await variables.Variable.aset(
+                ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, last_processed_date, overwrite=True
+            )
             logger.info(
                 f"Successfully set {ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE} to {last_processed_date}"
             )

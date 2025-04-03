@@ -88,7 +88,7 @@ class PreprocessFlow(ArgentinaFlowController):
         self.product_averages_provider = ProductAveragesProvider(s3_block=s3_block)
         # Note: self.processed_provider is inherited from ArgentinaFlowController
 
-    def run_flow(self) -> None:
+    async def run_flow(self) -> None:
         """
         1. Lists all dates in the raw data provider
         2. See if target already exists in the processed data provider
@@ -99,9 +99,9 @@ class PreprocessFlow(ArgentinaFlowController):
             if self.processed_provider.exists(date):
                 logger.info(f"Skipping {date} because it already exists")
                 continue
-            self.process_date(date)
+            await self.process_date(date)
 
-    def process_date(self, date: DateStr) -> None:
+    async def process_date(self, date: DateStr) -> None:
         """Process data for a specific date.
 
         Args:
@@ -158,7 +158,7 @@ class PreprocessFlow(ArgentinaFlowController):
 
         # --- Set Prefect Variable on Success ---
         try:
-            variables.Variable.set(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, date)
+            await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, date, overwrite=True)
             logger.info(f"Successfully set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE} to {date}")
         except Exception as e:
             # Log error but don't fail the flow just because variable setting failed
@@ -210,7 +210,7 @@ class PreprocessFlow(ArgentinaFlowController):
 
 
 @flow(name="Argentina SEPA Preprocessing")
-def preprocess_flow(product_category_map_url: str, s3_block_name: str) -> None:
+async def preprocess_flow(product_category_map_url: str, s3_block_name: str) -> None:
     """Preprocess Argentina SEPA data.
 
     Args:
@@ -226,7 +226,7 @@ def preprocess_flow(product_category_map_url: str, s3_block_name: str) -> None:
         product_category_map_url=product_category_map_url,
         s3_block=s3_block,
     )
-    flow.run_flow()
+    await flow.run_flow()
 
 
 if __name__ == "__main__":
