@@ -42,7 +42,7 @@ TEST_E2E_BUCKET_NAME = "test-e2e-insertion-bucket"
 BASE_AGG_PATH = "aggregated"
 BASE_PROC_PATH = "processed"
 STATE_FILE_PATH = f"{BASE_AGG_PATH}/argentina_product_state.json"
-DESCRIPTOR_FILE_PATH = f"{BASE_AGG_PATH}/argentina_products.csv.gz"
+DESCRIPTOR_FILE_PATH = f"{BASE_AGG_PATH}/argentina_products.csv.zip"
 
 # --- Centralized Flow Context Fixture ---
 
@@ -59,7 +59,7 @@ def mocked_flow_context() -> Generator[dict[str, MagicMock], None, None]:
     with ExitStack() as stack:
         mocks["provider_cls"] = stack.enter_context(patch(f"{flow_path}.ProductAveragesProvider"))
         mocks["var_get"] = stack.enter_context(patch("prefect.variables.Variable.get"))
-        mocks["var_set"] = stack.enter_context(patch("prefect.variables.Variable.set"))
+        mocks["var_aset"] = stack.enter_context(patch("prefect.variables.Variable.aset"))
         mocks["load_daily"] = stack.enter_context(patch(f"{flow_path}.load_daily_averages", new_callable=AsyncMock))
         mocks["transform"] = stack.enter_context(patch(f"{flow_path}.transform_product_data", new_callable=AsyncMock))
         mocks["insert"] = stack.enter_context(patch(f"{flow_path}.task_split_and_insert_records"))

@@ -3,11 +3,11 @@ Unit tests for Argentina SEPA product aggregation tasks.
 """
 
 from collections.abc import Generator
-import gzip
 import io
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+import zlib
 
 from _pytest.logging import LogCaptureFixture
 from botocore.exceptions import ClientError  # type: ignore
@@ -34,7 +34,7 @@ from tsn_adapters.utils import create_empty_df
 TEST_BUCKET_NAME = "test-aggregation-bucket"
 BASE_PATH = "test_agg"
 METADATA_PATH = f"{BASE_PATH}/argentina_products_metadata.json"
-DATA_PATH = f"{BASE_PATH}/argentina_products.csv.gz"
+DATA_PATH = f"{BASE_PATH}/argentina_products.csv.zip"
 
 
 @pytest.fixture(scope="function")
@@ -56,7 +56,7 @@ def s3_bucket_block(prefect_test_fixture: Any) -> Generator[S3Bucket, None, None
     with mock_aws():
         # Instantiate the Prefect block
         s3_block = S3Bucket(bucket_name=TEST_BUCKET_NAME)
-        s3_client: S3Client = s3_block._get_s3_client()
+        s3_client: S3Client = s3_block._get_s3_client()  # type: ignore
         s3_client.create_bucket(Bucket=TEST_BUCKET_NAME)
         # Attach the boto3 client for direct manipulation by helpers
         s3_block._boto_client = s3_client  # type: ignore
@@ -163,7 +163,7 @@ def setup_mock_aread_path(mock_provider: MagicMock):
 
         Args:
             date_str: The date to mock for.
-            data: The DataFrame to return (will be converted to gzipped CSV bytes).
+            data: The DataFrame to return (will be converted to zipped CSV bytes).
             side_effect: An exception to raise instead of returning data.
         """
         expected_file_key = mock_provider.to_product_averages_file_key(date_str)
@@ -180,10 +180,9 @@ def setup_mock_aread_path(mock_provider: MagicMock):
         if side_effect:
             config["side_effect"] = side_effect
         elif data is not None:
-            # Convert DataFrame to gzipped CSV bytes for the mock return value
+            # Convert DataFrame to zipped CSV bytes for the mock return value
             buffer = io.BytesIO()
-            with gzip.GzipFile(fileobj=buffer, mode="wb") as gz_file:
-                data.to_csv(io.TextIOWrapper(gz_file, "utf-8"), index=False, encoding="utf-8")
+            data.to_csv(buffer, index=False, encoding="utf-8", compression="zip")
             config["return_value"] = buffer.getvalue()
         else:  # Assume file not found if no data and no specific error
             config["side_effect"] = ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
@@ -222,7 +221,7 @@ def test_determine_dates_no_prior_state(mock_provider: MagicMock):
     # Mock Prefect variables to simulate:
     # - Preprocess date: far future (to include all dates)
     # - Aggregation date: default 1970-01-01 (to process all dates after it)
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
         mock_var_get.side_effect = lambda var_name, default: (
             "2099-12-31" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
             else "1970-01-01" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
@@ -256,7 +255,7 @@ def test_determine_dates_force_reprocess(mock_provider: MagicMock):
     force_reprocess = True
     
     # Mock Prefect variables
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
         # For LAST_PREPROCESS, return a date that includes all available dates
         # For LAST_AGGREGATION, the function should ignore this and use DEFAULT_DATE
         mock_var_get.side_effect = lambda var_name, default: (
@@ -281,7 +280,7 @@ def test_determine_dates_prior_state_exists(mock_provider: MagicMock):
     expected_dates = [DateStr("2024-03-12"), DateStr("2024-03-13")]
     
     # Mock Prefect variables
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
         # Mock LAST_PREPROCESS to allow all dates
         # Mock LAST_AGGREGATION to be "2024-03-11" (so we process dates after it)
         mock_var_get.side_effect = lambda var_name, default: (
@@ -305,7 +304,7 @@ def test_determine_dates_no_new_dates(mock_provider: MagicMock):
     force_reprocess = False
     
     # Mock Prefect variables - all available dates already processed
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
         mock_var_get.side_effect = lambda var_name, default: (
             "2024-03-15" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
             else "2024-03-11" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
@@ -329,7 +328,7 @@ def test_determine_dates_gaps_in_available_dates(mock_provider: MagicMock):
     expected_dates = [DateStr("2024-03-12"), DateStr("2024-03-13")]
     
     # Mock Prefect variables
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
         mock_var_get.side_effect = lambda var_name, default: (
             "2024-03-15" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
             else "2024-03-10" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
@@ -351,7 +350,7 @@ def test_determine_dates_no_available_dates(mock_provider: MagicMock):
     force_reprocess = False
     
     # Mock Prefect variables
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
         mock_var_get.return_value = "2024-03-15"  # Any date
         
         # Act
@@ -371,7 +370,7 @@ def test_determine_dates_invalid_metadata_date(mock_provider: MagicMock, caplog:
     expected_dates = available_dates
     
     # Mock Prefect variables
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_var_get:
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
         mock_var_get.side_effect = lambda var_name, default: (
             "2024-03-15" if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE
             else "1970-01-01" if var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE
@@ -577,7 +576,7 @@ async def test_process_single_date_daily_file_parse_error(
     date_str = "2024-03-16"
     caplog.set_level(logging.ERROR)
     # Simulate parse error by setting up corrupted data
-    mock_provider.s3_block.aread_path = AsyncMock(return_value=gzip.compress(b"col1|col2\ninvalid,data"))
+    mock_provider.s3_block.aread_path = AsyncMock(return_value=zlib.compress(b"col1|col2\ninvalid,data"))
     
     # Act
     # Mock pd.read_csv within the task's context to raise ParserError

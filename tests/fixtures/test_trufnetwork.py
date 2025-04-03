@@ -176,7 +176,7 @@ def start_container(spec: ContainerSpec, network: str) -> bool:
     # First ensure container doesn't exist
     run_docker_command(["rm", "-f", spec.name])
 
-    args = ["run", "--rm", "--name", spec.name, "--network", network, "-d"]
+    args = ["run", "--name", spec.name, "--network", network, "-d"]
 
     if spec.tmpfs_path:
         args.extend(["--tmpfs", spec.tmpfs_path])
@@ -356,7 +356,6 @@ def tn_provider(tn_node: str) -> TrufNetworkProvider:
 
 
 # Skip these tests on CI environment
-@pytest.mark.skipif(os.environ.get("CI") == "true", reason="Local development fixture tests, skipped in CI")
 class TestTrufNetworkFixtures:
     """
     Test suite for TrufNetwork fixtures.

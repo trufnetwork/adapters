@@ -2,7 +2,6 @@
 Shared helper functions for Argentina-related tests.
 """
 
-import gzip
 import io
 
 from mypy_boto3_s3 import S3Client
@@ -18,18 +17,18 @@ def upload_to_s3(s3_block: S3Bucket, path: str, content: bytes):
     s3_block._boto_client.put_object(Bucket=s3_block.bucket_name, Key=path, Body=content)  # type: ignore
 
 
-def upload_df_to_s3_csv_gz(s3_block: S3Bucket, path: str, df: pd.DataFrame):
-    """Helper to upload a DataFrame as gzipped CSV to mock S3."""
+def upload_df_to_s3_csv_zip(s3_block: S3Bucket, path: str, df: pd.DataFrame):
+    """Helper to upload a DataFrame as zipped CSV to mock S3."""
     buffer = io.BytesIO()
-    with gzip.GzipFile(fileobj=buffer, mode="wb") as gz_file:
-        # Ensure consistent encoding
-        df.to_csv(io.TextIOWrapper(gz_file, "utf-8"), index=False, encoding="utf-8")
+    # Write DataFrame to the binary buffer, letting pandas handle zipping
+    df.to_csv(buffer, index=False, encoding="utf-8", compression="zip")
     buffer.seek(0)
+    # Upload the raw bytes from the buffer
     upload_to_s3(s3_block, path, buffer.getvalue())
 
 
-def read_s3_csv_gz(s3_block: S3Bucket, path: str) -> pd.DataFrame:
-    """Helper to read a gzipped CSV from mock S3 into a DataFrame."""
+def read_s3_csv_zip(s3_block: S3Bucket, path: str) -> pd.DataFrame:
+    """Helper to read a zipped CSV from mock S3 into a DataFrame."""
     s3_client: S3Client = s3_block._get_s3_client()  # type: ignore
     try:
         obj = s3_client.get_object(Bucket=s3_block.bucket_name, Key=path)
@@ -48,11 +47,11 @@ def read_s3_csv_gz(s3_block: S3Bucket, path: str) -> pd.DataFrame:
         return pd.DataFrame()  # Return empty DataFrame if no content
 
     buffer = io.BytesIO(csv_bytes)
-    # Use pandas read_csv with gzip compression
+    # Use pandas read_csv with zip compression
     try:
         # Specify dtype=str to prevent pandas from inferring numeric types for IDs
         # Alternatively, specify dtypes based on a schema if available
-        return pd.read_csv(buffer, compression="gzip", dtype=str)
+        return pd.read_csv(buffer, compression="zip", dtype=str)
     except Exception as e:
         # Catch potential pandas parsing errors or other read errors
-        raise OSError(f"Failed to read or parse gzipped CSV from {path}: {e}") from e
+        raise OSError(f"Failed to read or parse zipped CSV from {path}: {e}") from e

@@ -2,10 +2,7 @@
 Integration tests for the Argentina SEPA Product Aggregation Flow.
 """
 
-from collections.abc import Generator
-import gzip
 import io
-import os
 from typing import Any
 from unittest.mock import (
     AsyncMock,
@@ -13,8 +10,6 @@ from unittest.mock import (
     patch,
 )
 
-import boto3  # type: ignore
-from moto import mock_aws
 import pandas as pd
 from prefect_aws import S3Bucket  # type: ignore
 import pytest
@@ -30,11 +25,11 @@ from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.types import DateStr
 
 # --- Constants for End-to-End Tests ---
-TEST_E2E_BUCKET_NAME = "test-e2e-aggregation-bucket"
+
 BASE_AGG_PATH = "aggregated"  # Matches flow default
 BASE_PROC_PATH = "processed"  # Matches provider default
 METADATA_S3_PATH = f"{BASE_AGG_PATH}/argentina_products_metadata.json"
-DATA_S3_PATH = f"{BASE_AGG_PATH}/argentina_products.csv.gz"
+DATA_S3_PATH = f"{BASE_AGG_PATH}/argentina_products.csv.zip"
 
 
 # Fixture for mock S3Bucket
@@ -76,31 +71,7 @@ def empty_aggregated_df() -> pd.DataFrame:
 
 # --- Fixtures for Moto-based End-to-End Tests ---
 
-
-@pytest.fixture(scope="function")
-def aws_credentials():
-    """Mocked AWS Credentials for moto."""
-    os.environ["AWS_ACCESS_KEY_ID"] = "testing"
-    os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
-    os.environ["AWS_SECURITY_TOKEN"] = "testing"
-    os.environ["AWS_SESSION_TOKEN"] = "testing"
-    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
-
-
-@pytest.fixture(scope="function")
-def real_s3_bucket_block(aws_credentials: None, prefect_test_fixture: Any) -> Generator[S3Bucket, None, None]:
-    """Creates a mock S3 bucket using moto and returns a real S3Bucket block."""
-    _ = aws_credentials  # Ensure credentials are set
-    _ = prefect_test_fixture  # Ensure Prefect context if needed
-    with mock_aws():
-        s3_client = boto3.client("s3", region_name="us-east-1")  # type: ignore
-        s3_client.create_bucket(Bucket=TEST_E2E_BUCKET_NAME)  # type: ignore
-        # Instantiate the Prefect block targeting the moto bucket
-        s3_block = S3Bucket(bucket_name=TEST_E2E_BUCKET_NAME)
-        # Provide access to the underlying boto3 client for direct manipulation if needed
-        s3_block._boto_client = s3_client  # type: ignore
-        yield s3_block
-
+# Fixtures aws_credentials and real_s3_bucket_block moved to tests/argentina/conftest.py
 
 # Sample Daily Data Fixtures
 @pytest.fixture
@@ -149,9 +120,9 @@ def upload_sample_data(s3_block: S3Bucket, date_str: DateStr, data: pd.DataFrame
     full_path = f"{BASE_PROC_PATH}/{file_key}"  # Manually construct full path
 
     buffer = io.BytesIO()
-    # Use gzip directly for consistent compression with task logic
-    with gzip.GzipFile(fileobj=buffer, mode="wb") as gz_file:
-        data.to_csv(io.TextIOWrapper(gz_file, "utf-8"), index=False)
+    data.to_csv(buffer, index=False, 
+                compression="zip",
+                encoding="utf-8")
     buffer.seek(0)
     s3_block._boto_client.put_object(  # type: ignore
         Bucket=s3_block.bucket_name, Key=full_path, Body=buffer.getvalue()
@@ -343,7 +314,6 @@ async def test_aggregate_flow_no_dates_to_process_with_artifact(
         assert artifact_call_args["key"] == "argentina-product-aggregation-summary"
         assert "No new dates found to process" in artifact_call_args["markdown"]
 
-
 # --- Moto-based End-to-End Tests ---
 
 
@@ -371,7 +341,7 @@ async def test_aggregate_flow_end_to_end_cold_start(
     mock_descriptor_block.get_descriptor.return_value = empty_aggregated_df
 
     # Mock Prefect Variables needed by determine_aggregation_dates
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.get") as mock_variable_get:
+    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_variable_get:
         
         def get_variable_side_effect(name: str, default: Any = None) -> str:
             if name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
@@ -454,7 +424,7 @@ async def test_aggregate_flow_end_to_end_resume(
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
 
     # Mock Prefect Variables for gating (assuming resume after 2024-03-10)
-    with patch("prefect.variables.get") as mock_variable_get:
+    with patch("prefect.variables.Variable.get") as mock_variable_get:
         # Configure side effect for different variable names
         def get_side_effect(name: str, default: Any = None) -> Any:
             if name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
@@ -527,7 +497,7 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
     upload_sample_data(real_s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
 
     # Mock Prefect Variables for gating (force_reprocess=True means LAST_AGGREGATION not fetched)
-    with patch("prefect.variables.get") as mock_variable_get:
+    with patch("prefect.variables.Variable.get") as mock_variable_get:
         # Only need to mock PREPROCESS date
         def get_side_effect(name: str, default: Any = None) -> str | None:
             if name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
@@ -567,3 +537,5 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
 
     # Verify initial descriptor load was called
     mock_descriptor_block.get_descriptor.assert_called_once()
+
+

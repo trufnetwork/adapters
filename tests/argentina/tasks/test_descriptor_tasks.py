@@ -20,7 +20,7 @@ SAMPLE_DESCRIPTOR_DATA = {
 def mock_s3_descriptor_block() -> MagicMock:
     """Fixture for a mocked S3SourceDescriptor block."""
     mock_block = MagicMock(spec=S3SourceDescriptor)
-    mock_block.file_path = "mock/path/descriptor.csv.gz"
+    mock_block.file_path = "mock/path/descriptor.csv.zip"
     # Mock the get_descriptor method directly on the instance
     mock_block.get_descriptor = MagicMock()
     return mock_block
@@ -56,7 +56,7 @@ async def test_load_product_descriptor_empty_dataframe(mock_s3_descriptor_block,
         await load_product_descriptor.fn(descriptor_block=mock_s3_descriptor_block)
 
     mock_s3_descriptor_block.get_descriptor.assert_called_once()
-    assert "Product descriptor loaded from mock/path/descriptor.csv.gz is empty" in caplog.text
+    assert "Product descriptor loaded from mock/path/descriptor.csv.zip is empty" in caplog.text
     assert "ERROR" in caplog.text
 
 

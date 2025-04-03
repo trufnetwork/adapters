@@ -6,7 +6,6 @@ integration tests for the complete flow, using mock objects to avoid
 actual network calls.
 """
 
-import logging
 from typing import Any, Union
 
 import pandas as pd

@@ -185,16 +185,17 @@ def postgresql_container() -> Generator[Container, Any, None]:
 
 # --- Fixtures dependent on the container ---
 
+@pytest.fixture(scope="function")
+def db_engine_url(postgresql_container: Container) -> str:
+    """Creates a SQLAlchemy URL for the test database."""
+    return f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}@" \
+        f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+
 
 @pytest.fixture(scope="function")
-def db_engine(postgresql_container: Container) -> Engine:  # Remove postgresql_proc dependency
+def db_engine(postgresql_container: Container, db_engine_url: str) -> Engine:  # Remove postgresql_proc dependency
     """Creates a SQLAlchemy engine connected to the test database managed by the container."""
-    # Construct connection URL using details from DB_CONFIG, matching the container
-    conn_url = (
-        f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
-        f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
-    )
-    engine = create_engine(conn_url)
+    engine = create_engine(db_engine_url)
     # Optional: Verify connection works before yielding
     try:
         # Type hint the connection

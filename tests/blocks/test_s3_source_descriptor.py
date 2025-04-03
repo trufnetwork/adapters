@@ -61,7 +61,7 @@ def test_set_and_get_descriptor(fake_s3_bucket, sample_dataframe, mock_logger):
     # Mock the get_logger_safe to avoid Prefect context issues
     with patch("tsn_adapters.blocks.primitive_source_descriptor.get_logger_safe", return_value=mock_logger):
         # Initialize S3SourceDescriptor with the fake S3 bucket and a dummy file path
-        descriptor = S3SourceDescriptor(s3_bucket=fake_s3_bucket, file_path="dummy_path.csv.gz")
+        descriptor = S3SourceDescriptor(s3_bucket=fake_s3_bucket, file_path="dummy_path.csv.zip")
 
         # Write the sample DataFrame using set_sources
         descriptor.set_sources(sample_dataframe)

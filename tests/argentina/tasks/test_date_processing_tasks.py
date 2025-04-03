@@ -95,19 +95,19 @@ async def test_determine_dates_to_insert_scenarios(
     # Arrange
     mock_product_averages_provider.list_available_keys.return_value = available_dates
 
-    # Mock the Prefect variables.get function
+    # Mock the Prefect variables.Variable.get function
     from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 
     def mock_variable_getter(name: str, default: Any = None) -> Any:
-        """Mock implementation for variables.get that uses metadata_dict values."""
+        """Mock implementation for variables.Variable.get that uses metadata_dict values."""
         if name == ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE:
             return metadata_dict.get("last_insertion_processed_date", default)
         if name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
             return metadata_dict.get("last_aggregation_processed_date", default)
         return default
 
-    # Use the mock for variables.get
-    with patch("prefect.variables.get", side_effect=mock_variable_getter):
+    # Use the mock for variables.Variable.get
+    with patch("prefect.variables.Variable.get", side_effect=mock_variable_getter):
         # Act
         result_dates = await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
 
@@ -162,7 +162,7 @@ async def test_determine_dates_to_insert_variable_error(mock_product_averages_pr
     test_exception = KeyError("Simulated variable error")
 
     # Act & Assert
-    with patch("prefect.variables.get", side_effect=test_exception):
+    with patch("prefect.variables.Variable.get", side_effect=test_exception):
         with pytest.raises(RuntimeError, match="Failed to retrieve Prefect gating variables") as exc_info:
             await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
 
@@ -188,7 +188,7 @@ async def test_determine_dates_to_insert_invalid_variable_date_format(
         return ArgentinaFlowVariableNames.DEFAULT_DATE
 
     # Act & Assert
-    with patch("prefect.variables.get", side_effect=mock_variable_getter_invalid):
+    with patch("prefect.variables.Variable.get", side_effect=mock_variable_getter_invalid):
         with pytest.raises(ValueError, match="Invalid date format found in Prefect state variables"):
             await determine_dates_to_insert.fn(provider=mock_product_averages_provider)
 
