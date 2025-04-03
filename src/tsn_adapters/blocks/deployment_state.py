@@ -43,7 +43,7 @@ from prefect.blocks.core import Block
 from prefect_aws import S3Bucket  # type: ignore
 from pydantic import ConfigDict
 
-from tsn_adapters.utils.deroutine import deroutine
+from tsn_adapters.utils.deroutine import force_sync
 
 
 class DeploymentStateModel(DataFrameModel):
@@ -188,7 +188,7 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
             Exception: If ignore_errors is False and there's an error reading from S3.
         """
         try:
-            content = deroutine(self.s3_bucket.read_path(self.file_path))
+            content = force_sync(self.s3_bucket.read_path)(self.file_path)
             buffer = io.BytesIO(content)
             df = pd.read_parquet(buffer, engine='pyarrow')
             return self._ensure_utc_timestamps(df)
@@ -214,7 +214,7 @@ class S3DeploymentStateBlock(DeploymentStateBlock):
             buffer = io.BytesIO()
             df.to_parquet(buffer, engine='pyarrow', compression='snappy', index=False)
             buffer.seek(0)
-            deroutine(self.s3_bucket.write_path(self.file_path, buffer.getvalue()))
+            force_sync(self.s3_bucket.write_path)(self.file_path, buffer.getvalue())
         except Exception as exc:
             raise Exception(f"Failed to write deployment states to S3: {str(exc)}")
 

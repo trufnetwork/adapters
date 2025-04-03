@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
-import gzip
 from io import BytesIO
 from typing import cast
+import zlib
 
 import pandas as pd
 import pandera as pa
@@ -13,7 +13,7 @@ from prefect_aws import S3Bucket
 from pydantic import ConfigDict
 
 from tsn_adapters.blocks.github_access import GithubAccess
-from tsn_adapters.utils.deroutine import deroutine
+from tsn_adapters.utils.deroutine import force_sync
 from tsn_adapters.utils.logging import get_logger_safe
 
 
@@ -108,11 +108,11 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
         try:
-            file_content = deroutine(self.s3_bucket.read_path(self.file_path))
+            file_content = force_sync(self.s3_bucket.read_path)(self.file_path)
             buffer = BytesIO(file_content)
             df = pd.read_csv(
                 buffer,
-                compression="gzip",
+                compression="zip",
                 encoding="utf-8",
                 dtype={"stream_id": str, "source_id": str, "source_type": str},
                 keep_default_na=False,
@@ -127,7 +127,7 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
 
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
         csv_bytes = descriptor.to_csv(index=False, encoding="utf-8").encode("utf-8")
-        compressed_bytes = gzip.compress(csv_bytes)
+        compressed_bytes = zlib.compress(csv_bytes)
         self.s3_bucket.write_path(
             path=self.file_path,
             content=compressed_bytes,
