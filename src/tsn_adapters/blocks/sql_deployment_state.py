@@ -9,7 +9,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from tsn_adapters.blocks.deployment_state import DeploymentStateBlock, DeploymentStateModel
-from tsn_adapters.blocks.models import primitive_sources_table  # Assuming this is the shared table
+from tsn_adapters.blocks.models import primitive_sources_table
 from tsn_adapters.utils.logging import get_logger_safe
 
 
@@ -44,7 +44,6 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
     @property
     def _table(self) -> Table:
         """Returns the SQLAlchemy Table object based on the table_name."""
-        # Assuming primitive_sources_table is imported and represents the correct structure
         if self.table_name != primitive_sources_table.name:
             self.logger.warning(
                 f"Configured table_name '{self.table_name}' differs from imported table name "
@@ -61,10 +60,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
             self.logger.error(f"Failed to get SQLAlchemy engine from connector: {e}", exc_info=True)
             raise
 
-    # --- Read Methods (Implemented in Step 5) ---
-    # Assume implementations for has_been_deployed, check_multiple_streams,
-    # and get_deployment_states exist here from previous steps.
-
+    # --- Read Methods  ---
     def has_been_deployed(self, stream_id: str) -> bool:
         """Check if the deployment has been performed for a given stream_id."""
         engine = self._get_engine()
@@ -153,7 +149,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         empty_df["stream_id"] = pd.Series(dtype="str")
         return cast(DataFrame[DeploymentStateModel], empty_df)
 
-    # --- Write Methods (Implementation for Step 6) ---
+    # --- Write Methods ---
 
     def _validate_timestamp(self, timestamp: datetime) -> datetime:
         """Validate and ensure timestamp is timezone-aware UTC."""

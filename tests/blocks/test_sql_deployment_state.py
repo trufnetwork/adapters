@@ -133,10 +133,6 @@ def test_get_deployment_states_initial(
     DeploymentStateModel.validate(result)
 
 
-# We will add tests involving actual deployed states after implementing write methods in Step 6.
-# For now, these tests cover the initial/non-deployed read scenarios.
-
-
 # --- Helper to check DB state directly ---
 def get_db_state(session: Session, table_name: str = "primitive_sources", source_type_filter: str | None = None) -> pd.DataFrame:
     """Directly query the table to check its state, optionally filtering by source_type."""
@@ -150,7 +146,7 @@ def get_db_state(session: Session, table_name: str = "primitive_sources", source
     return pd.read_sql(text(query), session.connection(), params=params)
 
 
-# --- Test Cases for Write Methods (Step 6) ---
+# --- Test Cases for Write Methods ---
 
 
 @pytest.fixture
@@ -415,8 +411,6 @@ def test_update_deployment_states_empty_df(
 
 
 # Add test for read methods after marking some as deployed
-
-
 def test_read_methods_after_mark(
     db_session: Session,
     sql_deployment_state: SqlAlchemyDeploymentState, # Configured for typeX

@@ -4,7 +4,7 @@ Tests for the SqlAlchemySourceDescriptor block.
 
 import pandas as pd
 from pandera.typing import DataFrame
-from prefect_sqlalchemy import SqlAlchemyConnector  # type: ignore
+from prefect_sqlalchemy import SqlAlchemyConnector, ConnectionComponents  # type: ignore
 import pytest
 from sqlalchemy import Table, select  # Add select
 from sqlalchemy.orm import Session
@@ -65,14 +65,14 @@ def sql_connector() -> SqlAlchemyConnector:
     Uses the DB_CONFIG from test_sql.py to ensure consistent credentials.
     """
     # Create connection_info directly from DB_CONFIG
-    conn_info = {
-        "driver": "postgresql+psycopg2",
-        "username": DB_CONFIG["user"],
-        "password": DB_CONFIG["password"],
-        "host": DB_CONFIG["host"],
-        "port": DB_CONFIG["port"],
-        "database": DB_CONFIG["dbname"],
-    }
+    conn_info = ConnectionComponents(
+        driver="postgresql+psycopg2",
+        username=DB_CONFIG["user"],
+        password=DB_CONFIG["password"],
+        host=DB_CONFIG["host"],
+        port=DB_CONFIG["port"],
+        database=DB_CONFIG["dbname"],
+    )
 
     # Initialize connector with the connection_info dictionary
     connector = SqlAlchemyConnector(connection_info=conn_info)
@@ -82,7 +82,7 @@ def sql_connector() -> SqlAlchemyConnector:
 @pytest.fixture
 def sql_descriptor(sql_connector: SqlAlchemyConnector) -> SqlAlchemySourceDescriptor:
     """Creates a SqlAlchemySourceDescriptor instance using the test connector."""
-    return SqlAlchemySourceDescriptor(sql_connector=sql_connector)
+    return SqlAlchemySourceDescriptor(sql_connector=sql_connector, source_type="typeX")
 
 
 # Helper function to fetch data directly using SQLAlchemy for verification
