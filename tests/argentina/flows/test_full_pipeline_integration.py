@@ -31,6 +31,7 @@ from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.flows.aggregate_products_flow import aggregate_argentina_products_flow
 from tsn_adapters.tasks.argentina.flows.insert_products_flow import insert_argentina_products_flow
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
+from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import _generate_stream_id  # type: ignore
 from tsn_adapters.utils.logging import get_logger_safe
 
 # === Helper Functions for Verification ===
@@ -51,7 +52,7 @@ def _generate_expected_tn_records(
     for source_id, data_list in source_id_to_data.items():
         expected_records[source_id] = sorted(
             [(_dt_to_ts(date_str), str(price)) for date_str, price in data_list], key=lambda x: x[0]
-        )  # Sort by timestamp
+        )  # Sort by date
     return expected_records
 
 
@@ -109,7 +110,7 @@ def _verify_db_state(
             assert stream_id.startswith(
                 "st"
             ), f"[{phase_name}] stream_id should start with 'st' for {source_id}, got: {stream_id!r}"
-            # todo add inline verification with generate_stream_id sdk helper
+            assert _generate_stream_id(source_id) == stream_id, f"[{phase_name}] stream_id should match generated stream_id for {source_id}, got: {stream_id!r}"
 
         logger.info(f"Database state verification successful after {phase_name}.")
         return db_df  # Return for potential reuse
@@ -164,15 +165,18 @@ def _verify_tn_records(
             tn_records_df: DataFrame[TnRecordModel] = tn_block.read_records(stream_id=stream_id, is_unix=True)
 
             # Prepare expected DataFrame
-            expected_df = pd.DataFrame(expected_data, columns=["timestamp", "value"])
-            # Ensure correct types for comparison
-            expected_df["timestamp"] = pd.to_numeric(expected_df["timestamp"])
+            expected_df = pd.DataFrame(expected_data, columns=["date", "value"])
+            expected_df["date"] = pd.to_numeric(expected_df["date"]).astype(str)
             expected_df["value"] = expected_df["value"].astype(str)
             expected_df = DataFrame[TnRecordModel](expected_df)
 
-            # Sort DataFrames by timestamp
-            tn_records_sorted_df = tn_records_df.sort_values(by="timestamp").reset_index(drop=True)
-            expected_sorted_df = expected_df.sort_values(by="timestamp").reset_index(drop=True)
+            # Sort DataFrames by date
+            tn_records_sorted_df = tn_records_df.sort_values(by="date").reset_index(drop=True)
+            expected_sorted_df = expected_df.sort_values(by="date").reset_index(drop=True)
+
+            # make both value columns numeric, so leading zeros are not a problem
+            tn_records_sorted_df["value"] = pd.to_numeric(tn_records_sorted_df["value"])
+            expected_sorted_df["value"] = pd.to_numeric(expected_sorted_df["value"])
 
             # Compare using pandas testing function for better error messages
             try:
@@ -245,21 +249,21 @@ async def _run_flow_and_verify(
     logger.info(f"Executing flow: {flow_func.name}...")
     try:
         # Check if the flow function itself is async
-        if inspect.iscoroutinefunction(flow_func.fn): # Check the underlying function
+        if inspect.iscoroutinefunction(flow_func.fn):  # Check the underlying function
             await flow_func(**flow_args)
         else:
-            flow_func(**flow_args) # Run synchronous flows directly
-        
+            flow_func(**flow_args)  # Run synchronous flows directly
+
         # Optional: Add a small delay if needed for async operations within sync flows to potentially settle
-        # await asyncio.sleep(1) 
+        # await asyncio.sleep(1)
 
         logger.info(f"Flow {flow_func.name} executed successfully for {phase_name}.")
 
         # Debug: Print current variable state (Keep this for now)
-        if ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE in str(flow_func.name): # Check name
+        if ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE in str(flow_func.name):  # Check name
             agg_date = await variables.Variable.aget(
-                ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, 
-                default=ArgentinaFlowVariableNames.DEFAULT_DATE
+                ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE,
+                default=ArgentinaFlowVariableNames.DEFAULT_DATE,
             )
             logger.info(f"DEBUG - After flow execution, LAST_AGGREGATION_SUCCESS_DATE = {agg_date}")
     except Exception as e:
@@ -279,7 +283,7 @@ async def _run_flow_and_verify(
                 result = await verify_func(phase_name=phase_name, **verify_args)
             else:
                 result = verify_func(phase_name=phase_name, **verify_args)
-            
+
             verification_results[func_name] = result  # Store result if not None
         except Exception as e:
             pytest.fail(f"Verification function {func_name} failed during {phase_name}: {e}")
@@ -403,7 +407,9 @@ async def test_full_argentina_pipeline(
     _ = await _verify_variable_state("Initial Setup (Before Set)", "1970-01-01", "1970-01-01")  # Check defaults first
     logger.info("Initializing Prefect variables for first run...")
     await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, "2024-05-03", overwrite=True)
-    await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, "1970-01-01", overwrite=True)
+    await variables.Variable.aset(
+        ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, "1970-01-01", overwrite=True
+    )
     await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, "1970-01-01", overwrite=True)
     # Verify the state after setting
     _ = await _verify_variable_state(
@@ -440,7 +446,12 @@ async def test_full_argentina_pipeline(
     _ = await _run_flow_and_verify(
         phase_name="Phase 3 (Deployment)",
         flow_func=deploy_streams_flow,
-        flow_args={"psd_block": sql_descriptor_block, "tna_block": tn_block, "deployment_state": sql_deployment_state},
+        flow_args={
+            "psd_block": sql_descriptor_block,
+            "tna_block": tn_block,
+            "deployment_state": sql_deployment_state,
+            "is_unix": True,
+        },
         verifications=[
             (partial(_verify_variable_state, expected_agg_date="2024-05-03", expected_ins_date="1970-01-01"), {}),
             (
@@ -527,7 +538,7 @@ async def test_full_argentina_pipeline(
 
     # 2. Update Variables for Resumption Test
     logger.info("Updating variables for resumption test (PREPROCESS -> D5)...")
-    await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, "2024-05-05")
+    await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, "2024-05-05", overwrite=True)
     _ = await _verify_variable_state("Phase 5 (Skip Setup)", "2024-05-03", "2024-05-03")
     logger.info("Variables updated for resumption.")
 
@@ -592,7 +603,12 @@ async def test_full_argentina_pipeline(
     await _run_flow_and_verify(
         phase_name="Phase 7 (Resumption Deploy)",
         flow_func=deploy_streams_flow,
-        flow_args={"psd_block": sql_descriptor_block, "tna_block": tn_block, "deployment_state": sql_deployment_state},
+        flow_args={
+            "psd_block": sql_descriptor_block,
+            "tna_block": tn_block,
+            "deployment_state": sql_deployment_state,
+            "is_unix": True,
+        },
         verifications=[
             (
                 partial(_verify_variable_state, expected_agg_date="2024-05-05", expected_ins_date="2024-05-03"),
