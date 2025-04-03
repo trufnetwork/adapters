@@ -3,6 +3,7 @@ Utility function to handle coroutine conversion in S3 operations.
 """
 
 import asyncio
+import inspect
 from collections.abc import Coroutine
 from functools import partial
 from typing import Any, TypeVar, Callable, Union, ParamSpec
@@ -34,8 +35,11 @@ def force_sync(fn: Callable[P, Union[R, Coroutine[Any, Any, R]]]) -> Callable[P,
     
     it simply returns the same function with partial apply of _sync=True
     """
-    partial_fn = partial(fn, _sync=True)  # type: ignore
-    return partial_fn # type: ignore
+    if accepts_sync_param(fn):
+        partial_fn = partial(fn, _sync=True)  # type: ignore
+        return partial_fn # type: ignore
+    else:
+        return fn # type: ignore
     
 def is_in_async():
     try:
@@ -43,3 +47,17 @@ def is_in_async():
         return True
     except RuntimeError:
         return False
+
+def accepts_sync_param(fn: Callable[..., Any]) -> bool:
+    """
+    Check if a function accepts a _sync parameter, which indicates
+    it was likely decorated with @async_dispatch
+    
+    Args:
+        fn: The function to check
+        
+    Returns:
+        True if the function accepts a _sync parameter, False otherwise
+    """
+    sig = inspect.signature(fn)
+    return '_sync' in sig.parameters

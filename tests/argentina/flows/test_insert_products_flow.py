@@ -59,7 +59,7 @@ def mocked_flow_context() -> Generator[dict[str, MagicMock], None, None]:
     with ExitStack() as stack:
         mocks["provider_cls"] = stack.enter_context(patch(f"{flow_path}.ProductAveragesProvider"))
         mocks["var_get"] = stack.enter_context(patch("prefect.variables.Variable.get"))
-        mocks["var_aset"] = stack.enter_context(patch("prefect.variables.Variable.aset"))
+        mocks["var_aset"] = stack.enter_context(patch("prefect.variables.Variable.aset", new_callable=AsyncMock))
         mocks["load_daily"] = stack.enter_context(patch(f"{flow_path}.load_daily_averages", new_callable=AsyncMock))
         mocks["transform"] = stack.enter_context(patch(f"{flow_path}.transform_product_data", new_callable=AsyncMock))
         mocks["insert"] = stack.enter_context(patch(f"{flow_path}.task_split_and_insert_records"))
@@ -229,7 +229,7 @@ async def test_insert_flow_successful_run(
     mocks["insert"].assert_called_once_with(
         block=mock_tn_block, records=sample_transformed_df_date1, batch_size=batch_size
     )
-    mocks["var_set"].assert_called_once_with(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_to_process)
+    mocks["var_aset"].assert_called_once_with(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_to_process)
     mocks["create_artifact"].assert_called_once()
 
 
@@ -308,12 +308,12 @@ async def test_insert_flow_basic_scenarios(
     assert mock_deployment_state_block.check_multiple_streams.call_count == num_expected_calls
 
     if num_expected_calls > 0:
-        mocks["var_set"].assert_called_with(
+        mocks["var_aset"].assert_called_with(
             ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, expected_processed_dates[-1]
         )
-        assert mocks["var_set"].call_count == num_expected_calls
+        assert mocks["var_aset"].call_count == num_expected_calls
     else:
-        mocks["var_set"].assert_not_called()
+        mocks["var_aset"].assert_not_called()
 
     mocks["create_artifact"].assert_called_once()
     artifact_md = mocks["create_artifact"].call_args.kwargs.get("markdown", "")
@@ -516,7 +516,7 @@ async def test_insert_flow_fatal_error_save_state(
     mocks["load_daily"].return_value = sample_daily_avg_df_date1
     mocks["transform"].return_value = sample_transformed_df_date1
     mocks["insert"].return_value = None  # Insertion succeeds
-    mocks["var_set"].side_effect = test_exception
+    mocks["var_aset"].side_effect = test_exception
 
     with pytest.raises(OSError) as exc_info:
         await insert_argentina_products_flow(
@@ -530,7 +530,7 @@ async def test_insert_flow_fatal_error_save_state(
     mocks["load_daily"].assert_called_once()
     mocks["transform"].assert_called_once()
     mocks["insert"].assert_called_once()
-    mocks["var_set"].assert_called_once()  # Should be called once before failing
+    mocks["var_aset"].assert_called_once()  # Should be called once before failing
     mocks["create_artifact"].assert_called_once()
 
 
@@ -595,7 +595,7 @@ async def test_insert_flow_halts_on_undeployed_streams(
 
     mocks["transform"].assert_not_called()
     mocks["insert"].assert_not_called()
-    mocks["var_set"].assert_not_called()
+    mocks["var_aset"].assert_not_called()
     mocks["create_artifact"].assert_not_called()
 
 
