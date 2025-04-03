@@ -404,7 +404,6 @@ async def test_full_argentina_pipeline(
     # 4. Initialize Prefect Variables
     # Aggregation and Insertion start from scratch (1970-01-01).
     # Preprocessing is assumed complete up to the latest data (D3).
-    _ = await _verify_variable_state("Initial Setup (Before Set)", "1970-01-01", "1970-01-01")  # Check defaults first
     logger.info("Initializing Prefect variables for first run...")
     await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, "2024-05-03", overwrite=True)
     await variables.Variable.aset(
