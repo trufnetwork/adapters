@@ -14,7 +14,7 @@ for transaction confirmations.
 """
 
 from datetime import datetime, timezone
-from typing import Literal, Optional, cast
+from typing import Literal, Optional
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -193,8 +193,8 @@ def filter_deployed_streams_task(
         f"{len(filtered_df)} streams remain for processing."
     )
 
-    # Return filtered DataFrame with proper type
-    return cast(DataFrame[PrimitiveSourceDataModel], filtered_df)
+    # Return filtered DataFrame
+    return filtered_df
 
 
 @task(name="Mark Batch as Deployed", retries=DEFAULT_RETRY_ATTEMPTS, retry_delay_seconds=DEFAULT_RETRY_DELAY_SECONDS)
