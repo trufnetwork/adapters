@@ -85,8 +85,8 @@ async def insert_argentina_products_flow(
             logger.info("No new dates to process based on insertion/aggregation state variables. Flow finished.")
             # Create artifact even if no dates processed
             # Fetch current state variables for reporting
-            last_agg_date = variables.Variable.get(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, default="N/A")
-            last_ins_date = variables.Variable.get(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default="N/A")
+            last_agg_date = variables.Variable.get(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE)
+            last_ins_date = variables.Variable.get(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE)
             summary_md = f"""# Argentina Product Insertion Summary
 
 No new dates available to process.
@@ -115,7 +115,7 @@ State is managed by Prefect Variables.
     # --- Implement Steps 10-13 (Loop, Load/Transform, Insert, Save State, Report) ---
     processed_dates_count = 0
     total_records_transformed = 0
-    last_processed_date_str = "N/A"  # Variable to track the last successfully processed date
+    last_processed_date_str = ArgentinaFlowVariableNames.DEFAULT_DATE  # Variable to track the last successfully processed date
     first_processed_date_str = dates_to_process[0]
 
     for date_str in dates_to_process:
