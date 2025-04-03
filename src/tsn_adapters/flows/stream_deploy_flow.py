@@ -167,7 +167,9 @@ def filter_deployed_streams_task(
 
             # Update the set of verified streams
             streams_verified_on_network = set(verified_locators_df["stream_id"].tolist())
-            logger.debug(f"Batch verification complete: {len(streams_verified_on_network)} streams confirmed to exist on the network.")
+            logger.debug(
+                f"Batch verification complete: {len(streams_verified_on_network)} streams confirmed to exist on the network."
+            )
 
         except Exception as e:
             # If batch verification fails, log a warning and assume none of the streams_to_verify exist on the network
@@ -320,7 +322,10 @@ def deploy_streams_flow(
         Statistics on deployed and skipped streams
     """
     logger = get_run_logger()
-    logger.info(f"Starting stream deployment flow. Batch size: {batch_size}, Start batch: {start_from_batch}.")
+    stream_type = "Unix" if is_unix else "Date"
+    logger.info(
+        f"Starting stream deployment flow. Batch size: {batch_size}, Start batch: {start_from_batch},  Stream type: {stream_type}."
+    )
 
     # SECTION 1: Retrieve and validate descriptor DataFrame
     try:

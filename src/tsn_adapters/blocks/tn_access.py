@@ -12,6 +12,7 @@ from typing import (
     cast,
     overload,
 )
+from typing_extensions import ParamSpec
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -134,8 +135,10 @@ def handle_tn_errors(func: F) -> F:
 
     return cast(F, wrapper)
 
+P = ParamSpec("P")
+R = TypeVar("R")
 
-def tn_special_retry_condition(max_other_error_retries: int):
+def tn_special_retry_condition(max_other_error_retries: int) -> Any:
     """
     Custom retry condition for Prefect tasks.
 
@@ -149,7 +152,7 @@ def tn_special_retry_condition(max_other_error_retries: int):
         A callable that can be used as retry_condition_fn in Prefect tasks.
     """
 
-    def _retry_condition(task: Task[Any, Any], task_run: TaskRun, state: State[Any]) -> bool:
+    def _retry_condition(task: Task[P, R], task_run: TaskRun, state: State[R]) -> bool:
         try:
             # This will re-raise the exception if the task failed.
             state.result()

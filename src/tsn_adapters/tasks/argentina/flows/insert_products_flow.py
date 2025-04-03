@@ -198,14 +198,16 @@ State is managed by Prefect Variables.
                     max_batch_size=batch_size,
                     is_unix=True,
                     wait=True,
+                    return_state=False,
                 )
-                if results is None:
-                    logger.error(f"Failed to submit records for date {date_str} to TN insertion task.")
-                    raise Exception(f"Failed to submit records for date {date_str} to TN insertion task.")
-                if results.failed_records.empty:
+                if results["failed_records"].empty:
                     logger.info(f"Successfully submitted records for date {date_str} to TN insertion task.")
                 else:
                     logger.error(f"Failed to submit records for date {date_str} to TN insertion task.")
+                    failed_count = len(results["failed_records"])
+                    logger.error(f"Failed count: {failed_count}")
+                    reasons_sample = results["failed_reasons"][:10]
+                    logger.error(f"Failed reasons sample: {reasons_sample}")
                     raise Exception(f"Failed to submit records for date {date_str} to TN insertion task.")
             else:
                 logger.info(f"No records to insert for date {date_str} after transformation, skipping TN insertion.")

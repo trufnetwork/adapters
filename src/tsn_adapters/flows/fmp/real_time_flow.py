@@ -27,6 +27,8 @@ from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_r
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.utils.logging import get_logger_safe
 
+from ...utils.deroutine import force_sync
+
 
 class QuoteData(TypedDict):
     """
@@ -583,7 +585,10 @@ def real_time_flow(
         try:
             processed_data = process_data(quotes_df=combined_data, descriptor_df=descriptor_df, return_state=True)
             # Get the actual processed data and ensure it's the right type
-            processed_df = processed_data.result()
+            processed_df = force_sync(processed_data.result)()
+
+            if isinstance(processed_df, Exception):
+                raise processed_df
 
         except Exception as e:
             error_msg = f"Failed to process combined data: {e!s}"
