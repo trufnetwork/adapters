@@ -11,14 +11,15 @@ from typing import Any, Optional
 from unittest.mock import Mock
 
 from prefect import Task
-from prefect.logging.loggers import disable_run_logger
-from prefect.testing.utilities import prefect_test_harness
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import GlobalConcurrencyLimitCreate
 from prefect.exceptions import ObjectNotFound
+from prefect.logging.loggers import disable_run_logger
+from prefect.testing.utilities import prefect_test_harness
 from pydantic import SecretStr
 import pytest
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
+
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 
 # Configure logging
@@ -178,7 +179,7 @@ def start_container(spec: ContainerSpec, network: str) -> bool:
     # First ensure container doesn't exist
     run_docker_command(["rm", "-f", spec.name])
 
-    args = ["run", "--name", spec.name, "--network", network, "-d"]
+    args = ["run", "--rm", "--name", spec.name, "--network", network, "-d"]
 
     if spec.tmpfs_path:
         args.extend(["--tmpfs", spec.tmpfs_path])
@@ -535,8 +536,10 @@ async def prefect_test_fixture(disable_prefect_retries: Any):
                     logger.error(f"Failed to create global concurrency limit '{limit_name}': {e!s}")
                     raise  # Re-raise the original error if it wasn't an 'already exists' situation
                 except Exception as read_e:
-                    logger.error(f"Failed to create or check global concurrency limit '{limit_name}': {e!s} / Check failed: {read_e!s}")
-                    raise read_e # Raise the checking error if reading failed
+                    logger.error(
+                        f"Failed to create or check global concurrency limit '{limit_name}': {e!s} / Check failed: {read_e!s}"
+                    )
+                    raise read_e  # Raise the checking error if reading failed
 
         try:
             yield
@@ -548,7 +551,9 @@ async def prefect_test_fixture(disable_prefect_retries: Any):
                     await client.delete_global_concurrency_limit_by_name(name=limit_name)
                     logger.info(f"'{limit_name}' global concurrency limit deleted.")
                 except ObjectNotFound:
-                    logger.warning(f"Global concurrency limit '{limit_name}' not found during cleanup. Skipping deletion.")
+                    logger.warning(
+                        f"Global concurrency limit '{limit_name}' not found during cleanup. Skipping deletion."
+                    )
                 except Exception as e:
                     # Log error but don't raise to avoid masking test failures
                     logger.error(f"Failed to delete global concurrency limit '{limit_name}': {e!s}")
@@ -575,6 +580,7 @@ def tn_block(
     deploy_helper_contract(tn_block, helper_contract_id)
     return tn_block
 
+
 def deploy_helper_contract(tn_block: TNAccessBlock, helper_stream_id: str):
     """Deploy the helper contract."""
     client = tn_block.get_client()
@@ -585,6 +591,7 @@ def deploy_helper_contract(tn_block: TNAccessBlock, helper_stream_id: str):
     except Exception as e:
         if "dataset exists" not in str(e) and "already exists" not in str(e):
             raise e
+
 
 @pytest.fixture(scope="session")
 def helper_contract_id() -> Generator[str, None, None]:
