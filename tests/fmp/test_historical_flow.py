@@ -8,13 +8,12 @@ actual network calls.
 
 import datetime
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import SecretStr
 import pytest
-from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 from trufnetwork_sdk_py.client import TNClient
 
@@ -24,15 +23,13 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourcesDescriptorBlock,
 )
 from tsn_adapters.blocks.tn_access import TNAccessBlock
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel
 from tsn_adapters.flows.fmp.historical_flow import (
     convert_eod_to_tn_df,
     fetch_historical_data,
     get_earliest_data_date,
     historical_flow,
-    run_ticker_pipeline,
 )
-from tsn_adapters.utils.logging import get_logger_safe
 
 # Configure pytest-asyncio
 pytestmark = pytest.mark.asyncio
@@ -182,7 +179,9 @@ class FakeTNAccessBlock(TNAccessBlock):
         """Mock waiting."""
         pass
 
-    def get_earliest_date(self, stream_id: str, data_provider: str | None = None, is_unix: bool = False) -> datetime.datetime | None:
+    def get_earliest_date(
+        self, stream_id: str, data_provider: str | None = None, is_unix: bool = False
+    ) -> datetime.datetime | None:
         """Mock getting earliest date, raising StreamNotFoundError for unknown streams."""
         if stream_id == "unknown":
             raise TNAccessBlock.StreamNotFoundError(f"Stream {stream_id} not found")
@@ -190,9 +189,18 @@ class FakeTNAccessBlock(TNAccessBlock):
             return datetime.datetime(2024, 1, 1)
         return None
 
+    def filter_initialized_streams(
+        self, stream_ids: list[str], data_providers: list[str]
+    ) -> DataFrame[StreamLocatorModel]:
+        """Mock filtering batch initialized streams."""
+        return DataFrame[StreamLocatorModel](
+            pd.DataFrame(stream_ids, data_providers, columns=["stream_id", "data_provider"])
+        )
+
     def get_client(self) -> TNClient:
-        """Mock to prevent real client creation."""
-        return None  # type: ignore
+        """Mock to prevent real client creation. Raises an exception if accessed."""
+        raise RuntimeError("Access to real TNClient is not allowed in tests.")
+
 
 class ErrorFMPBlock(FMPBlock):
     def get_historical_eod_data(
@@ -233,9 +241,8 @@ def fake_tn_block() -> FakeTNAccessBlock:
 def error_fmp_block():
     """Fixture for error-raising FMP block."""
 
-
-
     return ErrorFMPBlock(api_key=SecretStr("fake"))
+
 
 @pytest.fixture
 def sample_eod_data() -> DataFrame[EODData]:

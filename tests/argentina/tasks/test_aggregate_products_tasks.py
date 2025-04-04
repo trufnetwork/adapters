@@ -7,6 +7,7 @@ import io
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+import zipfile
 import zlib
 
 from _pytest.logging import LogCaptureFixture
@@ -576,7 +577,9 @@ async def test_process_single_date_daily_file_parse_error(
     date_str = "2024-03-16"
     caplog.set_level(logging.ERROR)
     # Simulate parse error by setting up corrupted data
-    mock_provider.s3_block.aread_path = AsyncMock(return_value=zlib.compress(b"col1|col2\ninvalid,data"))
+    file_content = b"col1|col2\ninvalid,data"
+    io_buffer = io.BytesIO(file_content)
+    mock_provider.s3_block.aread_path = AsyncMock(return_value=zipfile.ZipFile(io_buffer))
     
     # Act
     # Mock pd.read_csv within the task's context to raise ParserError
