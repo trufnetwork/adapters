@@ -165,20 +165,6 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
         try:
             # Use engine.begin() which yields a Connection within a Transaction context
             with engine.begin() as connection:
-                # Pre-Delete Check: Ensure no conflicting source_types exist in the table
-                check_stmt = select(func.count(self._table.c.stream_id)).where(
-                    self._table.c.source_type != self.source_type
-                )
-                conflicting_count_result = connection.execute(check_stmt).scalar()
-                conflicting_count = conflicting_count_result if conflicting_count_result is not None else 0
-
-                if conflicting_count > 0:
-                    error_msg = f"Cannot overwrite table '{self.table_name}' because it contains {conflicting_count} rows with source_type other than '{self.source_type}'."
-                    self.logger.error(error_msg)
-                    raise ValueError(error_msg)
-                else:
-                    self.logger.debug(f"Pre-delete check passed: No conflicting source_types found in '{self.table_name}'.")
-
                 # Delete only rows matching the configured source_type
                 self.logger.info(f"Deleting existing rows with source_type '{self.source_type}' from table '{self.table_name}'.")
                 delete_stmt = delete(self._table).where(self._table.c.source_type == self.source_type)
