@@ -524,7 +524,7 @@ async def test_insert_flow_fatal_error_save_state(
     mocks["var_aset"].side_effect = test_exception
 
     with pytest.raises(OSError) as exc_info:
-        await insert_argentina_products_flow(
+        _ = await insert_argentina_products_flow(
             s3_block=mock_s3_block,
             tn_block=mock_tn_block,
             descriptor_block=mock_descriptor_block,
@@ -536,7 +536,7 @@ async def test_insert_flow_fatal_error_save_state(
     mocks["transform"].assert_called_once()
     mocks["insert"].assert_called_once()
     mocks["var_aset"].assert_called_once()  # Should be called once before failing
-    mocks["create_artifact"].assert_called_once()
+    mocks["create_artifact"].assert_not_called() # errors before this is called
 
 
 # --- Test for Deployment Check Failure ---

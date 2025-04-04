@@ -71,7 +71,7 @@ def empty_aggregated_df() -> pd.DataFrame:
 
 # --- Fixtures for Moto-based End-to-End Tests ---
 
-# Fixtures aws_credentials and real_s3_bucket_block moved to tests/argentina/conftest.py
+# Fixtures aws_credentials and s3_bucket_block moved to tests/argentina/conftest.py
 
 # Sample Daily Data Fixtures
 @pytest.fixture
@@ -322,7 +322,7 @@ async def test_aggregate_flow_no_dates_to_process_with_artifact(
 )  # Ensure Prefect context and AWS creds
 @pytest.mark.asyncio
 async def test_aggregate_flow_end_to_end_cold_start(
-    real_s3_bucket_block: S3Bucket,
+    s3_bucket_block: S3Bucket,
     mock_descriptor_block: MagicMock,
     empty_aggregated_df: pd.DataFrame,
     daily_data_2024_03_10: pd.DataFrame,
@@ -333,9 +333,9 @@ async def test_aggregate_flow_end_to_end_cold_start(
     Tests the flow end-to-end with moto, starting with no pre-existing state.
     """
     # Arrange: Upload sample daily data
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-10"), daily_data_2024_03_10)
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
+    upload_sample_data(s3_bucket_block, DateStr("2024-03-10"), daily_data_2024_03_10)
+    upload_sample_data(s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
+    upload_sample_data(s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
 
     # Mock descriptor interactions for the E2E test
     mock_descriptor_block.get_descriptor.return_value = empty_aggregated_df
@@ -356,7 +356,7 @@ async def test_aggregate_flow_end_to_end_cold_start(
 
         # Act: Run the flow (first time)
         await aggregate_argentina_products_flow(
-            s3_block=real_s3_bucket_block,
+            s3_block=s3_bucket_block,
             descriptor_block=mock_descriptor_block,
             force_reprocess=False,
         )
@@ -390,7 +390,7 @@ async def test_aggregate_flow_end_to_end_cold_start(
 @pytest.mark.usefixtures("prefect_test_fixture", "aws_credentials")
 @pytest.mark.asyncio
 async def test_aggregate_flow_end_to_end_resume(
-    real_s3_bucket_block: S3Bucket,
+    s3_bucket_block: S3Bucket,
     mock_descriptor_block: MagicMock,
     daily_data_2024_03_10: pd.DataFrame,
     daily_data_2024_03_11: pd.DataFrame,
@@ -420,8 +420,8 @@ async def test_aggregate_flow_end_to_end_resume(
     mock_descriptor_block.get_descriptor.return_value = initial_data_df
 
     # Upload only the data for dates *after* the initial state date used in gating (e.g., 2024-03-10)
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
+    upload_sample_data(s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
+    upload_sample_data(s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
 
     # Mock Prefect Variables for gating (assuming resume after 2024-03-10)
     with patch("prefect.variables.Variable.get") as mock_variable_get:
@@ -437,7 +437,7 @@ async def test_aggregate_flow_end_to_end_resume(
 
         # Act: Run the flow (should resume from 2024-03-11)
         await aggregate_argentina_products_flow(
-            s3_block=real_s3_bucket_block,
+            s3_block=s3_bucket_block,
             descriptor_block=mock_descriptor_block,
             force_reprocess=False,
         )
@@ -466,7 +466,7 @@ async def test_aggregate_flow_end_to_end_resume(
 @pytest.mark.usefixtures("prefect_test_fixture", "aws_credentials")
 @pytest.mark.asyncio
 async def test_aggregate_flow_end_to_end_force_reprocess(
-    real_s3_bucket_block: S3Bucket,
+    s3_bucket_block: S3Bucket,
     mock_descriptor_block: MagicMock,
     daily_data_2024_03_10: pd.DataFrame,
     daily_data_2024_03_11: pd.DataFrame,
@@ -492,9 +492,9 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
     mock_descriptor_block.get_descriptor.return_value = initial_data_df
 
     # Upload all daily data, including the date covered by "initial state" date (10th)
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-10"), daily_data_2024_03_10)
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
-    upload_sample_data(real_s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
+    upload_sample_data(s3_bucket_block, DateStr("2024-03-10"), daily_data_2024_03_10)
+    upload_sample_data(s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
+    upload_sample_data(s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
 
     # Mock Prefect Variables for gating (force_reprocess=True means LAST_AGGREGATION not fetched)
     with patch("prefect.variables.Variable.get") as mock_variable_get:
@@ -508,7 +508,7 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
 
         # Act: Run the flow with force_reprocess=True
         await aggregate_argentina_products_flow(
-            s3_block=real_s3_bucket_block,
+            s3_block=s3_bucket_block,
             descriptor_block=mock_descriptor_block,
             force_reprocess=True,
         )

@@ -4,7 +4,7 @@ from typing import cast
 import pandas as pd
 from pandera.typing import DataFrame
 from prefect_sqlalchemy import SqlAlchemyConnector  # type: ignore
-from sqlalchemy import Table, select, update
+from sqlalchemy import Table, select, update, and_
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -172,12 +172,17 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
 
         stmt = (
             update(self._table)
-            .where(self._table.c.stream_id == stream_id)
+            .where(
+                and_(
+                    self._table.c.stream_id == stream_id,
+                    self._table.c.source_type == self.source_type,
+                )
+            )
             .values(is_deployed=True, deployed_at=valid_timestamp)
         )
 
         try:
-            with engine.begin() as connection:  # type: Connection
+            with engine.begin() as connection:
                 result = connection.execute(stmt)
                 if result.rowcount == 0:
                     self.logger.warning(
@@ -217,7 +222,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         )
 
         try:
-            with engine.begin() as connection:  # type: Connection
+            with engine.begin() as connection:
                 result = connection.execute(stmt)
                 self.logger.info(
                     f"Attempted to mark {len(unique_stream_ids)} stream IDs as deployed. "
@@ -269,7 +274,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
                 raise ValueError("Could not convert deployment_timestamp to UTC-aware datetime") from e
 
         # Start transaction
-        with engine.begin() as connection:  # type: Connection
+        with engine.begin() as connection:
             for index, row in validated_states.iterrows():
                 stream_id = row["stream_id"]
                 timestamp = row["deployment_timestamp"]

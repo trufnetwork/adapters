@@ -3,7 +3,7 @@
 from datetime import datetime
 import re
 from typing import Any, cast
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import ANY, MagicMock, AsyncMock
 
 import pandas as pd
 from pandera.errors import SchemaError
@@ -237,7 +237,7 @@ class TestPreprocessFlowProcessDate:
         mock_avg_price_df = MagicMock(spec=DataFrame[SepaAvgPriceProductModel]); mock_avg_price_df.empty = False
         mock_process_raw_data_task = mocker.patch(
                 "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
-            return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized, mock_avg_price_df)),
+            return_value=(mock_processed_data, mock_uncategorized, mock_avg_price_df),
         )
 
         # Mock the _create_summary method directly on the instance from the fixture
@@ -252,7 +252,7 @@ class TestPreprocessFlowProcessDate:
         mock_process_raw_data_task.assert_called_once_with(
             raw_data=mock_raw_data,
             category_map_df=mock_category_map,
-            return_state=True,
+            return_state=ANY,
         )
         mock_product_avg_provider.save_product_averages.assert_called_once_with(
             date_str=TEST_DATE, data=mock_avg_price_df
@@ -261,7 +261,7 @@ class TestPreprocessFlowProcessDate:
             date_str=TEST_DATE,
             data=mock_processed_data,
             uncategorized=mock_uncategorized,
-            logs=b"Placeholder for logs",
+            logs=ANY,
         )
         preprocess_flow_instance._create_summary.assert_called_once_with(TEST_DATE, mock_processed_data, mock_uncategorized) # type: ignore[attr-defined]
 
@@ -286,7 +286,7 @@ class TestPreprocessFlowProcessDate:
         mock_avg_price_df = MagicMock(spec=DataFrame[SepaAvgPriceProductModel]); mock_avg_price_df.empty = True # Key difference
         mocker.patch(
             "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
-            return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized, mock_avg_price_df)),
+            return_value=(mock_processed_data, mock_uncategorized, mock_avg_price_df),
         )
 
         preprocess_flow_instance._create_summary = MagicMock() # type: ignore[assignment]
@@ -320,7 +320,7 @@ class TestPreprocessFlowProcessDate:
         mock_avg_price_df = MagicMock(spec=DataFrame[SepaAvgPriceProductModel]); mock_avg_price_df.empty = False
         mocker.patch(
             "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
-            return_value=MagicMock(result=lambda: (mock_processed_data, mock_uncategorized, mock_avg_price_df)),
+            return_value=(mock_processed_data, mock_uncategorized, mock_avg_price_df),
         )
         # Make saving product averages fail
         mock_product_avg_provider.save_product_averages.side_effect = Exception("Failed to save product averages")

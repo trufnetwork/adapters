@@ -27,8 +27,7 @@ from tsn_adapters.tasks.argentina.provider.product_averages import ProductAverag
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
 from tsn_adapters.tasks.argentina.task_wrappers import task_load_category_map
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, CategoryMapDF, DateStr, SepaDF, UncategorizedDF
-
-from ....utils.deroutine import force_sync
+from tsn_adapters.utils.deroutine import force_sync
 
 
 @task(name="Process Raw Data")
