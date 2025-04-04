@@ -33,7 +33,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
 
     sql_connector: SqlAlchemyConnector
     table_name: str = "primitive_sources"  # Default table name matches descriptor
-    source_type: str # Add mandatory source_type parameter
+    source_type: str  # Add mandatory source_type parameter
 
     @property
     def logger(self):
@@ -66,7 +66,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         engine = self._get_engine()
         stmt = select(self._table.c.is_deployed).where(
             self._table.c.stream_id == stream_id,
-            self._table.c.source_type == self.source_type # Filter by source_type
+            self._table.c.source_type == self.source_type,  # Filter by source_type
         )
         try:
             with engine.connect() as connection:
@@ -90,7 +90,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
 
         stmt = select(self._table.c.stream_id, self._table.c.is_deployed).where(
             self._table.c.stream_id.in_(unique_ids),
-            self._table.c.source_type == self.source_type # Filter by source_type
+            self._table.c.source_type == self.source_type,  # Filter by source_type
         )
         results = {stream_id: False for stream_id in unique_ids}  # Initialize all as False
         try:
@@ -113,8 +113,9 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         engine = self._get_engine()
         # Select stream_id and deployed_at for all streams of the specified type
         stmt = (
-            select(self._table.c.stream_id, self._table.c.deployed_at.label("deployment_timestamp"))
-            .where(self._table.c.source_type == self.source_type) # Filter by source_type
+            select(self._table.c.stream_id, self._table.c.deployed_at.label("deployment_timestamp")).where(
+                self._table.c.source_type == self.source_type
+            )  # Filter by source_type
         )
         try:
             with engine.connect() as connection:
@@ -129,12 +130,14 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
                     else:
                         # Handle cases where it might not be a datetime object initially
                         # Ensure NaT is preserved if converting from other types
-                        df["deployment_timestamp"] = pd.to_datetime(df["deployment_timestamp"], utc=True, errors='coerce')
+                        df["deployment_timestamp"] = pd.to_datetime(
+                            df["deployment_timestamp"], utc=True, errors="coerce"
+                        )
                 # Ensure column exists with correct dtype even if empty or all null
                 elif "deployment_timestamp" not in df.columns:
                     df["deployment_timestamp"] = pd.Series(dtype="datetime64[ns, UTC]")
-                else: # Column exists but might be wrong type
-                     df["deployment_timestamp"] = pd.to_datetime(df["deployment_timestamp"], utc=True, errors='coerce')
+                else:  # Column exists but might be wrong type
+                    df["deployment_timestamp"] = pd.to_datetime(df["deployment_timestamp"], utc=True, errors="coerce")
 
                 # Validate final structure
                 return DataFrame[DeploymentStateModel](df)
@@ -217,7 +220,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
 
         stmt = (
             update(self._table)
-            .where(self._table.c.stream_id.in_(unique_stream_ids))
+            .where(and_(self._table.c.stream_id.in_(unique_stream_ids), self._table.c.source_type == self.source_type))
             .values(is_deployed=True, deployed_at=valid_timestamp)
         )
 

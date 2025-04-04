@@ -4,7 +4,7 @@ Tests for the SqlAlchemySourceDescriptor block.
 
 import pandas as pd
 from pandera.typing import DataFrame
-from prefect_sqlalchemy import SqlAlchemyConnector, ConnectionComponents  # type: ignore
+from prefect_sqlalchemy import ConnectionComponents, SqlAlchemyConnector  # type: ignore
 import pytest
 from sqlalchemy import Table, select  # Add select
 from sqlalchemy.orm import Session
