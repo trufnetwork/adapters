@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-import gzip
 from io import BytesIO
 from typing import cast
 
@@ -9,12 +8,12 @@ from pandera import DataFrameModel
 from pandera.typing import DataFrame, Series
 from prefect import Task, task
 from prefect.blocks.core import Block
-from prefect.logging import get_run_logger
 from prefect_aws import S3Bucket
 from pydantic import ConfigDict
 
 from tsn_adapters.blocks.github_access import GithubAccess
-from tsn_adapters.utils.deroutine import deroutine
+from tsn_adapters.utils.deroutine import force_sync
+from tsn_adapters.utils.logging import get_logger_safe
 
 
 class PrimitiveSourceDataModel(DataFrameModel):
@@ -76,6 +75,22 @@ class WritableSourceDescriptorBlock(PrimitiveSourcesDescriptorBlock):
     @abstractmethod
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
         pass
+        
+    @abstractmethod
+    def upsert_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]) -> None:
+        """
+        Inserts new sources or updates existing ones based on stream_id.
+        Updates only occur if source_id or source_type differ.
+        Sources in storage but not in the input descriptor are untouched.
+        
+        Args:
+            descriptor: DataFrame containing source descriptor data to insert or update.
+                        Must conform to PrimitiveSourceDataModel schema.
+        
+        Raises:
+            NotImplementedError: If the implementation does not support atomic upserts.
+        """
+        raise NotImplementedError
 
 
 class S3SourceDescriptor(WritableSourceDescriptorBlock):
@@ -87,22 +102,21 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
     @property
     def logger(self):
         if not hasattr(self, "_logger"):
-            self._logger = get_run_logger()
+            self._logger = get_logger_safe(__name__)
         return self._logger
 
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
         try:
-            file_content = deroutine(self.s3_bucket.read_path(self.file_path))
+            file_content = force_sync(self.s3_bucket.read_path)(self.file_path)
             buffer = BytesIO(file_content)
             df = pd.read_csv(
                 buffer,
-                compression="gzip",
+                compression="zip",
                 encoding="utf-8",
                 dtype={"stream_id": str, "source_id": str, "source_type": str},
                 keep_default_na=False,
                 na_values=[],
             )
-            df.iloc[27840:27850]
             return DataFrame[PrimitiveSourceDataModel](df)
         except Exception as e:
             self.logger.error(f"Error reading file {self.file_path}: {e}")
@@ -110,12 +124,28 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
             return cast(DataFrame[PrimitiveSourceDataModel], empty_df)
 
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
-        csv_bytes = descriptor.to_csv(index=False, encoding="utf-8").encode("utf-8")
-        compressed_bytes = gzip.compress(csv_bytes)
-        self.s3_bucket.write_path(
-            path=self.file_path,
-            content=compressed_bytes,
-        )
+        with BytesIO() as buffer:
+            descriptor.to_csv(buffer, index=False, encoding="utf-8", compression="zip")
+            buffer.seek(0)
+            self.s3_bucket.write_path(
+                path=self.file_path,
+                content=buffer.getvalue(),
+            )
+        
+    def upsert_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]) -> None:
+        """
+        Not implemented for S3SourceDescriptor as it does not support atomic upserts.
+        
+        S3 operations are inherently replace-only and cannot perform partial updates
+        to a file atomically. Use set_sources for full overwrite operations instead.
+        
+        Args:
+            descriptor: DataFrame containing source descriptor data.
+        
+        Raises:
+            NotImplementedError: Always raised as S3 doesn't support atomic upserts.
+        """
+        raise NotImplementedError("S3SourceDescriptor does not support atomic upserts. Use set_sources for full overwrite.")
 
 
 # --- Top Level Task Functions ---

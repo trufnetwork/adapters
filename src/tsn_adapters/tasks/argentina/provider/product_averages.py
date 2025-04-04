@@ -15,8 +15,6 @@ class ProductAveragesProvider(SepaS3BaseProvider[DataFrame[SepaAvgPriceProductMo
     """
     Handles reading and writing of processed product average data
     in the 'processed/' prefix of the S3 bucket.
-
-    Note: This provider does not support listing available keys based on date patterns.
     """
 
     # Define the regex pattern to extract YYYY-MM-DD from the path

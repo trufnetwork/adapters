@@ -13,7 +13,7 @@ from pandas import DataFrame as PandasDataFrame
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.base_types import DateStr
-from tsn_adapters.utils import deroutine
+from tsn_adapters.utils import force_sync
 
 T = TypeVar("T")  # For return type of get_data_for
 
@@ -82,7 +82,7 @@ class SepaS3BaseProvider(ABC, Generic[T]):
 
     def read_csv(self, file_key: str) -> PandasDataFrame:
         """Read a CSV file from S3."""
-        content_in_bytes = deroutine(self.s3_block.read_path(self.get_full_path(file_key)))
+        content_in_bytes = force_sync(self.s3_block.read_path)(self.get_full_path(file_key))
         buffer = io.BytesIO(content_in_bytes)
         return pd.read_csv(buffer, compression="zip")
 
@@ -91,11 +91,11 @@ class SepaS3BaseProvider(ABC, Generic[T]):
         buffer = io.BytesIO()
         data.to_csv(buffer, index=False, compression="zip")
         buffer.seek(0)
-        deroutine(self.s3_block.write_path(self.get_full_path(file_key), buffer.getvalue()))
+        force_sync(self.s3_block.write_path)(self.get_full_path(file_key), buffer.getvalue())
 
     def path_exists(self, file_key: str) -> bool:
         """Check if a file exists in S3."""
-        dir_objects = deroutine(self.s3_block.list_objects(folder=self.prefix))
+        dir_objects = force_sync(self.s3_block.list_objects)(folder=self.prefix)
         full_path = self.get_full_path(file_key)
         return any(full_path in obj["Key"] for obj in dir_objects)
 
@@ -111,12 +111,12 @@ class SepaS3BaseProvider(ABC, Generic[T]):
         Returns:
             A buffered reader object that can be used to read the file contents
         """
-        content = deroutine(self.s3_block.read_path(self.get_full_path(file_key)))
+        content = force_sync(self.s3_block.read_path)(self.get_full_path(file_key))
         yield content
 
     def write_bytes(self, file_key: str, data: bytes) -> None:
         """Write bytes to S3."""
-        deroutine(self.s3_block.write_path(self.get_full_path(file_key), data))
+        force_sync(self.s3_block.write_path)(self.get_full_path(file_key), data)
 
     def list_available_keys(self) -> list[DateStr]:
         """List available keys in the S3 prefix.
@@ -124,7 +124,7 @@ class SepaS3BaseProvider(ABC, Generic[T]):
         Returns:
             List of available keys
         """
-        items = deroutine(self.s3_block.list_objects(folder=self.prefix))
+        items = force_sync(self.s3_block.list_objects)(folder=self.prefix)
         dates = []
 
         for item in items:

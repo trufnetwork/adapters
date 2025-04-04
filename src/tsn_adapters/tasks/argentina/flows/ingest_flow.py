@@ -7,16 +7,18 @@ This flow handles:
 3. Batch insertions to Truf.network
 """
 
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import pandas as pd
 from pandera.typing import DataFrame as PanderaDataFrame
 from prefect import flow, transactions
 from prefect.artifacts import create_markdown_artifact
+from prefect.futures import PrefectFuture
 from prefect_aws import S3Bucket
 
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
+from tsn_adapters.tasks.argentina.stream_details import is_valid_source_type
 from tsn_adapters.tasks.argentina.target import create_trufnetwork_components
 from tsn_adapters.tasks.argentina.task_wrappers import (
     task_create_reconciliation_strategy,
@@ -61,6 +63,9 @@ class IngestFlow(ArgentinaFlowController):
         """Run the ingestion flow."""
         self.logger.info("Creating components...")
 
+        if not is_valid_source_type(self.source_descriptor_type):
+            raise ValueError(f"Invalid source type: {self.source_descriptor_type}")
+
         # Create stream details fetcher and get streams
         fetcher = task_create_stream_fetcher(
             source_type=self.source_descriptor_type,
@@ -91,19 +96,21 @@ class IngestFlow(ArgentinaFlowController):
             provider_getter=self.processed_provider,
             target_client=target_client,
             data_provider=self.data_provider,
-            return_state=True,
-        ).result()
+            return_state=False,
+        )
 
         # Step 3: Process each date
         dates_processed: list[DateStr] = []
 
         # Merge all needed dates across streams
-        all_needed_dates = set()
+        all_needed_dates: set[DateStr] = set()
         for dates in needed_keys.values():
             all_needed_dates.update(dates)
         sorted_needed_dates = sorted(all_needed_dates)
 
         self.logger.info(f"Processing {len(all_needed_dates)} unique dates...")
+
+        insert_tasks: list[PrefectFuture[Any]] = []
 
         # Optimization to avoid processing if no new dates
         with transactions.transaction():
@@ -124,10 +131,15 @@ class IngestFlow(ArgentinaFlowController):
             typed_all_data = PanderaDataFrame[TnDataRowModel](all_data)
 
             # Process each stream in parallel
-            task_insert_data.submit(
-                client=target_client,
-                data=typed_all_data,
+            insert_tasks.append(
+                task_insert_data.submit(
+                    client=target_client,
+                    data=typed_all_data,
+                )
             )
+        
+        for task in insert_tasks:
+            task.wait()
 
         # Step 4: Create summary
         self.logger.info("Creating processing summary...")

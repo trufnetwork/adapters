@@ -6,7 +6,7 @@ from prefect_aws import S3Bucket
 from pydantic import BaseModel
 
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaDataItem
-from tsn_adapters.utils import deroutine
+from tsn_adapters.utils import force_sync
 
 
 class SepaS3RawDataItem(SepaDataItem, BaseModel):
@@ -33,4 +33,4 @@ class SepaS3RawDataItem(SepaDataItem, BaseModel):
         Returns:
             bytes: The file contents
         """
-        return deroutine(self.block.read_path(self.key))
+        return force_sync(self.block.read_path)(self.key)

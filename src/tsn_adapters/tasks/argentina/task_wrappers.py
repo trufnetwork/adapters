@@ -10,7 +10,7 @@ from prefect import get_run_logger, task
 import prefect.cache_policies as policies
 from prefect.concurrency.sync import concurrency
 
-from tsn_adapters.common.interfaces.provider import IProviderGetter
+from tsn_adapters.common.interfaces.provider import IProviderGetter, IStreamSourceMapFetcher
 from tsn_adapters.common.interfaces.reconciliation import IReconciliationStrategy
 from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.interfaces.transformer import IDataTransformer
@@ -18,7 +18,7 @@ from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
 from tsn_adapters.tasks.argentina.provider.factory import create_sepa_processed_provider
 from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
-from tsn_adapters.tasks.argentina.stream_details import create_stream_details_fetcher
+from tsn_adapters.tasks.argentina.stream_details import PrimitiveSourcesTypeStr, create_stream_details_fetcher
 from tsn_adapters.tasks.argentina.transformers.sepa import create_sepa_transformer
 from tsn_adapters.tasks.argentina.types import (
     AggregatedPricesDF,
@@ -29,10 +29,12 @@ from tsn_adapters.tasks.argentina.types import (
     StreamSourceMapDF,
 )
 
+from .models.stream_source import StreamSourceMetadataModel
+
 
 # Stream Details Tasks
 @task(retries=3)
-def task_create_stream_fetcher(source_type: str, block_name: str):
+def task_create_stream_fetcher(source_type: PrimitiveSourcesTypeStr, block_name: str) -> IStreamSourceMapFetcher:
     """Create and return a stream details fetcher."""
     logger = get_run_logger()
     logger.info(f"Creating stream fetcher for source type: {source_type}")
@@ -45,14 +47,14 @@ def task_create_stream_fetcher(source_type: str, block_name: str):
 
 
 @task(retries=2)
-def task_get_streams(fetcher) -> StreamSourceMapDF:
+def task_get_streams(fetcher: IStreamSourceMapFetcher) -> StreamSourceMapDF:
     """Get stream metadata using the fetcher."""
     logger = get_run_logger()
     logger.info("Fetching stream metadata")
     try:
         streams_df = fetcher.get_streams()
         logger.info(f"Found {len(streams_df)} streams")
-        return streams_df
+        return StreamSourceMetadataModel.validate(streams_df)
     except Exception as e:
         logger.error(f"Failed to fetch streams: {e}")
         raise
@@ -84,7 +86,7 @@ def task_create_sepa_provider() -> IProviderGetter[DateStr, DataFrame[Aggregated
     task_run_name="get data for {date}",
     retries=3,
 )
-def task_get_data_for_date(provider: IProviderGetter, date: DateStr) -> AggregatedPricesDF:
+def task_get_data_for_date(provider: IProviderGetter[DateStr, AggregatedPricesDF], date: DateStr) -> AggregatedPricesDF:
     """
     Get SEPA data for a specific date.
 
@@ -111,7 +113,7 @@ def task_get_data_for_date(provider: IProviderGetter, date: DateStr) -> Aggregat
 
 # Target Tasks
 @task(retries=2)
-def task_get_latest_records(client: ITargetClient, stream_id: StreamId, data_provider: str) -> pd.DataFrame:
+def task_get_latest_records(client: ITargetClient[StreamId], stream_id: StreamId, data_provider: str) -> pd.DataFrame:
     """
     Get latest records from the target system.
 
@@ -135,7 +137,7 @@ def task_get_latest_records(client: ITargetClient, stream_id: StreamId, data_pro
 
 
 @task
-def task_insert_data(client: ITargetClient, data: DataFrame[TnDataRowModel]) -> None:
+def task_insert_data(client: ITargetClient[StreamId], data: DataFrame[TnDataRowModel]) -> None:
     """
     Insert data into the target system.
 
@@ -171,7 +173,7 @@ def task_determine_needed_keys(
     strategy: IReconciliationStrategy[DateStr, StreamId],
     streams_df: StreamSourceMapDF,
     provider_getter: IProviderGetter[DateStr, SepaDF],
-    target_client: ITargetClient,
+    target_client: ITargetClient[StreamId],
     data_provider: str,
 ) -> dict[StreamId, list[DateStr]]:
     """
@@ -214,7 +216,7 @@ def task_create_transformer(stream_id_map: StreamIdMap) -> IDataTransformer[Aggr
 
 
 @task
-def task_transform_data(transformer: IDataTransformer, data: AggregatedPricesDF) -> DataFrame[TnDataRowModel]:
+def task_transform_data(transformer: IDataTransformer[AggregatedPricesDF], data: AggregatedPricesDF) -> DataFrame[TnDataRowModel]:
     """Transform data from source format to target format."""
     logger = get_run_logger()
     logger.info("Transforming data")
@@ -233,7 +235,7 @@ def task_transform_data(transformer: IDataTransformer, data: AggregatedPricesDF)
     cache_key_fn=lambda ctx, args: f"get_and_transform_data_{args['date']}",
 )
 def task_get_and_transform_data(
-    provider: IProviderGetter, transformer: IDataTransformer, date: DateStr
+    provider: IProviderGetter[DateStr, AggregatedPricesDF], transformer: IDataTransformer[AggregatedPricesDF], date: DateStr
 ) -> DataFrame[TnDataRowModel]:
     """Get data for a date and transform it."""
     # guess we're using 1GB of memory

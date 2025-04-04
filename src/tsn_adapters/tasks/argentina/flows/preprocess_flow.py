@@ -8,6 +8,7 @@ This flow handles:
 4. Storage of processed data in S3
 """
 
+import asyncio
 from typing import cast
 
 import pandas as pd
@@ -15,16 +16,18 @@ from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.cache_policies as CachePolicies
+import prefect.variables as variables
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
+from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
 from tsn_adapters.tasks.argentina.task_wrappers import task_load_category_map
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, CategoryMapDF, DateStr, SepaDF, UncategorizedDF
-from tsn_adapters.utils import deroutine
+from tsn_adapters.utils.deroutine import force_sync
 
 
 @task(name="Process Raw Data")
@@ -44,7 +47,9 @@ def process_raw_data(
     # Process the raw data
     if raw_data.empty:
         # Return empty DataFrames with correct types if raw data is empty
-        empty_avg_price_df = DataFrame[SepaAvgPriceProductModel](pd.DataFrame(columns=list(SepaAvgPriceProductModel.to_schema().columns.keys())))
+        empty_avg_price_df = DataFrame[SepaAvgPriceProductModel](
+            pd.DataFrame(columns=list(SepaAvgPriceProductModel.to_schema().columns.keys()))
+        )
         return cast(AggregatedPricesDF, pd.DataFrame()), cast(UncategorizedDF, pd.DataFrame()), empty_avg_price_df
 
     # Get average price per product (This is the SepaAvgPriceProductModel DataFrame)
@@ -84,7 +89,7 @@ class PreprocessFlow(ArgentinaFlowController):
         self.product_averages_provider = ProductAveragesProvider(s3_block=s3_block)
         # Note: self.processed_provider is inherited from ArgentinaFlowController
 
-    def run_flow(self) -> None:
+    async def run_flow(self) -> None:
         """
         1. Lists all dates in the raw data provider
         2. See if target already exists in the processed data provider
@@ -95,9 +100,9 @@ class PreprocessFlow(ArgentinaFlowController):
             if self.processed_provider.exists(date):
                 logger.info(f"Skipping {date} because it already exists")
                 continue
-            self.process_date(date)
+            await self.process_date(date)
 
-    def process_date(self, date: DateStr) -> None:
+    async def process_date(self, date: DateStr) -> None:
         """Process data for a specific date.
 
         Args:
@@ -127,10 +132,10 @@ class PreprocessFlow(ArgentinaFlowController):
         processed_data, uncategorized, avg_price_df = process_raw_data(
             raw_data=raw_data,
             category_map_df=category_map_df,
-            return_state=True,
-        ).result()
+            return_state=False,
+        )
 
-        # --- New Step: Save Product Averages ---
+        # --- Save Product Averages ---
         if not avg_price_df.empty:
             logger.info("Saving product averages")
             try:
@@ -142,7 +147,6 @@ class PreprocessFlow(ArgentinaFlowController):
                 # For now, we log and continue to save category data
         else:
             logger.info("Skipping saving product averages as the DataFrame is empty.")
-        # --- End New Step ---
 
         # Save category aggregated data to S3 (using self.processed_provider from base class)
         logger.info("Saving processed category data")
@@ -152,6 +156,18 @@ class PreprocessFlow(ArgentinaFlowController):
             uncategorized=uncategorized,
             logs=b"Placeholder for logs",
         )
+
+        # --- Set Prefect Variable on Success ---
+        try:
+            await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, date, overwrite=True)
+            logger.info(f"Successfully set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE} to {date}")
+        except Exception as e:
+            # Log error but don't fail the flow just because variable setting failed
+            logger.error(
+                f"Failed to set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE} for date {date}: {e}",
+                exc_info=True,
+            )
+        # --- End Prefect Variable Setting ---
 
         # Create summary
         logger.info("Creating summary")
@@ -195,7 +211,7 @@ class PreprocessFlow(ArgentinaFlowController):
 
 
 @flow(name="Argentina SEPA Preprocessing")
-def preprocess_flow(product_category_map_url: str, s3_block_name: str) -> None:
+async def preprocess_flow(product_category_map_url: str, s3_block_name: str) -> None:
     """Preprocess Argentina SEPA data.
 
     Args:
@@ -204,18 +220,20 @@ def preprocess_flow(product_category_map_url: str, s3_block_name: str) -> None:
         s3_block_name: Optional name of S3 block to use
     """
     # Get S3 block if specified
-    s3_block = deroutine(S3Bucket.load(s3_block_name))
+    s3_block = force_sync(S3Bucket.load)(s3_block_name)
 
     # Create and run flow
     flow = PreprocessFlow(
         product_category_map_url=product_category_map_url,
         s3_block=s3_block,
     )
-    flow.run_flow()
+    await flow.run_flow()
 
 
 if __name__ == "__main__":
-    preprocess_flow(
-        "https://drive.usercontent.google.com/u/2/uc?id=1phvOyaOCjQ_fz-03r00R-podmsG0Ygf4&export=download",
-        "argentina-sepa",
+    asyncio.run(
+        preprocess_flow(
+            "https://drive.usercontent.google.com/u/2/uc?id=1phvOyaOCjQ_fz-03r00R-podmsG0Ygf4&export=download",
+            "argentina-sepa",
+        )
     )

@@ -1,13 +1,21 @@
 import logging
-from unittest.mock import MagicMock, patch
+import os
+from collections.abc import Generator
+from unittest.mock import patch
+
+from mypy_boto3_s3 import S3Client
 
 import pandas as pd
+from moto import mock_aws
 from pandera.typing import DataFrame
-from prefect_aws import S3Bucket
+from prefect_aws import S3Bucket # type: ignore
 import pytest
 
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, S3SourceDescriptor
-from tsn_adapters.utils.deroutine import deroutine
+
+
+# Define a constant for the bucket name
+TEST_BUCKET_NAME = "test-s3-descriptor-bucket"
 
 
 @pytest.fixture
@@ -17,31 +25,27 @@ def mock_logger():
     return logger
 
 
-@pytest.fixture
-def fake_s3_bucket():
-    mock_bucket = MagicMock(spec=S3Bucket)
-    mock_bucket.bucket_name = "fake-bucket"
-    stored_content = {}
+# Add aws_credentials fixture
+@pytest.fixture(scope="function")
+def aws_credentials():
+    """Mocked AWS Credentials for moto."""
+    os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+    os.environ["AWS_SECURITY_TOKEN"] = "testing"
+    os.environ["AWS_SESSION_TOKEN"] = "testing"
+    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
 
-    async def mock_write_path(path, content):
-        stored_content[path] = content
-        return path
 
-    async def mock_read_path(path):
-        if path not in stored_content:
-            raise ValueError("No content stored")
-        return stored_content[path]
+@pytest.fixture(scope="function")
+def mock_s3_bucket_block(aws_credentials: None) -> Generator[S3Bucket, None, None]:
+    """Creates a mock S3 bucket using moto and yields a real S3Bucket block."""
+    with mock_aws():
+        _ = aws_credentials  # Ensure credentials are set
+        s3_block = S3Bucket(bucket_name=TEST_BUCKET_NAME)
+        s3_client: S3Client = s3_block._get_s3_client() # type: ignore
 
-    # Use sync wrappers that handle the async operations
-    def sync_write_path(path, content):
-        return deroutine(mock_write_path(path, content))
-
-    def sync_read_path(path):
-        return deroutine(mock_read_path(path))
-
-    mock_bucket.write_path = sync_write_path
-    mock_bucket.read_path = sync_read_path
-    return mock_bucket
+        s3_client.create_bucket(Bucket=TEST_BUCKET_NAME)
+        yield s3_block
 
 
 @pytest.fixture
@@ -57,25 +61,19 @@ def sample_dataframe():
     return DataFrame[PrimitiveSourceDataModel](data)
 
 
-def test_set_and_get_descriptor(fake_s3_bucket, sample_dataframe, mock_logger):
-    # Mock the get_run_logger to avoid Prefect context issues
-    with patch("tsn_adapters.blocks.primitive_source_descriptor.get_run_logger", return_value=mock_logger):
-        # Initialize S3SourceDescriptor with the fake S3 bucket and a dummy file path
-        descriptor = S3SourceDescriptor(s3_bucket=fake_s3_bucket, file_path="dummy_path.csv.gz")
+def test_set_and_get_descriptor(mock_s3_bucket_block: S3Bucket, sample_dataframe: DataFrame[PrimitiveSourceDataModel], mock_logger: logging.Logger):
+    # Initialize S3SourceDescriptor with the moto-backed S3 bucket and a dummy file path
+    descriptor = S3SourceDescriptor(s3_bucket=mock_s3_bucket_block, file_path="dummy_path.csv.zip")
 
-        # Write the sample DataFrame using set_sources
-        descriptor.set_sources(sample_dataframe)
+    # Write the sample DataFrame using set_sources
+    descriptor.set_sources(sample_dataframe)
 
-        # Retrieve the DataFrame using get_descriptor
-        df_result = descriptor.get_descriptor()
+    # Retrieve the DataFrame using get_descriptor
+    df_result = descriptor.get_descriptor()
 
-        # assert the type of both is correct
-        PrimitiveSourceDataModel.validate(df_result)
-        PrimitiveSourceDataModel.validate(sample_dataframe)
+    # assert the type of both is correct
+    PrimitiveSourceDataModel.validate(df_result)
+    PrimitiveSourceDataModel.validate(sample_dataframe)
 
-        # The retrieved DataFrame should match the original sample dataframe
-        pd.testing.assert_frame_equal(sample_dataframe.reset_index(drop=True), df_result.reset_index(drop=True))
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
+    # The retrieved DataFrame should match the original sample dataframe
+    pd.testing.assert_frame_equal(sample_dataframe.reset_index(drop=True), df_result.reset_index(drop=True))

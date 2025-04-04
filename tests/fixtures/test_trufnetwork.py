@@ -11,6 +11,9 @@ from typing import Any, Optional
 from unittest.mock import Mock
 
 from prefect import Task
+from prefect.client.orchestration import get_client
+from prefect.client.schemas.actions import GlobalConcurrencyLimitCreate
+from prefect.exceptions import ObjectNotFound
 from prefect.logging.loggers import disable_run_logger
 from prefect.testing.utilities import prefect_test_harness
 from pydantic import SecretStr
@@ -356,7 +359,6 @@ def tn_provider(tn_node: str) -> TrufNetworkProvider:
 
 
 # Skip these tests on CI environment
-@pytest.mark.skipif(os.environ.get("CI") == "true", reason="Local development fixture tests, skipped in CI")
 class TestTrufNetworkFixtures:
     """
     Test suite for TrufNetwork fixtures.
@@ -480,6 +482,8 @@ def disable_prefect_retries():
         "tsn_adapters.blocks.tn_access._task_only_batch_insert_records",
         "tsn_adapters.blocks.tn_access.task_split_and_insert_records",
         "tsn_adapters.blocks.tn_access.task_filter_initialized_streams",
+        # Stream Filtering
+        "tsn_adapters.blocks.stream_filtering.task_filter_batch_initialized_streams",
         # TN Common
         "tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records",
         "tsn_adapters.common.trufnetwork.tn.task_deploy_primitive",
@@ -513,9 +517,48 @@ def disable_prefect_logger():
 
 
 @pytest.fixture(scope="session", autouse=False)
-def prefect_test_fixture(disable_prefect_retries: Any):
+async def prefect_test_fixture(disable_prefect_retries: Any):
+    """Prefect test harness fixture that also manages the 'tn-write' GCL."""
+    limit_name = "tn-write"
     with prefect_test_harness(server_startup_timeout=120):
-        yield
+        async with get_client() as client:
+            # Attempt to create the global concurrency limit
+            try:
+                logger.info(f"Creating '{limit_name}' global concurrency limit...")
+                await client.create_global_concurrency_limit(
+                    concurrency_limit=GlobalConcurrencyLimitCreate(name=limit_name, limit=1)
+                )
+                logger.info(f"'{limit_name}' global concurrency limit created.")
+            except Exception as e:
+                # Check if it already exists by trying to read it
+                try:
+                    await client.read_global_concurrency_limit_by_name(name=limit_name)
+                    logger.warning(f"Global concurrency limit '{limit_name}' already exists. Skipping creation.")
+                except ObjectNotFound:
+                    logger.error(f"Failed to create global concurrency limit '{limit_name}': {e!s}")
+                    raise  # Re-raise the original error if it wasn't an 'already exists' situation
+                except Exception as read_e:
+                    logger.error(
+                        f"Failed to create or check global concurrency limit '{limit_name}': {e!s} / Check failed: {read_e!s}"
+                    )
+                    raise read_e  # Raise the checking error if reading failed
+
+        try:
+            yield
+        finally:
+            # Clean up the concurrency limit
+            async with get_client() as client:
+                try:
+                    logger.info(f"Deleting '{limit_name}' global concurrency limit...")
+                    await client.delete_global_concurrency_limit_by_name(name=limit_name)
+                    logger.info(f"'{limit_name}' global concurrency limit deleted.")
+                except ObjectNotFound:
+                    logger.warning(
+                        f"Global concurrency limit '{limit_name}' not found during cleanup. Skipping deletion."
+                    )
+                except Exception as e:
+                    # Log error but don't raise to avoid masking test failures
+                    logger.error(f"Failed to delete global concurrency limit '{limit_name}': {e!s}")
 
 
 @pytest.fixture(scope="function")
@@ -528,30 +571,32 @@ DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1
 
 @pytest.fixture(scope="session")
 def tn_block(
-    tn_provider: TrufNetworkProvider, prefect_test_fixture: Any, disable_prefect_retries: Any
+    tn_provider: TrufNetworkProvider, prefect_test_fixture: Any, disable_prefect_retries: Any, helper_contract_id: str
 ) -> TNAccessBlock:
-    """Create a TNAccessBlock with test node and default credentials."""
-    return TNAccessBlock(
+    """Create a TNAccessBlock with test node and default credentials. Also deploys the helper contract."""
+    tn_block = TNAccessBlock(
         tn_provider=tn_provider.api_endpoint,
         tn_private_key=SecretStr(os.environ.get("TN_PRIVATE_KEY", DEFAULT_TN_PRIVATE_KEY)),
-        helper_contract_name="sthelpercontract0000000000000001",
+        helper_contract_name=helper_contract_id,
     )
+    deploy_helper_contract(tn_block, helper_contract_id)
+    return tn_block
 
 
-@pytest.fixture(scope="session")
-def helper_contract_id(tn_block: TNAccessBlock) -> Generator[str, None, None]:
-    """Create and manage the helper contract."""
-    helper_stream_id = tn_block.helper_contract_stream_name
+def deploy_helper_contract(tn_block: TNAccessBlock, helper_stream_id: str):
+    """Deploy the helper contract."""
     client = tn_block.get_client()
 
     # Try to deploy helper contract
     try:
-        # we don't need to initialize helper contracts
         client.deploy_stream(helper_stream_id, stream_type=truf_sdk.StreamTypeHelper, wait=True)
     except Exception as e:
         if "dataset exists" not in str(e) and "already exists" not in str(e):
             raise e
 
-    yield helper_stream_id
 
-    # Don't cleanup helper contract as it might be used by other tests
+@pytest.fixture(scope="session")
+def helper_contract_id() -> Generator[str, None, None]:
+    """Create and manage the helper contract."""
+    helper_stream_id = "sthelpercontract0000000000000001"
+    yield helper_stream_id

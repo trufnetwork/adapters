@@ -157,7 +157,7 @@ class TestTNAccessBlockIntegration:
         insert_on_test_flow(tn_block, deployed_test_stream_id, unix_timestamp_records)
 
         # Get and verify earliest date
-        earliest_date = tn_block.get_earliest_date(deployed_test_stream_id)
+        earliest_date = tn_block.get_earliest_date(deployed_test_stream_id, is_unix=True)
         assert earliest_date is not None
         # The first timestamp in unix_timestamp_records is 1704067200 (2024-01-01 00:00:00 UTC)
         expected_date = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -210,7 +210,7 @@ class TestTNAccessBlockIntegration:
         # This should fail because get_earliest_date expects Unix timestamps
         # The error will be caught and wrapped in TNAccessBlock.Error
         with pytest.raises(TNAccessBlock.Error):
-            _ = tn_block.get_earliest_date(deployed_test_stream_id)
+            _ = tn_block.get_earliest_date(deployed_test_stream_id, is_unix=True)
 
 
 if __name__ == "__main__":

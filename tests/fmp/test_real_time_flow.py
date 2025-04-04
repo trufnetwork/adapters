@@ -6,7 +6,6 @@ integration tests for the complete flow, using mock objects to avoid
 actual network calls.
 """
 
-import logging
 from typing import Any, Union
 
 import pandas as pd
@@ -21,7 +20,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourcesDescriptorBlock,
 )
 from tsn_adapters.blocks.tn_access import TNAccessBlock
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel
 from tsn_adapters.flows.fmp.real_time_flow import (
     batch_symbols,
     combine_batch_results,
@@ -115,6 +114,14 @@ class FakeTNAccessBlock(TNAccessBlock):
         """Store records for verification."""
         self.inserted_records.append(records)
         return None
+    
+    def filter_initialized_streams(
+        self, stream_ids: list[str], data_providers: list[str]
+    ) -> DataFrame[StreamLocatorModel]:
+        """Mock filtering batch initialized streams."""
+        return DataFrame[StreamLocatorModel](
+            pd.DataFrame(stream_ids, data_providers, columns=["stream_id", "data_provider"])
+        )
 
     def wait_for_tx(self, tx_hash: str) -> None:
         """Mock waiting for transaction - do nothing."""
@@ -130,7 +137,7 @@ class FakeTNAccessBlock(TNAccessBlock):
 
     def get_client(self) -> TNClient:
         """Mock to prevent real client creation."""
-        return None  # type: ignore
+        raise RuntimeError("Access to real TNClient is not allowed in tests.")
 
 
 class ErrorFMPBlock(FMPBlock):
