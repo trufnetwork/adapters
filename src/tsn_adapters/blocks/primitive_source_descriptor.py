@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from io import BytesIO
 from typing import cast
-import zlib
 
 import pandas as pd
 import pandera as pa
@@ -118,7 +117,6 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
                 keep_default_na=False,
                 na_values=[],
             )
-            df.iloc[27840:27850]
             return DataFrame[PrimitiveSourceDataModel](df)
         except Exception as e:
             self.logger.error(f"Error reading file {self.file_path}: {e}")
@@ -126,12 +124,13 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
             return cast(DataFrame[PrimitiveSourceDataModel], empty_df)
 
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
-        csv_bytes = descriptor.to_csv(index=False, encoding="utf-8").encode("utf-8")
-        compressed_bytes = zlib.compress(csv_bytes)
-        self.s3_bucket.write_path(
-            path=self.file_path,
-            content=compressed_bytes,
-        )
+        with BytesIO() as buffer:
+            descriptor.to_csv(buffer, index=False, encoding="utf-8", compression="zip")
+            buffer.seek(0)
+            self.s3_bucket.write_path(
+                path=self.file_path,
+                content=buffer.getvalue(),
+            )
         
     def upsert_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]) -> None:
         """
