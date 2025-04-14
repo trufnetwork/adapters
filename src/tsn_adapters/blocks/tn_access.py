@@ -4,6 +4,7 @@ from functools import wraps
 from typing import (
     Any,
     Callable,
+    List,
     Literal,
     Optional,
     TypedDict,
@@ -591,7 +592,7 @@ class TNAccessBlock(Block):
         helper_contract_stream_id: str,
         helper_contract_provider: str,
         wait: bool = False,
-    ) -> tn_client.BatchInsertResults:
+    ) -> List[str]:
         """
         created for compatibility with truflation's streams which take an additional
         created_at column
