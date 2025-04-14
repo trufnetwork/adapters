@@ -124,7 +124,7 @@ if __name__ == "__main__":
         try:
             client.destroy_stream(stream_id)
         except:
-            print("stream doesn't exist")
+            print("stream doesn't exist, initializing a new one..")
 
         client.deploy_stream(stream_id)
         insert_tsn_records(stream_id, pd.DataFrame({
