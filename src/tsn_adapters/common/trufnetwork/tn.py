@@ -21,9 +21,8 @@ def task_insert_tsn_records(
     records: pd.DataFrame,
     client: tn_client.TNClient,
     wait: bool = False,
-    data_provider: Optional[str] = None,
 ):
-    return insert_tsn_records(stream_id, records, client, wait, data_provider)
+    return insert_tsn_records(stream_id, records, client, wait)
 
 
 def insert_tsn_records(
@@ -31,10 +30,8 @@ def insert_tsn_records(
     records: pd.DataFrame,
     client: tn_client.TNClient,
     wait: bool = True,
-    data_provider: Optional[str] = None,
     records_per_batch: int = 100
 ):
-    # check if the records are empty
     if len(records) == 0:
         print(f"No records to insert for stream {stream_id}")
         return
@@ -65,17 +62,8 @@ def insert_tsn_records(
                 inputs=batch_records
             )
     )
-    # args is a list of tuples with the keys: date str, value float
+        
     client.batch_insert_records(batches, wait)
-    
-    # client.execute_procedure(
-    #     stream_id=stream_id,
-    #     procedure="insert_record",
-    #     args=args,
-    #     wait=wait,
-    #     data_provider=data_provider or "",
-    # )
-
 
 """
 This task fetches all the records from the TSN for a given stream_id and data_provider
@@ -96,7 +84,7 @@ def task_get_all_tsn_records(
 def get_all_tsn_records(
     stream_id: str, client: tn_client.TNClient, data_provider: Optional[str] = None
 ) -> pd.DataFrame:
-    recs = client.get_records(stream_id=stream_id, data_provider=data_provider, date_from="1000-01-01")
+    recs = client.get_records(stream_id=stream_id, data_provider=data_provider, date_from=date_string_to_unix("1000-01-01"))
 
     recs_list = [
         {
@@ -116,12 +104,11 @@ def get_all_tsn_records(
     retry_condition_fn=tn_special_retry_condition(3),
     tags=["tn", "tn-write"],
 )
-def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = True, is_unix: bool = False) -> str:
-    stream_type = truf_sdk.StreamTypePrimitive if not is_unix else truf_sdk.StreamTypePrimitiveUnix
+def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = True) -> str:
     return block.deploy_stream(
         stream_id=stream_id,
+        stream_type=truf_sdk.StreamTypePrimitive,
         wait=wait,
-        stream_type=stream_type,
     )
 
 
@@ -136,7 +123,6 @@ def task_init_stream(block: TNAccessBlock, stream_id: str, wait: bool = True) ->
 
 
 if __name__ == "__main__":
-
     @flow(log_prints=True)
     def test_get_all_tsn_records():
         client = tn_client.TNClient(url=os.environ["TSN_PROVIDER"], token=os.environ["TSN_PRIVATE_KEY"])
