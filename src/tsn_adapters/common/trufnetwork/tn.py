@@ -1,12 +1,13 @@
 import os
-from typing import Optional
-
 import pandas as pd
-from prefect import flow, task
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
 
+from math import ceil
+from prefect import flow, task
+from typing import Optional, List
 from tsn_adapters.blocks.tn_access import UNUSED_INFINITY_RETRIES, TNAccessBlock, tn_special_retry_condition
+from tsn_adapters.utils.time_utils import date_string_to_unix
 
 
 @task(
@@ -31,6 +32,7 @@ def insert_tsn_records(
     client: tn_client.TNClient,
     wait: bool = True,
     data_provider: Optional[str] = None,
+    records_per_batch: int = 100
 ):
     # check if the records are empty
     if len(records) == 0:
@@ -38,17 +40,41 @@ def insert_tsn_records(
         return
 
     print(f"Inserting {len(records)} records into stream {stream_id}")
-    # generate tuples, [("2024-01-01", "100", inserted_date), ...]
-    args = [[record["date"], str(record["value"])] for record in records.to_dict(orient="records")]
 
-    # args is a list of tuples with the keys: date str, value float
-    client.execute_procedure(
-        stream_id=stream_id,
-        procedure="insert_record",
-        args=args,
-        wait=wait,
-        data_provider=data_provider or "",
+    records_dict = records.to_dict(orient="records")
+    num_batches = ceil(len(records_dict) / records_per_batch)
+
+    batches: List[tn_client.RecordBatch] = []
+    for batch_idx in range(num_batches):
+        start_idx = batch_idx * records_per_batch
+        end_idx = start_idx + records_per_batch
+        batch_data = records_dict[start_idx:end_idx]
+        
+        batch_records = []
+        for record in batch_data:
+            batch_records.append(
+                tn_client.Record(
+                    date=date_string_to_unix(record["date"]),
+                    value=float(record["value"])
+                )
+            )
+        
+        batches.append(
+            tn_client.RecordBatch(
+                stream_id=stream_id,
+                inputs=batch_records
+            )
     )
+    # args is a list of tuples with the keys: date str, value float
+    client.batch_insert_records(batches, wait)
+    
+    # client.execute_procedure(
+    #     stream_id=stream_id,
+    #     procedure="insert_record",
+    #     args=args,
+    #     wait=wait,
+    #     data_provider=data_provider or "",
+    # )
 
 
 """

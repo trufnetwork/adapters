@@ -1,9 +1,10 @@
 """
 Utility functions for time and date conversions.
 """
-
 import pandas as pd
-from pandera.typing import Series
+
+from datetime import datetime, timezone
+from pandas import Series
 
 
 def convert_date_str_series_to_unix_ts(date_series: Series[str]) -> Series[int]:
@@ -51,3 +52,8 @@ def convert_date_str_series_to_unix_ts(date_series: Series[str]) -> Series[int]:
         )
 
     return second_timestamps
+
+def date_string_to_unix(date_str: str, date_format: str ="%Y-%m-%d"):
+    """Convert a date string to a Unix timestamp (integer)."""
+    dt = datetime.strptime(date_str, date_format).replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
