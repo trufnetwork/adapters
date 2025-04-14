@@ -17,6 +17,9 @@ dependencies = [
     "prefect-sqlalchemy",
     "SQLAlchemy",
     "psycopg2-binary",
+    "prefect-aws",
+    "bs4",
+    "tqdm"
 ]
 
 [project.optional-dependencies]

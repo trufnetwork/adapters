@@ -4,7 +4,7 @@ Utility functions for time and date conversions.
 import pandas as pd
 
 from datetime import datetime, timezone
-from pandas import Series
+from pandera.typing import Series
 
 
 def convert_date_str_series_to_unix_ts(date_series: Series[str]) -> Series[int]:
