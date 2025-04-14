@@ -88,7 +88,6 @@ def get_all_tsn_records(
     stream_id: str, client: tn_client.TNClient, data_provider: Optional[str] = None
 ) -> pd.DataFrame:
     recs = client.get_records(stream_id=stream_id, data_provider=data_provider, date_from=date_string_to_unix("1000-01-01"))
-    print(recs)
     recs_list = [
         {
             "date": rec["EventTime"],
