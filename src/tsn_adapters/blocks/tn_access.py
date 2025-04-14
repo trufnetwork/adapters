@@ -326,7 +326,7 @@ class TNAccessBlock(Block):
 
     @handle_tn_errors
     def stream_exists(self, data_provider: str, stream_id: str) -> bool:
-        """Check if a stream exists"""
+        """Check if a stream exists. Does not take into account if it's initialized."""
         with concurrency("tn-read", occupy=1):
             try:
                 return self.client.stream_exists(stream_id=stream_id, data_provider=data_provider)
