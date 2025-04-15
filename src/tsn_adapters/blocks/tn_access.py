@@ -330,11 +330,9 @@ class TNAccessBlock(Block):
         """Check if a stream exists"""
         with concurrency("tn-read", occupy=1):
             try:
-                return self.client.stream_exists(stream_id=stream_id, data_provider=data_provider)
+                return self.client.get_type(stream_id=stream_id, data_provider=data_provider) in (truf_sdk.StreamTypeComposed, truf_sdk.StreamTypePrimitive)
             except Exception as e:
-                if "get_metadata" in str(e) and "not found in schema" in str(e):
-                    return False
-                raise e
+                return False
 
     @handle_tn_errors
     def get_stream_type(self, data_provider: str, stream_id: str) -> str:
