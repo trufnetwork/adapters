@@ -169,11 +169,22 @@ if __name__ == "__main__":
         except:
             print("stream doesn't exist, initializing a new one..")
 
+        # deploy test stream
         client.deploy_stream(stream_id)
+
+        # insert records into test stream
         insert_tsn_records(stream_id, pd.DataFrame({
             "date": [date_string_to_unix("2023-01-01"), date_string_to_unix("2023-01-02")],
             "value": [10.5, 20.3]
         }), client)
+        insert_multiple_tsn_records({
+            stream_id: pd.DataFrame({
+                "date": [date_string_to_unix("2023-01-03")],
+                "value": [12]
+            })
+        }, client)
+
+        # get records
         recs = get_all_tsn_records(stream_id, client)
         print(recs)
         
