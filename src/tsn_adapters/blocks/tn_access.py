@@ -527,14 +527,11 @@ class TNAccessBlock(Block):
     def batch_insert_tn_records(
         self,
         records: DataFrame[TnDataRowModel],
-        has_external_created_at: bool = False,
     ) -> Optional[List[str]]:
         """Batch insert records into multiple streams.
 
         Args:
             records: DataFrame containing records with stream_id column
-            is_unix: If True, insert records with unix timestamps
-            has_external_created_at: If True, insert records with an external created_at timestamp
 
         Returns:
             Transaction hash if successful, None otherwise
@@ -543,44 +540,36 @@ class TNAccessBlock(Block):
             return None
 
         # Convert DataFrame to format expected by client
-        batches: list[dict[str, Any]] = []
+        batches: list[tn_client.RecordBatch] = []
         stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
         for _, row in stream_locators.iterrows():
             stream_records = records[
                 (records["stream_id"] == row["stream_id"])
                 & (records["data_provider"].fillna("") == (row["data_provider"] or ""))
             ]
-            batch = {
-                "stream_id": row["stream_id"],
-                # TODO: support data provider on sdk insertion
-                # "data_provider": row["data_provider"],
-                "inputs": [
-                    {"date": int(record["date"]), "value": float(record["value"])}
-                    for record in stream_records.to_dict(orient="records")
-                ],
-            }
+            
+            inputs = [
+                tn_client.Record(date=int(record["date"]), value=float(record["value"]))
+                for record in stream_records.to_dict(orient="records")
+            ]
+
             # check that all dates are unix timestamps
-            if not all(check_unix_timestamp(int(record["date"])) for record in batch["inputs"]):
+            if not all(check_unix_timestamp(int(record["date"])) for record in inputs):
                 raise ValueError("All dates must be unix timestamps")
     
-            batches.append(batch)
+            batches.append(tn_client.RecordBatch(
+                stream_id=row["stream_id"],
+                inputs=inputs
+            ))
 
         if not batches:
             return None
 
         with concurrency("tn-write", occupy=1):
-            if has_external_created_at:
-                tx_hashes = self.batch_insert_records_with_external_created_at(
-                    batches=batches,
-                    helper_contract_stream_id=self.helper_contract_stream_name,
-                    helper_contract_provider=self.helper_contract_provider,
-                    wait=False,
-                )
-            else:
-                tx_hashes = self.client.batch_insert_records(
-                    batches=[],
-                    wait=False,
-                )
+            tx_hashes = self.client.batch_insert_records(
+                batches=batches,
+                wait=False,
+            )
 
             return tx_hashes
 
@@ -691,12 +680,9 @@ def hash_record_stream_id(records: DataFrame[TnDataRowModel]) -> str:
 def _task_only_batch_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-    has_external_created_at: bool = False,
 ) -> Optional[List[str]]:
     """Insert records into TSN without waiting for transaction confirmation"""
-    return block.batch_insert_tn_records(
-        records=records, has_external_created_at=has_external_created_at
-    )
+    return block.batch_insert_tn_records(records=records)
 
 
 # we don't use retries here because their individual tasks already have retries
@@ -705,7 +691,6 @@ def task_batch_insert_tn_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     wait: bool = False,
-    has_external_created_at: bool = False,
 ) -> Optional[List[str]]:
     """Batch insert records into multiple streams
 
@@ -721,9 +706,10 @@ def task_batch_insert_tn_records(
     logging = get_run_logger()
 
     logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
+
     # we use task so it may retry on network or nonce errors
     tx_or_none = _task_only_batch_insert_records(
-        block=block, records=records, has_external_created_at=has_external_created_at
+        block=block, records=records
     )
 
     if wait and tx_or_none is not None:
