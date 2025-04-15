@@ -7,9 +7,10 @@ from trufnetwork_sdk_py.utils import generate_stream_id
 from math import ceil
 from prefect import flow, task
 from dotenv import load_dotenv
-from typing import Any, Dict, Hashable, Optional, List
+from typing import Dict, Optional
 from tsn_adapters.blocks.tn_access import UNUSED_INFINITY_RETRIES, TNAccessBlock, tn_special_retry_condition
 from tsn_adapters.utils.time_utils import date_string_to_unix
+from tsn_adapters.utils.tn_record import create_record_batches
 
 load_dotenv()
 
@@ -90,30 +91,6 @@ def insert_multiple_tsn_records(
         
         print(f"Finished processing all batches for stream {stream_id}\n")
 
-def create_record_batches(stream_id: str, records_dict: list[Dict[Hashable, Any]], num_batches: int, records_per_batch: int):
-    batches: List[tn_client.RecordBatch] = []
-    for batch_idx in range(num_batches):
-        start_idx = batch_idx * records_per_batch
-        end_idx = start_idx + records_per_batch
-        batch_data = records_dict[start_idx:end_idx]
-        
-        batch_records = []
-        for record in batch_data:
-            batch_records.append(
-                tn_client.Record(
-                    date=record["date"],
-                    value=float(record["value"])
-                )
-            )
-        
-        batches.append(
-            tn_client.RecordBatch(
-                stream_id=stream_id,
-                inputs=batch_records
-            )
-        )
-
-    return batches
 """
 This task fetches all the records from the TSN for a given stream_id and data_provider
 

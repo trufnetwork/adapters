@@ -1,15 +1,15 @@
 import decimal
+from math import ceil
 import pandas as pd
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import wraps
 from typing import (
     Any,
     Callable,
     List,
-    Literal,
     Optional,
     TypedDict,
     TypeVar,
@@ -26,11 +26,12 @@ from prefect.concurrency.sync import concurrency, rate_limit
 from prefect.states import Completed
 from pydantic import ConfigDict, Field, SecretStr
 
-from tsn_adapters.blocks.shared_types import DivideAndConquerResult
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
 from tsn_adapters.utils.logging import get_logger_safe
+from tsn_adapters.utils.time_utils import date_string_to_unix
 from tsn_adapters.utils.unix import check_unix_timestamp
+from tsn_adapters.utils.tn_record import create_record_batches
 
 # --- Type Variables ---
 T = TypeVar("T")  # Generic type for DataFrame models
@@ -398,7 +399,7 @@ class TNAccessBlock(Block):
     @handle_tn_errors
     def read_all_records(self, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
         """Read all records from TSN"""
-        return self.read_records(stream_id, data_provider, date_from="1000-01-01")
+        return self.read_records(stream_id, data_provider, date_from=date_string_to_unix("1000-01-01"))
 
     @handle_tn_errors
     def get_first_record(
@@ -412,41 +413,21 @@ class TNAccessBlock(Block):
 
         return TnRecord(date=str(result["date"]), value=str(result["value"]))
 
-    @overload
-    def read_records(
-        self,
-        stream_id: str,
-        data_provider: Optional[str] = None,
-        date_from: Optional[ShortIso8601Date] = None,
-        date_to: Optional[ShortIso8601Date] = None,
-    ) -> DataFrame[TnRecordModel]: ...
-
-    @overload
-    def read_records(
-        self,
-        stream_id: str,
-        data_provider: Optional[str] = None,
-        date_from: Optional[int] = None,
-        date_to: Optional[int] = None,
-    ) -> DataFrame[TnRecordModel]: ...
-
     @handle_tn_errors
     def read_records(
         self,
         stream_id: str,
         data_provider: Optional[str] = None,
-        date_from: Union[ShortIso8601Date, int, None] = None,
-        date_to: Union[ShortIso8601Date, int, None] = None,
+        date_from: Union[int, None] = None,
+        date_to: Union[int, None] = None,
     ) -> DataFrame[TnRecordModel]:
         try:
             with concurrency("tn-read", occupy=1):
-                unix_from = int(cast(int, date_from)) if date_from is not None else None
-                unix_to = int(cast(int, date_to)) if date_to is not None else None
                 recs = self.client.get_records(
                     stream_id,
                     data_provider,
-                    unix_from,
-                    unix_to,
+                    date_from,
+                    date_to,
                 )
 
             recs_list = [
@@ -474,8 +455,8 @@ class TNAccessBlock(Block):
         self,
         stream_id: str,
         records: DataFrame[TnRecordModel],
-        data_provider: Optional[str] = None,
-    ) -> Optional[str]:
+        records_per_batch: int = 300
+    ) -> Optional[List[str]]:
         logging = get_run_logger()
 
         if len(records) == 0:
@@ -483,7 +464,10 @@ class TNAccessBlock(Block):
             return None
 
         logging.info(f"Inserting {len(records)} records into stream {stream_id}")
-        # args = [[record["date"], str(record["value"])] for record in records.to_dict(orient="records")]
+        records_dict = records.to_dict(orient="records")
+
+        num_batches = ceil(len(records_dict) / records_per_batch)
+        batches = create_record_batches(stream_id, records_dict, num_batches, records_per_batch)
 
         for col in ["date", "value"]:
             if col not in records.columns:
@@ -491,13 +475,10 @@ class TNAccessBlock(Block):
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
-            tx_hash = self.client.insert_records(
-                stream_id=stream_id,
-                records=[]
-            )
+            tx_hashes = self.client.batch_insert_records(batches)
             logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
 
-        return tx_hash
+        return tx_hashes
 
     @handle_tn_errors
     def batch_insert_records_with_external_created_at(
@@ -528,7 +509,6 @@ class TNAccessBlock(Block):
 
         for batch in batches:
             for record in batch["inputs"]:
-                # expected: $data_providers text[], $stream_ids text[], $date_values text[], $values decimal(36,18)[], $external_created_at text[]
                 data_providers.append(batch.get("data_provider", fallback_data_provider))
                 stream_ids.append(batch["stream_id"])
                 date_values.append(record["date"])
@@ -651,8 +631,6 @@ def task_read_records(
     data_provider: Optional[str] = None,
     date_from: Optional[ShortIso8601Date] = None,
     date_to: Optional[ShortIso8601Date] = None,
-    *,  # Force is_unix to be keyword-only
-    is_unix: Literal[False] = False,
 ) -> DataFrame[TnRecordModel]: ...
 
 
@@ -663,8 +641,6 @@ def task_read_records(
     data_provider: Optional[str] = None,
     date_from: Optional[int] = None,
     date_to: Optional[int] = None,
-    *,  # Force is_unix to be keyword-only
-    is_unix: Literal[True],
 ) -> DataFrame[TnRecordModel]: ...
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
@@ -672,10 +648,8 @@ def task_read_records(
         block: TNAccessBlock,
         stream_id: str,
         data_provider: Optional[str] = None,
-        date_from: Union[ShortIso8601Date, int, None] = None,
-        date_to: Union[ShortIso8601Date, int, None] = None,
-        *,  # Force is_unix to be keyword-only
-        is_unix: bool = False,
+        date_from: Union[int, None] = None,
+        date_to: Union[int, None] = None,
 ) -> DataFrame[TnRecordModel]:
     """Read records from TSN with support for both ISO dates and Unix timestamps.
 
@@ -683,9 +657,8 @@ def task_read_records(
         block: The TNAccessBlock instance
         stream_id: The stream ID to read from
         data_provider: Optional data provider
-        date_from: Start date (ISO string or Unix timestamp)
-        date_to: End date (ISO string or Unix timestamp)
-        is_unix: If True, treat dates as Unix timestamps
+        date_from: Start date (Unix timestamp)
+        date_to: End date (Unix timestamp)
 
     Returns:
         DataFrame containing the records
@@ -693,8 +666,8 @@ def task_read_records(
     return block.read_records(
         stream_id=stream_id,
         data_provider=data_provider,
-        date_from=cast(Optional[int], date_from),
-        date_to=cast(Optional[int], date_to),
+        date_from=date_from,
+        date_to=date_to,
     )
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
@@ -702,69 +675,8 @@ def task_insert_tn_records(
     block: TNAccessBlock,
     stream_id: str,
     records: DataFrame[TnRecordModel],
-    data_provider: Optional[str] = None,
-) -> Optional[str]:
-    return block.insert_tn_records(stream_id, records, data_provider)
-
-
-@task(
-    retries=UNUSED_INFINITY_RETRIES,
-    retry_delay_seconds=10,
-    retry_condition_fn=tn_special_retry_condition(5),
-    cache_key_fn=lambda _, args: hash_record_stream_id(args["records"]),
-)
-def task_filter_initialized_streams(
-    block: TNAccessBlock,
-    records: DataFrame[TnDataRowModel],
-    max_depth: int = 5,
-    max_filter_size: int = 100,
-) -> DivideAndConquerResult:
-    """
-    Filter initialized streams from a list of records.
-
-    Args:
-        block: The TN access block to use
-        records: The records to filter
-        max_depth: The maximum recursion depth for divide and conquer
-        max_filter_size: The maximum size for batch filtering
-
-    Returns:
-        A DataFrame of records with initialized streams only
-    """
-    # We'll do the import here to avoid circular imports
-    from .stream_filtering import task_filter_streams_divide_conquer
-
-    logger = get_run_logger()
-    logger.info(f"Filtering {len(records)} records for initialized streams")
-
-    if records.empty:
-        logger.info("No records to filter")
-        return {
-            "initialized_streams": convert_to_typed_df(
-                create_empty_df(["data_provider", "stream_id"]), StreamLocatorModel
-            ),
-            "uninitialized_streams": convert_to_typed_df(
-                create_empty_df(["data_provider", "stream_id"]), StreamLocatorModel
-            ),
-            "depth": 0,
-            "fallback_used": False,
-        }
-
-    stream_locators_typed = extract_stream_locators(records)
-
-    # Use the divide and conquer algorithm
-    result = task_filter_streams_divide_conquer(
-        block=block, stream_locators=stream_locators_typed, max_depth=max_depth, max_filter_size=max_filter_size
-    )
-
-    logger.info(
-        f"Stream filtering complete: {len(result['initialized_streams'])} initialized, "
-        f"{len(result['uninitialized_streams'])} uninitialized, "
-        f"max depth {result['depth']}, fallback used: {result['fallback_used']}"
-    )
-
-    # Return in the expected format
-    return result
+) -> Optional[List[str]]:
+    return block.insert_tn_records(stream_id, records)
 
 
 def hash_record_stream_id(records: DataFrame[TnDataRowModel]) -> str:
@@ -800,7 +712,6 @@ def task_batch_insert_tn_records(
     Args:
         block: The TNAccessBlock instance
         records: DataFrame containing records with stream_id column
-        is_unix: If True, insert unix timestamp records
         wait: Whether to wait for transactions to complete
         has_external_created_at: If True, insert with external created_at timestamps
 
@@ -834,7 +745,7 @@ def task_insert_and_wait_for_tx(
     records: DataFrame[TnRecordModel],
     data_provider: Optional[str] = None,
 ):
-    """Insert unix records into TSN and wait for transaction confirmation"""
+    """Insert records into TSN and wait for transaction confirmation"""
     logging = get_run_logger()
 
     logging.info(f"Inserting {len(records)} records into stream {stream_id}")
@@ -842,7 +753,7 @@ def task_insert_and_wait_for_tx(
         block=block, stream_id=stream_id, records=records, data_provider=data_provider
     )
 
-    if insertion is None:
+    if insertion.result() is None:
         return Completed(message="No records to insert")
 
     try:
