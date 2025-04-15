@@ -32,14 +32,16 @@ from tsn_adapters.blocks.stream_filtering import (
 # Import TNAccessBlock and task_wait_for_tx so that we can use its waiting functionality.
 # Import retry helpers
 from tsn_adapters.blocks.tn_access import (
-    DataFrame,  # Re-import locally if needed
+    DataFrame,
+    StreamAlreadyExistsError,
+    StreamAlreadyInitializedError,  # Re-import locally if needed
     StreamLocatorModel,  # Re-import locally if needed
     TNAccessBlock,
     create_empty_stream_locator_df,
     task_wait_for_tx,
 )
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel
-from tsn_adapters.common.trufnetwork.tn import StreamAlreadyExistsError, task_deploy_primitive, task_init_stream
+from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive, task_init_stream
 from tsn_adapters.utils import cast_future
 
 # Configuration constants
@@ -49,6 +51,7 @@ DEFAULT_BATCH_SIZE = 500
 
 
 # --- Internal Helper Functions for Task Submission ---
+
 
 @task(
     name="Check Deployment State",
@@ -95,7 +98,7 @@ def task_check_exist_deploy_init(
     tna_block: TNAccessBlock,
     is_unix: bool = False,
     force_init_only: bool = False,
-) -> Literal["deployed", "initialized", "failed"]:
+) -> Literal["deployed", "initialized"]:
     """
     Deploys and/or initializes a stream, handling idempotency and state.
 
@@ -107,8 +110,11 @@ def task_check_exist_deploy_init(
 
     Returns:
         "deployed" if deploy+init succeeded,
-        "initialized" if only init was needed (already existed or force_init_only),
-        "failed" if any step failed.
+        "initialized" if only init was needed (already existed or force_init_only).
+
+    Raises:
+        Exception: Any unexpected error will propagate and fail the task (and flow),
+        rather than returning a string literal for failure.
 
     Why:
         Ensures streams are always initialized, even if already deployed, and allows
@@ -118,42 +124,31 @@ def task_check_exist_deploy_init(
     try:
         if force_init_only:
             logger.info(f"Stream {stream_id}: force_init_only=True, skipping deploy and attempting initialization.")
-            init_future = task_init_stream.submit(
-                stream_id=stream_id, block=tna_block, return_state=False
-            )
-            init_wait_future = task_wait_for_tx.submit(
-                tx_hash=cast_future(init_future), block=tna_block
-            )
+            init_future = task_init_stream.submit(stream_id=stream_id, block=tna_block, return_state=False)
+            init_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(init_future), block=tna_block)
             _ = init_wait_future.result(raise_on_failure=True)
             return "initialized"
         try:
-            deploy_future = task_deploy_primitive.submit(
-                stream_id=stream_id, block=tna_block, is_unix=is_unix
-            )
-            deploy_wait_future = task_wait_for_tx.submit(
-                tx_hash=cast_future(deploy_future), block=tna_block
-            )
+            deploy_future = task_deploy_primitive.submit(stream_id=stream_id, block=tna_block, is_unix=is_unix)
+            deploy_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(deploy_future), block=tna_block)
             init_future = task_init_stream.submit(
                 stream_id=stream_id, block=tna_block, return_state=False, wait_for=cast_future(deploy_wait_future)
             )
-            init_wait_future = task_wait_for_tx.submit(
-                tx_hash=cast_future(init_future), block=tna_block
-            )
+            init_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(init_future), block=tna_block)
             _ = init_wait_future.result(raise_on_failure=True)
             return "deployed"
         except StreamAlreadyExistsError:
             logger.info(f"Stream {stream_id} already exists, attempting initialization.")
-            init_future = task_init_stream.submit(
-                stream_id=stream_id, block=tna_block, return_state=False
-            )
-            init_wait_future = task_wait_for_tx.submit(
-                tx_hash=cast_future(init_future), block=tna_block
-            )
+            init_future = task_init_stream.submit(stream_id=stream_id, block=tna_block, return_state=False)
+            init_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(init_future), block=tna_block)
             _ = init_wait_future.result(raise_on_failure=True)
             return "initialized"
+    except StreamAlreadyInitializedError:
+        logger.info(f"Stream {stream_id} already initialized.")
+        return "initialized"
     except Exception as e:
         logger.error(f"Failed to deploy/init stream {stream_id}: {e}")
-        return "failed"
+        raise e
 
 
 class DeployStreamResult(TypedDict):
@@ -262,7 +257,7 @@ def deploy_streams_flow(
     total_streams = len(descriptor_df)
     total_deployed = 0
     total_skipped_state = 0
-    total_skipped_already_initialized = 0 
+    total_skipped_already_initialized = 0
 
     num_batches = (len(descriptor_df) + batch_size - 1) // batch_size
     logger.info(f"Processing {total_streams} streams in {num_batches} batches of size {batch_size}.")
@@ -430,16 +425,16 @@ def deploy_streams_flow(
                     if result in ("deployed", "initialized"):
                         stream_final_status[stream_id] = True
                         logger.debug(f"Batch {i+1}: Stream {stream_id} processed successfully ({result}).")
-                    else:
-                        stream_final_status[stream_id] = False
-                        logger.error(f"Batch {i+1}: Stream {stream_id} failed with status: {result}")
                 except Exception as wait_err:
-                    logger.error(f"Batch {i+1}: Failed processing stream {stream_id}: {wait_err!s}", exc_info=False)
-                    stream_final_status[stream_id] = False
+                    logger.error(f"Batch {i+1}: Failed processing stream {stream_id}: {wait_err!s}", exc_info=True)
+                    # Fail fast: re-raise the exception to fail the flow
+                    raise
 
             successfully_processed_in_batch_ids = [sid for sid, success in stream_final_status.items() if success]
             failed_count_batch = len(final_wait_futures_map) - len(successfully_processed_in_batch_ids)
-            logger.info(f"Batch {i+1}: Processing complete. Successfully processed: {len(successfully_processed_in_batch_ids)}, Failed: {failed_count_batch}")
+            logger.info(
+                f"Batch {i+1}: Processing complete. Successfully processed: {len(successfully_processed_in_batch_ids)}, Failed: {failed_count_batch}"
+            )
         else:
             logger.info(f"Batch {i+1}: No tasks submitted or all submission failed.")
 
