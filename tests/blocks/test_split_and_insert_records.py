@@ -34,8 +34,7 @@ def test_stream_ids(tn_block: TNAccessBlock, helper_contract_id: str) -> Generat
     # Deploy streams
     client = tn_block.get_client()
     for stream_id in stream_ids:
-        client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitiveUnix, wait=True)
-        client.init_stream(stream_id, wait=True)
+        client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=True)
 
     yield stream_ids
 
@@ -204,11 +203,11 @@ class TestSplitAndInsertRecords:
         assert "invalid_stream_id" in results["failed_records"]["stream_id"].values
 
         # Verify error messages without iterating over potentially None value
-        if isinstance(results.get("failed_reasons"), list) and len(results.get("failed_reasons", [])) > 0:
+        if results.get("failed_reasons") and len(results.get("failed_reasons", [])) > 0:
             # At least one error message should contain "invalid stream id"
             found_invalid_message = False
             for reason in results.get("failed_reasons", []):
-                if isinstance(reason, str) and "invalid stream id" in reason:
+                if reason and "invalid stream id" in reason:
                     found_invalid_message = True
                     break
             assert found_invalid_message, "Expected to find 'invalid stream id' in error messages"
@@ -234,7 +233,7 @@ class TestSplitAndInsertRecords:
         ]
 
         for stream_id in uninitialized_stream_ids:
-            client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitiveUnix, wait=True)
+            client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=True)
             # Deliberately not initializing these streams
 
         # Generate non-existent stream IDs
@@ -360,7 +359,7 @@ class TestSplitAndInsertRecords:
         ]
 
         for stream_id in uninitialized_stream_ids:
-            client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitiveUnix, wait=True)
+            client.deploy_stream(stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=True)
             # Deliberately not initializing
 
         # Combine all stream ids
@@ -469,7 +468,7 @@ class TestSplitAndInsertRecords:
         # Create a stream that exists but isn't initialized
         uninitialized_stream_id = generate_stream_id("uninitialized_test_stream")
         client = tn_block.get_client()
-        client.deploy_stream(uninitialized_stream_id, stream_type=truf_sdk.StreamTypePrimitiveUnix, wait=True)
+        client.deploy_stream(uninitialized_stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=True)
         # Don't initialize it
 
         # Create records for uninitialized and non-existent streams

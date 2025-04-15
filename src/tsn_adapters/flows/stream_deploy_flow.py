@@ -35,7 +35,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 # Import TNAccessBlock and task_wait_for_tx so that we can use its waiting functionality.
 from tsn_adapters.blocks.tn_access import TNAccessBlock, task_filter_batch_initialized_streams, task_wait_for_tx
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel
-from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive, task_init_stream
+from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive
 
 # Configuration constants
 DEFAULT_RETRY_ATTEMPTS = 3
@@ -91,15 +91,10 @@ def check_deploy_and_init_stream(stream_id: str, tna_block: TNAccessBlock, is_un
     # Deploy the stream if it doesn't exist
     logger.debug(f"Deploying stream {stream_id}.")
 
-    # Step 1: Create deployment transaction and wait for confirmation
+    # Create deployment transaction and wait for confirmation
     tx_deploy = task_deploy_primitive(block=tna_block, stream_id=stream_id, wait=False, is_unix=is_unix)
     task_wait_for_tx(block=tna_block, tx_hash=tx_deploy)
     logger.debug(f"Deployed stream {stream_id} (tx: {tx_deploy}).")
-
-    # Step 2: Initialize the stream and wait for confirmation
-    tx_init = task_init_stream(block=tna_block, stream_id=stream_id, wait=False)
-    task_wait_for_tx(block=tna_block, tx_hash=tx_init)
-    logger.debug(f"Initialized stream {stream_id} (tx: {tx_init}).")
 
     return DeployStreamResult(stream_id=stream_id, status="deployed")
 
