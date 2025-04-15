@@ -2,18 +2,17 @@ import os
 from typing import Optional
 
 import pandas as pd
-from prefect import flow, task, get_run_logger
+from prefect import flow, task
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
 
-from tsn_adapters.blocks.tn_access import UNUSED_INFINITY_RETRIES, TNAccessBlock, tn_special_retry_condition
-
-
-class StreamAlreadyExistsError(Exception):
-    """Custom exception raised when attempting to deploy a stream that already exists."""
-    def __init__(self, stream_id: str):
-        self.stream_id = stream_id
-        super().__init__(f"Stream '{stream_id}' already exists.")
+from tsn_adapters.blocks.tn_access import (
+    UNUSED_INFINITY_RETRIES,
+    StreamAlreadyExistsError,
+    TNAccessBlock,
+    tn_special_retry_condition,
+)
+from tsn_adapters.utils.logging import get_logger_safe
 
 
 @task(
@@ -107,7 +106,7 @@ def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = Tru
         StreamAlreadyExistsError: If the stream already exists.
         Exception: For other deployment errors after retries.
     """
-    logger = get_run_logger()
+    logger = get_logger_safe()
     stream_type = truf_sdk.StreamTypePrimitive if not is_unix else truf_sdk.StreamTypePrimitiveUnix
     try:
         logger.debug(f"Attempting to deploy stream {stream_id} (type: {stream_type}, wait: {wait})")
@@ -118,18 +117,13 @@ def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = Tru
         )
         logger.debug(f"Created TX for stream deployment {stream_id} (tx: {tx_hash}, wait: {wait})")
         return tx_hash
+    except StreamAlreadyExistsError as e:
+        logger.info(f"Stream {stream_id} already exists. Skipping deployment.")
+        raise e
     except Exception as e:
-        # Check if the error message indicates the stream already exists
-        # Note: The exact error message string might need verification based on the SDK
-        error_msg = str(e).lower()
-        if "dataset exists" in error_msg:
-            logger.info(f"Stream {stream_id} already exists. Skipping deployment.")
-            # Raise specific error instead of returning string
-            raise StreamAlreadyExistsError(stream_id)
-        else:
-            # For any other error, re-raise it to be handled by Prefect's retry mechanism
-            logger.error(f"Error deploying stream {stream_id}: {e!s}", exc_info=True)
-            raise e
+        # For any other error, re-raise it to be handled by Prefect's retry mechanism
+        logger.error(f"Error deploying stream {stream_id}: {e!s}", exc_info=True)
+        raise e
 
 
 @task(

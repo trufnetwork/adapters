@@ -6,13 +6,14 @@ using various strategies, including a divide-and-conquer approach.
 """
 
 import traceback
-from typing import Any, Optional, cast, TypedDict
+from typing import Optional, TypedDict, cast
 
 import pandas as pd
-from prefect import get_run_logger, task
+from prefect import task
 
 from tsn_adapters.blocks.shared_types import DivideAndConquerResult
 from tsn_adapters.blocks.tn_access import (
+    UNUSED_INFINITY_RETRIES,
     DataFrame,
     MetadataProcedureNotFoundError,
     StreamLocatorModel,
@@ -24,9 +25,9 @@ from tsn_adapters.blocks.tn_access import (
     diff_stream_locator_sets,
     get_stream_locator_set,
     task_filter_batch_initialized_streams,
-    UNUSED_INFINITY_RETRIES,
     tn_special_retry_condition,
 )
+from tsn_adapters.utils.logging import get_logger_safe
 
 
 class StreamStatesResult(TypedDict):
@@ -43,7 +44,6 @@ def fallback_method_filter_streams(
     block: TNAccessBlock,
     stream_locators: DataFrame[StreamLocatorModel],
     current_depth: int,
-    logger: Any,
 ) -> DivideAndConquerResult:
     """
     Filter streams using a fallback method, checking one by one.
@@ -54,11 +54,11 @@ def fallback_method_filter_streams(
         block: TNAccessBlock instance
         stream_locators: DataFrame of stream locators
         current_depth: Current recursion depth
-        logger: Logger instance
 
     Returns:
         DivideAndConquerResult with initialized and uninitialized streams
     """
+    logger = get_logger_safe(__name__)
     logger.debug(f"Using fallback method for {len(stream_locators)} streams at depth {current_depth}")
 
     # Initialize empty DataFrames for results
@@ -73,7 +73,6 @@ def fallback_method_filter_streams(
         else:
             all_uninitialized = cast(DataFrame[StreamLocatorModel], append_to_df(all_uninitialized, row))
 
-
     # check the using batch since now we know which streams exist
     if not all_exist.empty:
         batch_result = task_filter_batch_initialized_streams(block=block, stream_locators=all_exist)
@@ -81,7 +80,7 @@ def fallback_method_filter_streams(
         if not batch_result.empty:
             # add to initialized
             all_initialized = cast(DataFrame[StreamLocatorModel], pd.concat([all_initialized, batch_result]))
-    
+
     # append the ones that exist but are not initialized to the uninitialized
     exist_but_uninitialized = all_exist[~all_exist["stream_id"].isin(all_initialized["stream_id"])]
     all_uninitialized = cast(DataFrame[StreamLocatorModel], pd.concat([all_uninitialized, exist_but_uninitialized]))
@@ -102,7 +101,6 @@ def batch_method_filter_streams(
     block: TNAccessBlock,
     stream_locators: DataFrame[StreamLocatorModel],
     current_depth: int,
-    logger: Any,
 ) -> Optional[DivideAndConquerResult]:
     """
     Filter streams using the batch method.
@@ -111,11 +109,11 @@ def batch_method_filter_streams(
         block: TNAccessBlock instance
         stream_locators: DataFrame of stream locators to check
         current_depth: Current recursion depth
-        logger: Logger instance
 
     Returns:
         DivideAndConquerResult with initialized and uninitialized streams, or None if batch method fails
     """
+    logger = get_logger_safe(__name__)
     try:
         # Try to use the batch method
         logger.debug(f"Attempting batch method for {len(stream_locators)} streams")
@@ -169,7 +167,6 @@ def batch_method_filter_streams(
 def combine_divide_conquer_results(
     left_result: DivideAndConquerResult,
     right_result: DivideAndConquerResult,
-    logger: Any,
 ) -> DivideAndConquerResult:
     """
     Combine the results of two divide-and-conquer operations.
@@ -177,11 +174,11 @@ def combine_divide_conquer_results(
     Args:
         left_result: Result from the left half
         right_result: Result from the right half
-        logger: Logger instance
 
     Returns:
         Combined DivideAndConquerResult
     """
+    logger = get_logger_safe(__name__)
     # Combine the results
     initialized_streams_list = [left_result["initialized_streams"], right_result["initialized_streams"]]
 
@@ -247,7 +244,7 @@ def task_filter_streams_divide_conquer(
     Returns:
         DivideAndConquerResult with initialized and uninitialized streams
     """
-    logger = get_run_logger()
+    logger = get_logger_safe(__name__)
     stream_ids: list[str] = stream_locators["stream_id"].tolist() if not stream_locators.empty else []
     logger.info(
         f"Filtering {len(stream_locators)} streams at depth {current_depth}: {stream_ids[:5]}{'...' if len(stream_ids) > 5 else ''}"
@@ -263,12 +260,12 @@ def task_filter_streams_divide_conquer(
 
     # Base case: max depth reached or only one stream left
     if current_depth >= max_depth or len(stream_locators) == 1:
-        return fallback_method_filter_streams(block, stream_locators, current_depth, logger)
+        return fallback_method_filter_streams(block, stream_locators, current_depth)
 
     # If the number of streams exceeds max_filter_size, skip the batch method and go straight to divide-and-conquer
     if not force_fallback and len(stream_locators) <= max_filter_size:
         # Try the batch method first, if it succeeds, return the result
-        batch_result = batch_method_filter_streams(block, stream_locators, current_depth, logger)
+        batch_result = batch_method_filter_streams(block, stream_locators, current_depth)
         if batch_result:
             return batch_result
 
@@ -317,7 +314,7 @@ def task_filter_streams_divide_conquer(
             left_result = left.result()
             right_result = right.result()
 
-            return combine_divide_conquer_results(left_result, right_result, logger)
+            return combine_divide_conquer_results(left_result, right_result)
 
         except Exception as e:
             logger.error(f"Error in divide-and-conquer recursive call: {e!s}")
@@ -372,7 +369,7 @@ def task_get_stream_states_divide_conquer(
     Returns:
         A StreamStatesResult TypedDict containing partitioned DataFrames for each state.
     """
-    logger = get_run_logger()
+    logger = get_logger_safe(__name__)
     logger.info(
         f"Getting stream states for {len(stream_locators)} streams at depth {current_depth}. "
         f"Max depth: {max_depth}, Force fallback: {force_fallback}, Max filter size: {max_filter_size}"
@@ -414,7 +411,9 @@ def task_get_stream_states_divide_conquer(
             uninitialized_data = diff_stream_locator_sets(all_input_set, initialized_set)
 
             deployed_but_not_initialized_df = convert_to_typed_df(
-                pd.DataFrame(uninitialized_data) if uninitialized_data else create_empty_df(["data_provider", "stream_id"]),
+                pd.DataFrame(uninitialized_data)
+                if uninitialized_data
+                else create_empty_df(["data_provider", "stream_id"]),
                 StreamLocatorModel,
             )
 
@@ -424,7 +423,7 @@ def task_get_stream_states_divide_conquer(
             )
 
             return StreamStatesResult(
-                non_deployed=create_empty_stream_locator_df(), # Batch success implies all exist
+                non_deployed=create_empty_stream_locator_df(),  # Batch success implies all exist
                 deployed_but_not_initialized=deployed_but_not_initialized_df,
                 deployed_and_initialized=deployed_and_initialized_df,
                 depth=current_depth,
@@ -508,7 +507,7 @@ def task_get_stream_states_divide_conquer(
                     "Assuming all provisionally existing streams are deployed_but_not_initialized."
                 )
                 deployed_but_not_initialized_df = provisionally_existing_df
-                deployed_and_initialized_df = create_empty_stream_locator_df() # Ensure it's empty
+                deployed_and_initialized_df = create_empty_stream_locator_df()  # Ensure it's empty
             except Exception as e:
                 # Handle other potential errors during batch initialization check
                 logger.error(
@@ -517,7 +516,7 @@ def task_get_stream_states_divide_conquer(
                     exc_info=True,
                 )
                 deployed_but_not_initialized_df = provisionally_existing_df
-                deployed_and_initialized_df = create_empty_stream_locator_df() # Ensure it's empty
+                deployed_and_initialized_df = create_empty_stream_locator_df()  # Ensure it's empty
 
         # 3. Combine results
         non_deployed_df = convert_to_typed_df(
@@ -540,7 +539,7 @@ def task_get_stream_states_divide_conquer(
         )
 
     # --- Divide and Recurse (Step 5) ---
-    else: # Neither batch success nor fallback condition met
+    else:  # Neither batch success nor fallback condition met
         logger.debug(f"Dividing {len(stream_locators)} streams for recursive state check at depth {current_depth}.")
         mid = len(stream_locators) // 2
         left_half = stream_locators.iloc[:mid]
@@ -582,9 +581,7 @@ def task_get_stream_states_divide_conquer(
         return combined_result
 
 
-def _combine_stream_states_results(
-    left: StreamStatesResult, right: StreamStatesResult
-) -> StreamStatesResult:
+def _combine_stream_states_results(left: StreamStatesResult, right: StreamStatesResult) -> StreamStatesResult:
     """Helper function to combine two StreamStatesResult objects."""
     combined_non_deployed = pd.concat([left["non_deployed"], right["non_deployed"]])
     combined_dep_not_init = pd.concat([left["deployed_but_not_initialized"], right["deployed_but_not_initialized"]])
@@ -599,8 +596,8 @@ def _combine_stream_states_results(
         non_deployed=non_deployed_typed,
         deployed_but_not_initialized=dep_not_init_typed,
         deployed_and_initialized=dep_and_init_typed,
-        depth=max(left["depth"], right["depth"]), # Depth is max of branches
-        fallback_used=left["fallback_used"] or right["fallback_used"], # Fallback if used in either branch
+        depth=max(left["depth"], right["depth"]),  # Depth is max of branches
+        fallback_used=left["fallback_used"] or right["fallback_used"],  # Fallback if used in either branch
     )
 
 
