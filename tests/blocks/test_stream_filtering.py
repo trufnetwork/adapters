@@ -1,6 +1,6 @@
 """Unit tests for the stream filtering functionality."""
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from src.tsn_adapters.blocks.stream_filtering import (

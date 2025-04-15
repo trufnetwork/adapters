@@ -65,10 +65,6 @@ class TestTNClient(tn_client.TNClient):
         self.existing_streams.add(stream_id)
         return "dummy_tx_hash"
 
-    def init_stream(self, stream_id: str, wait: bool = True) -> str:
-        # Simulate a successful stream initialization
-        return "dummy_tx_hash"
-
     def wait_for_tx(self, tx_hash: str) -> None:
         if tx_hash == "failed_tx_hash":
             raise Exception("Failed to deploy stream")

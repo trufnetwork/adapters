@@ -34,7 +34,6 @@ def deployed_test_stream_id(tn_block: TNAccessBlock, test_stream_id: str):
     """Deploys and initializes a test stream."""
     client = tn_block.get_client()
     client.deploy_stream(test_stream_id, wait=True)
-    client.init_stream(test_stream_id, wait=True)
     yield test_stream_id
     tn_block.destroy_stream(test_stream_id)
 
@@ -81,8 +80,7 @@ def unix_test_stream_id() -> str:
 def deployed_unix_test_stream_id(tn_block: TNAccessBlock, unix_test_stream_id: str, helper_contract_id: str):
     """Deploys and initializes a test stream for Unix timestamps."""
     client = tn_block.get_client()
-    client.deploy_stream(unix_test_stream_id, wait=True, stream_type=truf_sdk.StreamTypePrimitiveUnix)
-    client.init_stream(unix_test_stream_id, wait=True)
+    client.deploy_stream(unix_test_stream_id, wait=True, stream_type=truf_sdk.StreamTypePrimitive)
     yield unix_test_stream_id
     tn_block.destroy_stream(unix_test_stream_id)
 

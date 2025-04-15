@@ -487,7 +487,6 @@ def disable_prefect_retries():
         # TN Common
         "tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records",
         "tsn_adapters.common.trufnetwork.tn.task_deploy_primitive",
-        "tsn_adapters.common.trufnetwork.tn.task_init_stream",
         "tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records",
         # GSheet Tasks
         "tsn_adapters.tasks.gsheet.task_read_gsheet",
@@ -589,7 +588,7 @@ def deploy_helper_contract(tn_block: TNAccessBlock, helper_stream_id: str):
 
     # Try to deploy helper contract
     try:
-        client.deploy_stream(helper_stream_id, stream_type=truf_sdk.StreamTypeHelper, wait=True)
+        client.deploy_stream(helper_stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=True)
     except Exception as e:
         if "dataset exists" not in str(e) and "already exists" not in str(e):
             raise e

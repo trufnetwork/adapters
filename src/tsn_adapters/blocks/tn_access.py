@@ -720,11 +720,6 @@ class TNAccessBlock(Block):
             return self.client.deploy_stream(stream_id, stream_type, wait)
 
     @handle_tn_errors
-    def init_stream(self, stream_id: str, wait: bool = True) -> str:
-        with concurrency("tn-write", occupy=1):
-            return self.client.init_stream(stream_id, wait)
-
-    @handle_tn_errors
     def destroy_stream(self, stream_id: str, wait: bool = True) -> str:
         """Destroy a stream with the given stream ID.
 
