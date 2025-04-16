@@ -134,7 +134,7 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
     """
     logger = get_logger_safe(__name__)
     try:
-        return tn_block.get_earliest_date(stream_id=stream_id, is_unix=True)
+        return tn_block.get_earliest_date(stream_id=stream_id)
     except TNAccessBlock.StreamNotFoundError:
         logger.warning(f"Stream {stream_id} not found")
         raise  # Re-raise the StreamNotFoundError
@@ -455,7 +455,7 @@ async def historical_flow(
 
         # Skip the first n tickers
         if start_from_n_ticker > 0:
-            descriptor_df = cast(DataFrame[PrimitiveSourceDataModel], descriptor_df.iloc[start_from_n_ticker:])
+            descriptor_df = descriptor_df.iloc[start_from_n_ticker:]
 
         # Create and run the reactive pipeline
         run_ticker_pipeline(
