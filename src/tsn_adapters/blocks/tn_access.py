@@ -133,6 +133,10 @@ def handle_tn_errors(func: F) -> F:
                 raise TNDbTimeoutError.from_error(e)
             if MetadataProcedureNotFoundError.is_metadata_procedure_not_found_error(e):
                 raise MetadataProcedureNotFoundError.from_error(e)
+            if StreamAlreadyExistsError.is_stream_already_exists_error(e):
+                raise StreamAlreadyExistsError.from_error(e)
+            if StreamAlreadyInitializedError.is_stream_already_initialized_error(e):
+                raise StreamAlreadyInitializedError.from_error(e)
             raise
 
     return cast(F, wrapper)
@@ -161,7 +165,7 @@ def tn_special_retry_condition(max_other_error_retries: int) -> Any:
         except (TNNodeNetworkError, TNDbTimeoutError):
             # Always retry on network and DB timeout errors.
             return True
-        except (MetadataProcedureNotFoundError,):
+        except (MetadataProcedureNotFoundError, StreamAlreadyExistsError, StreamAlreadyInitializedError):
             # This won't change with retries.
             return False
         except Exception:
@@ -252,6 +256,83 @@ class MetadataProcedureNotFoundError(Exception):
         if isinstance(error, RuntimeError) and "get_metadata" in str(error) and "not found in schema" in str(error):
             return cls(str(error))
         raise error
+
+
+class StreamAlreadyExistsError(Exception):
+    """Custom exception raised when attempting to deploy a stream that already exists."""
+    def __init__(self, stream_id: str):
+        self.stream_id = stream_id
+        super().__init__(f"Stream '{stream_id}' already exists.")
+
+    @classmethod
+    def from_error(cls, error: Exception) -> "StreamAlreadyExistsError":
+        """
+        Convert a generic exception to StreamAlreadyExistsError if the error message matches.
+        """
+        if isinstance(error, StreamAlreadyExistsError):
+            return error
+        msg = str(error).lower()
+        import re
+        # Match "transaction failed: dataset exists: <stream_id>"
+        match = re.search(r"dataset exists: ([a-z0-9]+)", msg)
+        if match:
+            stream_id = match.group(1)
+            return cls(stream_id)
+        if (
+            isinstance(error, RuntimeError) and ("dataset exists" in msg or "already exists" in msg)
+        ):
+            # Try to extract stream_id if possible, else use a placeholder
+            import re
+            match = re.search(r"stream '([^']+)' already exists", str(error))
+            stream_id = match.group(1) if match else "unknown"
+            return cls(stream_id)
+        raise error
+
+    @classmethod
+    def is_stream_already_exists_error(cls, error: Exception) -> bool:
+        """
+        Check if the given exception is a StreamAlreadyExistsError or matches its error pattern.
+        """
+        try:
+            cls.from_error(error)
+            return True
+        except Exception:
+            return False
+
+
+class StreamAlreadyInitializedError(Exception):
+    """Custom exception raised when attempting to initialize a stream that is already initialized."""
+    def __init__(self, stream_id: str):
+        self.stream_id = stream_id
+        super().__init__(f"Stream '{stream_id}' is already initialized.")
+
+    @classmethod
+    def from_error(cls, error: Exception) -> "StreamAlreadyInitializedError":
+        """
+        Convert a generic exception to StreamAlreadyInitializedError if the error message matches.
+        """
+        if isinstance(error, StreamAlreadyInitializedError):
+            return error
+        msg = str(error).lower()
+        if (
+            isinstance(error, RuntimeError) and ("already initialized" in msg)
+        ):
+            import re
+            match = re.search(r"stream '([^']+)' is already initialized", str(error))
+            stream_id = match.group(1) if match else "unknown"
+            return cls(stream_id)
+        raise error
+
+    @classmethod
+    def is_stream_already_initialized_error(cls, error: Exception) -> bool:
+        """
+        Check if the given exception is a StreamAlreadyInitializedError or matches its error pattern.
+        """
+        try:
+            cls.from_error(error)
+            return True
+        except Exception:
+            return False
 
 
 class TNAccessBlock(Block):
