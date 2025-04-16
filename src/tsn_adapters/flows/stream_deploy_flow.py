@@ -140,14 +140,12 @@ def task_check_exist_deploy_init(
                 wait_for=cast_future(deploy_wait_future),
                 wait=False,
             )
-            init_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(init_future), block=tna_block)
-            _ = init_wait_future.result(raise_on_failure=True)
+            task_wait_for_tx(tx_hash=cast_future(init_future), block=tna_block)
             return "deployed"
         except StreamAlreadyExistsError:
             logger.info(f"Stream {stream_id} already exists, attempting initialization.")
             init_future = task_init_stream.submit(stream_id=stream_id, block=tna_block, return_state=False, wait=False)
-            init_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(init_future), block=tna_block)
-            _ = init_wait_future.result(raise_on_failure=True)
+            task_wait_for_tx(tx_hash=cast_future(init_future), block=tna_block)
             return "initialized"
     except StreamAlreadyInitializedError:
         logger.info(f"Stream {stream_id} already initialized.")
