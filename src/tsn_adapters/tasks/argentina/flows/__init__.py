@@ -34,10 +34,12 @@ Usage:
 
 from .preprocess_flow import preprocess_flow, PreprocessFlow
 from .ingest_flow import ingest_flow, IngestFlow
+from .aggregate_products_flow import aggregate_argentina_products_flow
 
 __all__ = [
     "preprocess_flow",
     "PreprocessFlow",
     "ingest_flow",
     "IngestFlow",
+    "aggregate_argentina_products_flow",
 ]

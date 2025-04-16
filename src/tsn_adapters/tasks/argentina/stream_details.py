@@ -2,7 +2,7 @@
 Stream details fetcher implementations.
 """
 
-from typing import Literal, cast
+from typing import Literal, TypeGuard, cast
 
 from prefect import task
 
@@ -18,6 +18,10 @@ from tsn_adapters.tasks.argentina.types import StreamSourceMapDF
 
 PrimitiveSourcesTypeStr = Literal["url", "github"]
 
+def is_valid_source_type(source_type: str) -> TypeGuard[PrimitiveSourcesTypeStr]:
+    """Check if the source type is valid."""
+    valid_types = ("url", "github")
+    return source_type in valid_types
 
 class GitHubStreamDetailsFetcher(IStreamSourceMapFetcher):
     """Fetches stream details from a GitHub source."""
@@ -46,7 +50,7 @@ class GitHubStreamDetailsFetcher(IStreamSourceMapFetcher):
 
         # Validate and coerce using the model
         validated_df = StreamSourceMetadataModel.validate(source_metadata_df)
-        return cast(StreamSourceMapDF, validated_df)
+        return validated_df
 
 
 class URLStreamDetailsFetcher(IStreamSourceMapFetcher):
@@ -76,7 +80,7 @@ class URLStreamDetailsFetcher(IStreamSourceMapFetcher):
 
         # Validate and coerce using the model
         validated_df = StreamSourceMetadataModel.validate(source_metadata_df)
-        return cast(StreamSourceMapDF, validated_df)
+        return validated_df
 
 
 @task(name="Create Stream Details Fetcher")

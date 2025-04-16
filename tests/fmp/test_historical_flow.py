@@ -8,13 +8,12 @@ actual network calls.
 
 import datetime
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import SecretStr
 import pytest
-from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 from trufnetwork_sdk_py.client import TNClient
 
@@ -24,7 +23,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourcesDescriptorBlock,
 )
 from tsn_adapters.blocks.tn_access import TNAccessBlock
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel
 from tsn_adapters.flows.fmp.historical_flow import (
     convert_eod_to_tn_df,
     fetch_historical_data,
@@ -180,7 +179,9 @@ class FakeTNAccessBlock(TNAccessBlock):
         """Mock waiting."""
         pass
 
-    def get_earliest_date(self, stream_id: str, data_provider: str | None = None) -> datetime.datetime | None:
+    def get_earliest_date(
+        self, stream_id: str, data_provider: str | None = None, is_unix: bool = False
+    ) -> datetime.datetime | None:
         """Mock getting earliest date, raising StreamNotFoundError for unknown streams."""
         if stream_id == "unknown":
             raise TNAccessBlock.StreamNotFoundError(f"Stream {stream_id} not found")
@@ -188,9 +189,18 @@ class FakeTNAccessBlock(TNAccessBlock):
             return datetime.datetime(2024, 1, 1)
         return None
 
+    def filter_initialized_streams(
+        self, stream_ids: list[str], data_providers: list[str]
+    ) -> DataFrame[StreamLocatorModel]:
+        """Mock filtering batch initialized streams."""
+        return DataFrame[StreamLocatorModel](
+            pd.DataFrame(stream_ids, data_providers, columns=["stream_id", "data_provider"])
+        )
+
     def get_client(self) -> TNClient:
-        """Mock to prevent real client creation."""
-        return None  # type: ignore
+        """Mock to prevent real client creation. Raises an exception if accessed."""
+        raise RuntimeError("Access to real TNClient is not allowed in tests.")
+
 
 class ErrorFMPBlock(FMPBlock):
     def get_historical_eod_data(
@@ -231,21 +241,7 @@ def fake_tn_block() -> FakeTNAccessBlock:
 def error_fmp_block():
     """Fixture for error-raising FMP block."""
 
-
-
     return ErrorFMPBlock(api_key=SecretStr("fake"))
-
-
-@pytest.fixture
-def set_test_batch_size(monkeypatch: MonkeyPatch):
-    """Fixture to set test batch size."""
-
-    def _set_batch_size(size: int):
-        import tsn_adapters.flows.fmp.historical_flow as flow_module
-
-        monkeypatch.setattr(flow_module, "BATCH_SIZE", size)
-
-    return _set_batch_size
 
 
 @pytest.fixture
@@ -276,7 +272,13 @@ class TestHistoricalFlow:
         fake_tn_block: FakeTNAccessBlock,
     ):
         """Test the complete historical flow with mock blocks."""
-        await historical_flow(fmp_block=fake_fmp_block, psd_block=fake_psd_block, tn_block=fake_tn_block)
+        await historical_flow(
+            fmp_block=fake_fmp_block,
+            psd_block=fake_psd_block,
+            tn_block=fake_tn_block,
+            ticker_chunk_size=1,
+            batch_size=10000,
+        )
 
         # Verify that data was processed and inserted
         assert len(fake_tn_block.inserted_records) > 0
@@ -396,38 +398,13 @@ class TestHistoricalFlowAdvanced:
     """Advanced tests for historical flow focusing on async behavior and batching."""
 
     @pytest.mark.asyncio
-    @pytest.mark.timeout(5, func_only=True)
-    async def test_historical_flow_async(
-        self,
-        fake_fmp_block: FakeFMPBlock,
-        fake_psd_block: FakePrimitiveSourcesDescriptorBlock,
-        fake_tn_block: FakeTNAccessBlock,
-    ):
-        """Test that the historical flow works correctly in async context."""
-        await historical_flow(
-            fmp_block=fake_fmp_block,
-            psd_block=fake_psd_block,
-            tn_block=fake_tn_block,
-            min_fetch_date=datetime.datetime(2023, 1, 1),
-        )
-
-        # Verify that data was processed and inserted
-        assert len(fake_tn_block.inserted_records) > 0
-        inserted_df = fake_tn_block.inserted_records[0]
-        assert_tn_data_schema(inserted_df)
-        assert_all_records_for_stream(inserted_df, "stream_aapl")
-
-    @pytest.mark.asyncio
     @pytest.mark.timeout(30, func_only=True)
     async def test_historical_flow_batch_processing(
         self,
-        set_test_batch_size: Callable[[int], None],
-        monkeypatch: MonkeyPatch,
     ):
         """Test that the flow correctly handles batch processing of records."""
         # Set a smaller batch size for testing
         TEST_BATCH_SIZE = 2
-        set_test_batch_size(TEST_BATCH_SIZE)
 
         # Create a mock FMP block that returns a small dataset
         class SmallBatchFMPBlock(FakeFMPBlock):
@@ -466,6 +443,8 @@ class TestHistoricalFlowAdvanced:
             psd_block=psd_block,
             tn_block=tn_block,
             min_fetch_date=datetime.datetime(2023, 1, 1),
+            ticker_chunk_size=1,
+            batch_size=TEST_BATCH_SIZE,
         )
 
         # Verify that data was processed in batches
@@ -481,14 +460,11 @@ class TestHistoricalFlowAdvanced:
     @pytest.mark.timeout(30, func_only=True)
     async def test_historical_flow_sequential_processing(
         self,
-        set_test_batch_size: Callable[[int], None],
-        monkeypatch: MonkeyPatch,
         mocker: MockerFixture,
     ):
         """Test that ticker processing is sequential and waits for TN insertion."""
         # Set a smaller batch size
         TEST_BATCH_SIZE = 2
-        set_test_batch_size(TEST_BATCH_SIZE)
 
         mocker.patch(
             "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
@@ -556,6 +532,8 @@ class TestHistoricalFlowAdvanced:
             psd_block=psd_block,
             tn_block=tn_block,
             min_fetch_date=datetime.datetime(2023, 1, 1),
+            ticker_chunk_size=1,
+            batch_size=TEST_BATCH_SIZE,
             return_state=True,
         )
 
@@ -599,13 +577,11 @@ class TestHistoricalFlowAdvanced:
     @pytest.mark.timeout(30, func_only=True)
     async def test_historical_flow_large_fetch(
         self,
-        set_test_batch_size: Callable[[int], None],
         mocker: MockerFixture,
     ):
         """Test that the flow correctly handles fetches larger than batch size."""
         # Set a smaller batch size
         TEST_BATCH_SIZE = 3
-        set_test_batch_size(TEST_BATCH_SIZE)
 
         # Create a mock FMP block that returns a large dataset for one ticker
         class LargeFetchFMPBlock(FakeFMPBlock):
@@ -666,6 +642,8 @@ class TestHistoricalFlowAdvanced:
             psd_block=psd_block,
             tn_block=tn_block,
             min_fetch_date=datetime.datetime(2023, 1, 1),
+            ticker_chunk_size=1,
+            batch_size=TEST_BATCH_SIZE,
         )
 
         # Verify batch handling

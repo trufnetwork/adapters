@@ -6,7 +6,13 @@ from prefect import flow, task
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
 
-from tsn_adapters.blocks.tn_access import UNUSED_INFINITY_RETRIES, TNAccessBlock, tn_special_retry_condition
+from tsn_adapters.blocks.tn_access import (
+    UNUSED_INFINITY_RETRIES,
+    StreamAlreadyExistsError,
+    TNAccessBlock,
+    tn_special_retry_condition,
+)
+from tsn_adapters.utils.logging import get_logger_safe
 
 
 @task(
@@ -91,12 +97,33 @@ def get_all_tsn_records(
     tags=["tn", "tn-write"],
 )
 def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = True, is_unix: bool = False) -> str:
+    """Deploy a primitive stream.
+
+    Returns:
+        Transaction hash on successful deployment.
+
+    Raises:
+        StreamAlreadyExistsError: If the stream already exists.
+        Exception: For other deployment errors after retries.
+    """
+    logger = get_logger_safe()
     stream_type = truf_sdk.StreamTypePrimitive if not is_unix else truf_sdk.StreamTypePrimitiveUnix
-    return block.deploy_stream(
-        stream_id=stream_id,
-        wait=wait,
-        stream_type=stream_type,
-    )
+    try:
+        logger.debug(f"Attempting to deploy stream {stream_id} (type: {stream_type}, wait: {wait})")
+        tx_hash = block.deploy_stream(
+            stream_id=stream_id,
+            wait=wait,
+            stream_type=stream_type,
+        )
+        logger.debug(f"Created TX for stream deployment {stream_id} (tx: {tx_hash}, wait: {wait})")
+        return tx_hash
+    except StreamAlreadyExistsError as e:
+        logger.info(f"Stream {stream_id} already exists. Skipping deployment.")
+        raise e
+    except Exception as e:
+        # For any other error, re-raise it to be handled by Prefect's retry mechanism
+        logger.error(f"Error deploying stream {stream_id}: {e!s}", exc_info=True)
+        raise e
 
 
 @task(

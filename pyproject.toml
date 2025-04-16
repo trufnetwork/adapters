@@ -8,12 +8,15 @@ version = "0.1.0"
 description = "A collection of prefect tasks and examples ingesting data into TSN"
 readme = "README.md"
 dependencies = [
-    "prefect-client==3.2.1",
+    "prefect-client>=3.3.1",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
-    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@6e67101a60435edd52d700aa412dc4b309b3bf13",
+    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@bdc4d187add38228b8051ef7faade0d19ee974be",
     "PyGithub",
-    "pandera",
+    "pandera>=0.23.1",
     "pandas",
+    "prefect-sqlalchemy",
+    "SQLAlchemy",
+    "psycopg2-binary",
 ]
 
 [project.optional-dependencies]
@@ -25,12 +28,16 @@ argentina = [
     "prefect-aws>=0.5.3",
 ]
 dev = [
+    # we need this for the testing harness
+    "prefect>=3.3.1",
     "pytest-timeout",
     "pytest-mock",
     "black",
     "isort",
     "ruff",
-    "mypy",
+    "moto",
+    "pytest-postgresql",
+    "docker",
 ]
 
 [tool.setuptools]
@@ -38,8 +45,10 @@ packages = {find = {where = ["src"]}}
 package-dir = {"" = "."}
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
 markers = [
-    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')"
+    "integration: mark test as integration test",
+    "slow: mark test as slow to run",
 ]
 pythonpath = ["src"]
 addopts = "--import-mode=importlib -v -s"

@@ -15,8 +15,9 @@ import datetime
 from typing import Any, NamedTuple, Optional, TypeGuard, TypeVar, Union, cast
 
 import pandas as pd
-from pandera.typing import DataFrame
+from pandera.typing import DataFrame, Series
 from prefect import flow, task
+from prefect.futures import PrefectFuture
 from prefect.tasks import task_input_hash
 
 from tsn_adapters.blocks.fmp import EODData, FMPBlock
@@ -27,10 +28,7 @@ from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
 
 # Constants for flow control
-MAX_CONCURRENT_INSERTS = 5
-MAX_CONCURRENT_FETCHES = 3
-BATCH_SIZE = 50000  # Number of records to batch for TN insertion
-DEFAULT_MIN_FETCH_DATE = datetime.datetime.now() - datetime.timedelta(days=365 * 30)
+DEFAULT_MIN_FETCH_DATE = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=365 * 30)
 
 # Type variables for RxPy
 T = TypeVar("T")
@@ -136,7 +134,7 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
     """
     logger = get_logger_safe(__name__)
     try:
-        return tn_block.get_earliest_date(stream_id=stream_id)
+        return tn_block.get_earliest_date(stream_id=stream_id, is_unix=True)
     except TNAccessBlock.StreamNotFoundError:
         logger.warning(f"Stream {stream_id} not found")
         raise  # Re-raise the StreamNotFoundError
@@ -145,19 +143,19 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
         raise TNQueryError(str(e)) from e
 
 
-def ensure_unix_timestamp(dt: pd.Series) -> pd.Series: # type: ignore -> pd Series doesn't fit with any
+def ensure_unix_timestamp(dt: Series[Any]) -> Series[int]:
     """Convert datetime series to Unix timestamp (seconds since epoch).
-    
+
     This function handles various datetime formats and ensures the output
     is always in seconds since epoch (Unix timestamp). It explicitly handles
     the conversion from nanoseconds and validates the output range.
-    
+
     Args:
         dt: A pandas Series containing datetime data in various formats
-            
+
     Returns:
         A pandas Series containing Unix timestamps (seconds since epoch)
-        
+
     Raises:
         ValueError: If the resulting timestamps are outside the valid range
                    or if the conversion results in unexpected units
@@ -165,24 +163,24 @@ def ensure_unix_timestamp(dt: pd.Series) -> pd.Series: # type: ignore -> pd Seri
     # Convert to datetime if not already
     if not pd.api.types.is_datetime64_any_dtype(dt):
         dt = pd.to_datetime(dt, utc=True)
-    
+
     # Get nanoseconds since epoch
-    ns_timestamps = dt.astype('int64')
-    
+    ns_timestamps = dt.astype("int64")
+
     # Convert to seconds (integer division by 1e9 for nanoseconds)
     second_timestamps = ns_timestamps // 10**9
-    
+
     # Validate the range (basic sanity check)
     # Unix timestamps should be between 1970 and 2100 approximately
     min_valid_timestamp = 0  # 1970-01-01
     max_valid_timestamp = 4102444800  # 2100-01-01
-    
-    if (second_timestamps < min_valid_timestamp).any() or (second_timestamps > max_valid_timestamp).any():
+
+    if second_timestamps.lt(min_valid_timestamp).any() or second_timestamps.gt(max_valid_timestamp).any():
         raise ValueError(
             f"Converted timestamps outside valid range: "
             f"min={second_timestamps.min()}, max={second_timestamps.max()}"
         )
-    
+
     return second_timestamps
 
 
@@ -265,12 +263,70 @@ def convert_eod_to_tn_df(
         raise ValueError(f"Failed to convert EOD data to TN format: {e}") from e
 
 
+@task(retries=3, retry_delay_seconds=10, cache_key_fn=task_input_hash)
+def process_ticker(
+    row: Series[Any],
+    fmp_block: FMPBlock,
+    tn_block: TNAccessBlock,
+    min_fetch_date: datetime.datetime,
+    max_fetch_period: datetime.timedelta,
+) -> TickerResult:
+    """
+    Process a single ticker row.
+
+    Args:
+        row: Row from the descriptor DataFrame containing ticker information
+        fmp_block: Block for FMP API interactions
+        tn_block: Block for TN interactions
+        min_fetch_date: Minimum date to fetch data from
+        max_fetch_period: Maximum period to fetch data for
+
+    Returns:
+        TickerResult containing either the fetched data or error information
+    """
+    logger = get_logger_safe(__name__)
+    symbol = str(row["source_id"])
+    stream_id = str(row["stream_id"])
+
+    try:
+        # Get earliest data date first - this implicitly checks if stream exists
+        earliest_date = get_earliest_data_date(tn_block=tn_block, stream_id=stream_id)
+        if earliest_date is None:
+            earliest_date = datetime.datetime.now(datetime.timezone.utc)
+
+        # Calculate date range
+        end_date = earliest_date.strftime("%Y-%m-%d")
+        start_date = max((earliest_date - max_fetch_period), min_fetch_date).strftime("%Y-%m-%d")
+
+        # Fetch historical data
+        eod_data = fetch_historical_data(
+            fmp_block=fmp_block,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        if len(eod_data) == 0:
+            logger.warning(f"No data found for {symbol}")
+            return TickerError(symbol, stream_id, error="no_data")
+
+        logger.info(f"Successfully fetched data for {symbol} from {start_date} to {end_date}")
+        return TickerSuccess(symbol, stream_id, data=eod_data)
+
+    except Exception as e:
+        logger.error(f"Error processing {symbol}: {e}")
+        return TickerError(symbol, stream_id, error=str(e))
+
+
 def run_ticker_pipeline(
     descriptor_df: DataFrame[PrimitiveSourceDataModel],
     fmp_block: FMPBlock,
     tn_block: TNAccessBlock,
     min_fetch_date: datetime.datetime,
     logger: Any,
+    max_fetch_period: datetime.timedelta,
+    batch_size: int,
+    ticker_chunk_size: int,
 ) -> None:
     """
     Create and execute a pipeline for processing tickers with backpressure control.
@@ -287,62 +343,65 @@ def run_ticker_pipeline(
         tn_block: Block for TN interactions.
         min_fetch_date: Minimum date to fetch data from.
         logger: Logger instance.
-
+        max_fetch_period: Maximum period to fetch data for.
+        batch_size: Number of records to accumulate before inserting.
+        ticker_chunk_size: Number of tickers to process in each chunk.
     Raises:
         Exceptions during processing are logged and raised.
     """
 
-    def process_ticker(row: pd.Series) -> TickerResult: # type: ignore -> pd Series doesn't fit with any
-        """Process a single ticker row."""
-        symbol = row["source_id"]
-        stream_id = row["stream_id"]
-
-        try:
-            # Get earliest data date first - this implicitly checks if stream exists
-            earliest_date = get_earliest_data_date(tn_block=tn_block, stream_id=stream_id)
-            if earliest_date is None:
-                logger.warning(f"Stream not found for {symbol}")
-                return TickerError(symbol, stream_id, error="stream_not_found")
-
-            # Calculate date range
-            end_date = earliest_date.strftime("%Y-%m-%d")
-            start_date = max((earliest_date - datetime.timedelta(days=365)), min_fetch_date).strftime("%Y-%m-%d")
-
-            # Fetch historical data
-            eod_data = fetch_historical_data(
-                fmp_block=fmp_block,
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            if len(eod_data) == 0:
-                logger.warning(f"No data found for {symbol}")
-                return TickerError(symbol, stream_id, error="no_data")
-
-            logger.info(f"Successfully fetched data for {symbol}")
-            return TickerSuccess(symbol, stream_id, data=eod_data)
-
-        except Exception as e:
-            logger.error(f"Error processing {symbol}: {e}")
-            return TickerError(symbol, stream_id, error=str(e))
-
-    # Process tickers with backpressure control
-    records_to_insert = pd.DataFrame()
     try:
-        for _, row_data in descriptor_df.iterrows():
-            result = process_ticker(row_data)
-            if is_ticker_success(result):
-                tn_df = convert_eod_to_tn_df(result.data, result.stream_id)
-                records_to_insert = pd.concat([records_to_insert, tn_df])
-            elif is_ticker_error(result):
-                logger.warning(f"Skipping ticker {row_data['source_id']} due to error: {result.error}")
-            else:
-                logger.error(f"Unexpected result type for {row_data['source_id']}: {type(result)}")
+        # Process tickers in chunks
+        total_tickers = len(descriptor_df)
+        for chunk_start in range(0, total_tickers, ticker_chunk_size):
+            chunk_end = min(chunk_start + ticker_chunk_size, total_tickers)
+            logger.info(f"Processing ticker chunk {chunk_start}-{chunk_end} of {total_tickers}")
 
-            if len(records_to_insert) >= BATCH_SIZE:
+            # Get the current chunk of tickers
+            chunked_tickers = descriptor_df.iloc[chunk_start:chunk_end]
+
+            result_futures: list[PrefectFuture[TickerResult]] = []
+            # Process tickers with backpressure control
+            records_to_insert = pd.DataFrame()
+
+            # Submit all ticker processing tasks in the chunk
+            for _, row_data in chunked_tickers.iterrows():
+                result_futures.append(
+                    process_ticker.submit(
+                        row=row_data,
+                        fmp_block=fmp_block,
+                        tn_block=tn_block,
+                        min_fetch_date=min_fetch_date,
+                        max_fetch_period=max_fetch_period,
+                    )
+                )
+
+            # Process results as they complete
+            for future in result_futures:
+                result = future.result()
+                if is_ticker_success(result):
+                    tn_df = convert_eod_to_tn_df(result.data, result.stream_id)
+                    records_to_insert = pd.concat([records_to_insert, tn_df])
+                elif is_ticker_error(result):
+                    logger.warning(f"Skipping ticker {result.symbol} due to error: {result.error}")
+                else:
+                    logger.error(f"Unexpected result type for {row_data['source_id']}: {type(result)}")
+
+                    if len(records_to_insert) >= batch_size:
+                        validated_df = DataFrame[TnDataRowModel](records_to_insert)
+                        records_to_insert = pd.DataFrame()
+                        task_split_and_insert_records(
+                            block=tn_block,
+                            records=validated_df,
+                            wait=False,
+                            is_unix=True,
+                        )
+
+                    logger.info("Completed ticker processing pipeline")
+
+            # Process remaining records for this chunk
+            if len(records_to_insert) > 0:
                 validated_df = DataFrame[TnDataRowModel](records_to_insert)
-                records_to_insert = pd.DataFrame()
                 task_split_and_insert_records(
                     block=tn_block,
                     records=validated_df,
@@ -350,17 +409,7 @@ def run_ticker_pipeline(
                     is_unix=True,
                 )
 
-            logger.info("Completed ticker processing pipeline")
-
-        # Process remaining records
-        if len(records_to_insert) > 0:
-            validated_df = DataFrame[TnDataRowModel](records_to_insert)
-            task_split_and_insert_records(
-                block=tn_block,
-                records=validated_df,
-                wait=False,
-                is_unix=True,
-            )
+            logger.info(f"Completed processing ticker chunk {chunk_start}-{chunk_end}")
 
     except Exception as e:
         logger.error(f"Pipeline execution failed: {e}")
@@ -373,6 +422,10 @@ async def historical_flow(
     psd_block: PrimitiveSourcesDescriptorBlock,
     tn_block: TNAccessBlock,
     min_fetch_date: datetime.datetime = DEFAULT_MIN_FETCH_DATE,
+    batch_size: int = 10000,
+    start_from_n_ticker: int = 0,
+    max_fetch_period: datetime.timedelta = datetime.timedelta(days=365),
+    ticker_chunk_size: int = 100,
 ) -> None:
     """
     Main flow to fetch and update historical market data.
@@ -382,6 +435,10 @@ async def historical_flow(
         psd_block: Block for primitive source descriptors
         tn_block: Block for TN interactions
         min_fetch_date: Minimum date to fetch data from
+        batch_size: Number of records to accumulate before inserting
+        start_from_n_ticker: Index of the first ticker to process
+        max_fetch_period: Maximum period to fetch data for
+        ticker_chunk_size: Number of tickers to process in each chunk
 
     Raises:
         HistoricalFlowError: If there's a critical error in the flow
@@ -396,6 +453,10 @@ async def historical_flow(
             logger.warning("No active tickers found")
             return
 
+        # Skip the first n tickers
+        if start_from_n_ticker > 0:
+            descriptor_df = cast(DataFrame[PrimitiveSourceDataModel], descriptor_df.iloc[start_from_n_ticker:])
+
         # Create and run the reactive pipeline
         run_ticker_pipeline(
             descriptor_df=descriptor_df,
@@ -403,6 +464,9 @@ async def historical_flow(
             tn_block=tn_block,
             min_fetch_date=min_fetch_date,
             logger=logger,
+            batch_size=batch_size,
+            max_fetch_period=max_fetch_period,
+            ticker_chunk_size=ticker_chunk_size,
         )
 
         logger.info("Completed historical market data sync flow")

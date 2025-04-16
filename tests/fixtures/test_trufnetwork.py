@@ -8,10 +8,17 @@ import signal
 import subprocess
 import time
 from typing import Any, Optional
+from unittest.mock import Mock
 
+from prefect import Task
+from prefect.client.orchestration import get_client
+from prefect.client.schemas.actions import GlobalConcurrencyLimitCreate
+from prefect.exceptions import ObjectNotFound
+from prefect.logging.loggers import disable_run_logger
 from prefect.testing.utilities import prefect_test_harness
 from pydantic import SecretStr
 import pytest
+import trufnetwork_sdk_c_bindings.exports as truf_sdk
 
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 
@@ -30,10 +37,11 @@ class ContainerSpec:
     name: str
     image: str
     tmpfs_path: Optional[str] = None
-    env_vars: ( list[str] ) = field(default_factory=list)
+    env_vars: list[str] = field(default_factory=list)
     ports: dict[str, str] = field(default_factory=dict)
     entrypoint: Optional[str] = None
     args: list[str] = field(default_factory=list)
+
 
 # Container specifications
 POSTGRES_CONTAINER = ContainerSpec(
@@ -351,7 +359,6 @@ def tn_provider(tn_node: str) -> TrufNetworkProvider:
 
 
 # Skip these tests on CI environment
-@pytest.mark.skipif(os.environ.get("CI") == "true", reason="Local development fixture tests, skipped in CI")
 class TestTrufNetworkFixtures:
     """
     Test suite for TrufNetwork fixtures.
@@ -389,7 +396,8 @@ class TestTrufNetworkFixtures:
         assert tn_provider.api_endpoint.startswith("http://")
         assert tn_provider.get_provider() is tn_provider
 
-@pytest.fixture(scope='session', autouse=True)
+
+@pytest.fixture(scope="session", autouse=True)
 def term_handler():
     """
     Fixture to transform SIGTERM into SIGINT. This permit us to gracefully stop the suite uppon SIGTERM.
@@ -398,54 +406,102 @@ def term_handler():
     yield
     signal.signal(signal.SIGTERM, orig)
 
-@pytest.fixture(scope='session', autouse=True)
+
+@pytest.fixture(scope="session", autouse=True)
 def disable_prefect_retries():
     from importlib import import_module
+    from typing import Any
     from unittest.mock import patch
 
     from prefect import task as original_task
 
     # Patch task retries by modifying the task options directly
-    def patch_task_options(task_fn: Any) -> Any:
-        if hasattr(task_fn, 'with_options'):
-            return task_fn.with_options(retries=0, cache_key_fn=None)
+    def patch_task_options(task_fn: Task[Any, Any]) -> Task[Any, Any]:
+        # Always override retries, cache_key_fn, and cache_expiration
+        # regardless of how the task was created
+        if hasattr(task_fn, "with_options"):
+            patched_task = task_fn.with_options(
+                retries=0, cache_key_fn=None, cache_expiration=None, retry_condition_fn=None
+            )
+
+            # Also patch the with_options method of the returned task to ensure
+            # any subsequent calls also have these options overridden
+            original_with_options = patched_task.with_options
+
+            # Use a simple function that ignores type checking
+            def ensure_no_retries_or_cache(**kwargs: Any) -> Any:
+                # Force these options regardless of what was passed
+                kwargs["retries"] = 0
+                kwargs["cache_key_fn"] = None
+                kwargs["cache_expiration"] = None
+                kwargs["retry_condition_fn"] = None
+                return original_with_options(**kwargs)  # type: ignore
+
+            # Use setattr to avoid type checking issues
+            setattr(patched_task, "with_options", ensure_no_retries_or_cache)
+
+            return patched_task
         return task_fn
 
     # All tasks with retries and their import paths
     tasks_to_patch = [
         # FMP Historical Flow
-        'tsn_adapters.flows.fmp.historical_flow.fetch_historical_data',
+        "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
+        "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
         # Stream Deploy Flow
-        'tsn_adapters.flows.stream_deploy_flow.check_and_deploy_stream',
+        "tsn_adapters.flows.stream_deploy_flow.task_check_exist_deploy_init",
         # Primitive Source Descriptor
-        'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url',
-        'tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github',
+        "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url",
+        "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github",
         # FMP Real Time Flow
-        'tsn_adapters.flows.fmp.real_time_flow.fetch_quotes_for_batch',
+        "tsn_adapters.flows.fmp.real_time_flow.fetch_quotes_for_batch",
         # Argentina Task Wrappers
-        'tsn_adapters.tasks.argentina.task_wrappers.task_create_stream_fetcher',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_streams',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_create_sepa_provider',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_get_latest_records',
-        'tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map',
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_reconciliation_strategy",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_sepa_provider",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_stream_fetcher",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_create_transformer",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_dates_already_processed",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_determine_needed_keys",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_and_transform_data",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_data_for_date",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_latest_records",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_now_date",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_streams",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_insert_data",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_load_category_map",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_transform_data",
+        # Argentina Preprocess Flow
+        "tsn_adapters.tasks.argentina.flows.preprocess_flow.process_raw_data",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_and_transform_data",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_get_now_date",
+        "tsn_adapters.tasks.argentina.task_wrappers.task_dates_already_processed",
         # TN Access
-        'tsn_adapters.blocks.tn_access.task_wait_for_tx',
-        'tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx',
-        'tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx',
-        'tsn_adapters.blocks.tn_access._task_only_batch_insert_records',
-        'tsn_adapters.blocks.tn_access.task_split_and_insert_records',
+        "tsn_adapters.blocks.tn_access.task_wait_for_tx",
+        "tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx",
+        "tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx",
+        "tsn_adapters.blocks.tn_access._task_only_batch_insert_records",
+        "tsn_adapters.blocks.tn_access.task_split_and_insert_records",
+        "tsn_adapters.blocks.tn_access.task_filter_initialized_streams",
+        # Stream Filtering
+        "tsn_adapters.blocks.stream_filtering.task_filter_batch_initialized_streams",
+        "tsn_adapters.blocks.stream_filtering.task_get_stream_states_divide_conquer",
+        "tsn_adapters.blocks.stream_filtering.task_filter_streams_divide_conquer",
         # TN Common
-        'tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records',
-        'tsn_adapters.common.trufnetwork.tn.task_deploy_primitive',
-        'tsn_adapters.common.trufnetwork.tn.task_init_stream',
-        'tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records'
+        "tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records",
+        "tsn_adapters.common.trufnetwork.tn.task_deploy_primitive",
+        "tsn_adapters.common.trufnetwork.tn.task_init_stream",
+        "tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records",
+        # GSheet Tasks
+        "tsn_adapters.tasks.gsheet.task_read_gsheet",
+        # Argentina Preprocess Flow
+        "tsn_adapters.tasks.argentina.flows.preprocess_flow.task_list_available_dates",
     ]
 
-    with patch('prefect.task', side_effect=original_task) as mock_task:
+    # Patch the task decorator to apply our options
+    with patch("prefect.task", side_effect=original_task) as mock_task:
         for import_path in tasks_to_patch:
             # Split the import path into module path and attribute name
-            module_path, attr_name = import_path.rsplit('.', 1)
+            module_path, attr_name = import_path.rsplit(".", 1)
             # Import the module and get the task function
             module = import_module(module_path)
             task_fn = getattr(module, attr_name)
@@ -453,20 +509,96 @@ def disable_prefect_retries():
             mock_task.return_value = patch_task_options(task_fn)
             patch(import_path, new=patch_task_options(task_fn)).start()
 
-@pytest.fixture(scope="session", autouse=False)
-def prefect_test_fixture(disable_prefect_retries: Any):
-    with prefect_test_harness(server_startup_timeout=120):
+    yield
+
+
+@pytest.fixture(scope="function")
+def disable_prefect_logger():
+    with disable_run_logger():
         yield
+
+
+@pytest.fixture(scope="session", autouse=False)
+async def prefect_test_fixture(disable_prefect_retries: Any):
+    """Prefect test harness fixture that also manages the 'tn-write' GCL."""
+    limit_name = "tn-write"
+    with prefect_test_harness(server_startup_timeout=120):
+        async with get_client() as client:
+            # Attempt to create the global concurrency limit
+            try:
+                logger.info(f"Creating '{limit_name}' global concurrency limit...")
+                await client.create_global_concurrency_limit(
+                    concurrency_limit=GlobalConcurrencyLimitCreate(name=limit_name, limit=1)
+                )
+                logger.info(f"'{limit_name}' global concurrency limit created.")
+            except Exception as e:
+                # Check if it already exists by trying to read it
+                try:
+                    await client.read_global_concurrency_limit_by_name(name=limit_name)
+                    logger.warning(f"Global concurrency limit '{limit_name}' already exists. Skipping creation.")
+                except ObjectNotFound:
+                    logger.error(f"Failed to create global concurrency limit '{limit_name}': {e!s}")
+                    raise  # Re-raise the original error if it wasn't an 'already exists' situation
+                except Exception as read_e:
+                    logger.error(
+                        f"Failed to create or check global concurrency limit '{limit_name}': {e!s} / Check failed: {read_e!s}"
+                    )
+                    raise read_e  # Raise the checking error if reading failed
+
+        try:
+            yield
+        finally:
+            # Clean up the concurrency limit
+            async with get_client() as client:
+                try:
+                    logger.info(f"Deleting '{limit_name}' global concurrency limit...")
+                    await client.delete_global_concurrency_limit_by_name(name=limit_name)
+                    logger.info(f"'{limit_name}' global concurrency limit deleted.")
+                except ObjectNotFound:
+                    logger.warning(
+                        f"Global concurrency limit '{limit_name}' not found during cleanup. Skipping deletion."
+                    )
+                except Exception as e:
+                    # Log error but don't raise to avoid masking test failures
+                    logger.error(f"Failed to delete global concurrency limit '{limit_name}': {e!s}")
+
+
+@pytest.fixture(scope="function")
+def show_prefect_logs_fixture(monkeypatch: Any):
+    monkeypatch.setattr("tsn_adapters.utils.logging.get_logger_safe", Mock(return_value=logging.getLogger()))
 
 
 DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1
 
 
 @pytest.fixture(scope="session")
-def tn_block(tn_provider: TrufNetworkProvider, prefect_test_fixture, disable_prefect_retries) -> TNAccessBlock:
-    """Create a TNAccessBlock with test node and default credentials."""
-    return TNAccessBlock(
+def tn_block(
+    tn_provider: TrufNetworkProvider, prefect_test_fixture: Any, disable_prefect_retries: Any, helper_contract_id: str
+) -> TNAccessBlock:
+    """Create a TNAccessBlock with test node and default credentials. Also deploys the helper contract."""
+    tn_block = TNAccessBlock(
         tn_provider=tn_provider.api_endpoint,
         tn_private_key=SecretStr(os.environ.get("TN_PRIVATE_KEY", DEFAULT_TN_PRIVATE_KEY)),
-        helper_contract_name="sthelpercontract0000000000000001",
+        helper_contract_name=helper_contract_id,
     )
+    deploy_helper_contract(tn_block, helper_contract_id)
+    return tn_block
+
+
+def deploy_helper_contract(tn_block: TNAccessBlock, helper_stream_id: str):
+    """Deploy the helper contract."""
+    client = tn_block.get_client()
+
+    # Try to deploy helper contract
+    try:
+        client.deploy_stream(helper_stream_id, stream_type=truf_sdk.StreamTypeHelper, wait=True)
+    except Exception as e:
+        if "dataset exists" not in str(e) and "already exists" not in str(e):
+            raise e
+
+
+@pytest.fixture(scope="session")
+def helper_contract_id() -> Generator[str, None, None]:
+    """Create and manage the helper contract."""
+    helper_stream_id = "sthelpercontract0000000000000001"
+    yield helper_stream_id

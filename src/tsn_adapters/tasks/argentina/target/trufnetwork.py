@@ -16,7 +16,6 @@ from tsn_adapters.blocks.tn_access import (
     task_insert_and_wait_for_tx,
     task_read_records,
     task_split_and_insert_records,
-    task_wait_for_tx,
 )
 from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
@@ -72,7 +71,7 @@ class TrufNetworkClient(ITargetClient[StreamId]):
             data_provider=data_provider,
         )
 
-        if df is None or df.empty:
+        if df.empty:
             logger.info("No existing data found for stream %s", stream_id)
             return pd.DataFrame()
 
@@ -98,7 +97,7 @@ class TrufNetworkClient(ITargetClient[StreamId]):
             has_external_created_at=True,
         )
 
-        if results["failed_records"] is not None and not results["failed_records"].empty:
+        if not results["failed_records"].empty:
             raise ValueError("Failed to insert data into TrufNetwork")
 
     def insert_data(self, stream_id: StreamId, data: pd.DataFrame, data_provider: Optional[str] = None) -> None:

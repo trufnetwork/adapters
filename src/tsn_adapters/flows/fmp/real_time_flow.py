@@ -27,6 +27,8 @@ from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_r
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.utils.logging import get_logger_safe
 
+from ...utils.deroutine import force_sync
+
 
 class QuoteData(TypedDict):
     """
@@ -485,6 +487,8 @@ def real_time_flow(
     tn_block: TNAccessBlock,
     tickers_per_request: int = 20000,
     fetch_task: Any = None,
+    max_filter_size: int = 5000,
+    insert_batch_size: int = 25000,
 ) -> FlowResult:
     """
     Main flow to fetch and update real-time market data.
@@ -581,7 +585,10 @@ def real_time_flow(
         try:
             processed_data = process_data(quotes_df=combined_data, descriptor_df=descriptor_df, return_state=True)
             # Get the actual processed data and ensure it's the right type
-            processed_df = processed_data.result()
+            processed_df = force_sync(processed_data.result)()
+
+            if isinstance(processed_df, Exception):
+                raise processed_df
 
         except Exception as e:
             error_msg = f"Failed to process combined data: {e!s}"
@@ -606,6 +613,8 @@ def real_time_flow(
                 records=processed_data,
                 wait=True,
                 is_unix=True,
+                max_filter_size=max_filter_size,
+                max_batch_size=insert_batch_size,
             )
             logger.info(
                 "Completed real-time market data sync flow",

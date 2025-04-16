@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from prefect import get_run_logger
+from prefect.context import FlowRunContext, TaskRunContext
 
 
 def get_logger_safe(name: str = __name__) -> Any:
@@ -28,7 +29,11 @@ def get_logger_safe(name: str = __name__) -> Any:
     Logger
         Either a Prefect logger or a standard Python logger.
     """
-    try:
+    # Check for existing contexts
+    # we do like this, because we don't want to disable logs at tests
+    task_run_context = TaskRunContext.get()
+    flow_run_context = FlowRunContext.get()
+    if task_run_context or flow_run_context:
         return get_run_logger()
-    except Exception:
+    else:
         return logging.getLogger(name)
