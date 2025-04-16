@@ -218,13 +218,6 @@ def test_deploy_streams_flow_with_deployment_state(
     # Configure TN to have stream_0 exist (so it will be filtered out)
     tn_access_block.set_existing_streams({"stream_0"})
 
-    # --- Mock the batch filter task ---
-    mock_filter_submit = MagicMock(return_value=create_mock_filter_future(existing_stream_ids=["stream_0"]))
-    monkeypatch.setattr(
-        "tsn_adapters.flows.stream_deploy_flow.task_filter_batch_initialized_streams.submit", mock_filter_submit
-    )
-    # --- End Mock ---
-
     # --- Mock the batch mark task submission to run synchronously ---
     def mock_mark_submit(*args: Any, **kwargs: Any) -> PrefectFuture[None]:
         # Directly call the marking logic on the provided state block
@@ -283,15 +276,6 @@ def test_deploy_streams_flow_all_deployed_in_state(
 
     # Configure TN to have all streams exist (so they will all be filtered out)
     tn_access_block.set_existing_streams({"stream_0", "stream_1", "stream_2"})
-
-    # --- Mock the batch filter task ---
-    mock_filter_submit = MagicMock(
-        return_value=create_mock_filter_future(existing_stream_ids=["stream_0", "stream_1", "stream_2"])
-    )
-    monkeypatch.setattr(
-        "tsn_adapters.flows.stream_deploy_flow.task_filter_batch_initialized_streams.submit", mock_filter_submit
-    )
-    # --- End Mock ---
 
     # --- Mock the batch mark task submission (shouldn't be called, but good practice) ---
     mock_mark_submit = MagicMock()
