@@ -124,22 +124,28 @@ def task_check_exist_deploy_init(
     try:
         if force_init_only:
             logger.info(f"Stream {stream_id}: force_init_only=True, skipping deploy and attempting initialization.")
-            init_future = task_init_stream.submit(stream_id=stream_id, block=tna_block, return_state=False)
+            init_future = task_init_stream.submit(stream_id=stream_id, block=tna_block, return_state=False, wait=False)
             init_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(init_future), block=tna_block)
             _ = init_wait_future.result(raise_on_failure=True)
             return "initialized"
         try:
-            deploy_future = task_deploy_primitive.submit(stream_id=stream_id, block=tna_block, is_unix=is_unix)
+            deploy_future = task_deploy_primitive.submit(
+                stream_id=stream_id, block=tna_block, is_unix=is_unix, wait=False
+            )
             deploy_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(deploy_future), block=tna_block)
             init_future = task_init_stream.submit(
-                stream_id=stream_id, block=tna_block, return_state=False, wait_for=cast_future(deploy_wait_future)
+                stream_id=stream_id,
+                block=tna_block,
+                return_state=False,
+                wait_for=cast_future(deploy_wait_future),
+                wait=False,
             )
             init_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(init_future), block=tna_block)
             _ = init_wait_future.result(raise_on_failure=True)
             return "deployed"
         except StreamAlreadyExistsError:
             logger.info(f"Stream {stream_id} already exists, attempting initialization.")
-            init_future = task_init_stream.submit(stream_id=stream_id, block=tna_block, return_state=False)
+            init_future = task_init_stream.submit(stream_id=stream_id, block=tna_block, return_state=False, wait=False)
             init_wait_future = task_wait_for_tx.submit(tx_hash=cast_future(init_future), block=tna_block)
             _ = init_wait_future.result(raise_on_failure=True)
             return "initialized"
