@@ -8,7 +8,7 @@ actual network calls.
 
 import datetime
 import time
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -165,15 +165,13 @@ class FakeTNAccessBlock(TNAccessBlock):
 
     def batch_insert_tn_records(
         self,
-        records: DataFrame[TnDataRowModel],
-        is_unix: bool = False,
-        has_external_created_at: bool = False,
-    ) -> Optional[str]:
+        records: DataFrame[TnDataRowModel]
+    ) -> list[str]:
         """Track inserted records and return a fake BatchInsertResults."""
         self._inserted_records.append(records)
         self._insert_times.append(time.time())
         self._batch_sizes.append(len(records))
-        return "fake_tx_hash"
+        return ["fake_tx_hash"]
 
     def wait_for_tx(self, tx_hash: str) -> None:
         """Mock waiting."""
@@ -500,13 +498,11 @@ class TestHistoricalFlowAdvanced:
 
             def batch_insert_tn_records(
                 self,
-                records: DataFrame[TnDataRowModel],
-                is_unix: bool = False,
-                has_external_created_at: bool = False,
-            ) -> Optional[str]:
+                records: DataFrame[TnDataRowModel]
+            ) -> list[str]:
                 """Track batch insertions with sequence information."""
                 self.sequence.next(f"insert_batch_{len(records)}")
-                return super().batch_insert_tn_records(records, is_unix, has_external_created_at)
+                return super().batch_insert_tn_records(records)
 
         # Create blocks with timing tracking
         fmp_block = TimingFMPBlock(sequence_tracker=sequence, api_key=SecretStr("fake"))
@@ -532,13 +528,13 @@ class TestHistoricalFlowAdvanced:
             psd_block=psd_block,
             tn_block=tn_block,
             min_fetch_date=datetime.datetime(2023, 1, 1),
-            ticker_chunk_size=1,
+            ticker_chunk_size=2,
             batch_size=TEST_BATCH_SIZE,
             return_state=True,
         )
 
         assert result is not None
-        assert result.is_completed
+        assert result.is_completed()
 
         # Verify operations are sequential
         fetch_operations = sequence.get_operations_by_type("fetch_")

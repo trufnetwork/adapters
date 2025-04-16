@@ -611,9 +611,6 @@ def real_time_flow(
             task_split_and_insert_records(
                 block=tn_block,
                 records=processed_data,
-                wait=True,
-                is_unix=True,
-                max_filter_size=max_filter_size,
                 max_batch_size=insert_batch_size,
             )
             logger.info(

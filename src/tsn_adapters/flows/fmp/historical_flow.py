@@ -22,7 +22,7 @@ from prefect.tasks import task_input_hash
 
 from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records
+from tsn_adapters.blocks.tn_access import TNAccessBlock, task_batch_insert_tn_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
@@ -134,7 +134,7 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
     """
     logger = get_logger_safe(__name__)
     try:
-        return tn_block.get_earliest_date(stream_id=stream_id, is_unix=True)
+        return tn_block.get_earliest_date(stream_id=stream_id)
     except TNAccessBlock.StreamNotFoundError:
         logger.warning(f"Stream {stream_id} not found")
         raise  # Re-raise the StreamNotFoundError
@@ -296,6 +296,7 @@ def process_ticker(
 
         # Calculate date range
         end_date = earliest_date.strftime("%Y-%m-%d")
+        min_fetch_date = min_fetch_date.replace(tzinfo=None)
         start_date = max((earliest_date - max_fetch_period), min_fetch_date).strftime("%Y-%m-%d")
 
         # Fetch historical data
@@ -390,11 +391,9 @@ def run_ticker_pipeline(
                     if len(records_to_insert) >= batch_size:
                         validated_df = DataFrame[TnDataRowModel](records_to_insert)
                         records_to_insert = pd.DataFrame()
-                        task_split_and_insert_records(
+                        task_batch_insert_tn_records(
                             block=tn_block,
                             records=validated_df,
-                            wait=False,
-                            is_unix=True,
                         )
 
                     logger.info("Completed ticker processing pipeline")
@@ -402,11 +401,9 @@ def run_ticker_pipeline(
             # Process remaining records for this chunk
             if len(records_to_insert) > 0:
                 validated_df = DataFrame[TnDataRowModel](records_to_insert)
-                task_split_and_insert_records(
+                task_batch_insert_tn_records(
                     block=tn_block,
                     records=validated_df,
-                    wait=False,
-                    is_unix=True,
                 )
 
             logger.info(f"Completed processing ticker chunk {chunk_start}-{chunk_end}")
@@ -455,7 +452,7 @@ async def historical_flow(
 
         # Skip the first n tickers
         if start_from_n_ticker > 0:
-            descriptor_df = cast(DataFrame[PrimitiveSourceDataModel], descriptor_df.iloc[start_from_n_ticker:])
+            descriptor_df = descriptor_df.iloc[start_from_n_ticker:]
 
         # Create and run the reactive pipeline
         run_ticker_pipeline(
