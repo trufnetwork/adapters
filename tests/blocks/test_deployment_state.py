@@ -6,7 +6,7 @@ import io
 
 from prefect_aws import S3Bucket  # type: ignore
 
-from src.tsn_adapters.blocks.deployment_state import S3DeploymentStateBlock
+from tsn_adapters.blocks.deployment_state import S3DeploymentStateBlock
 
 
 @pytest.fixture
@@ -172,7 +172,7 @@ def test_update_deployment_states_valid(s3_block: S3DeploymentStateBlock) -> Non
         'deployment_timestamp': [timestamp, timestamp]
     }
     df = pd.DataFrame(data)
-    from src.tsn_adapters.blocks.deployment_state import DataFrame, DeploymentStateModel
+    from tsn_adapters.blocks.deployment_state import DataFrame, DeploymentStateModel
     states = DataFrame[DeploymentStateModel](df)
     
     # Update the states
@@ -191,7 +191,7 @@ def test_update_deployment_states_valid(s3_block: S3DeploymentStateBlock) -> Non
 def test_update_deployment_states_empty(s3_block: S3DeploymentStateBlock) -> None:
     # Create an empty DataFrame with the correct schema
     df = pd.DataFrame(columns=['stream_id', 'deployment_timestamp'])
-    from src.tsn_adapters.blocks.deployment_state import DataFrame, DeploymentStateModel
+    from tsn_adapters.blocks.deployment_state import DataFrame, DeploymentStateModel
     states = DataFrame[DeploymentStateModel](df)
     
     # Update with empty states

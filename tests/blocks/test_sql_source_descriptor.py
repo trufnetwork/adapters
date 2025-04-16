@@ -11,9 +11,9 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
-from src.tsn_adapters.blocks.models import primitive_sources_table  # Corrected import path
-from src.tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel
-from src.tsn_adapters.blocks.sql_source_descriptor import SqlAlchemySourceDescriptor
+from tsn_adapters.blocks.models import primitive_sources_table  # Corrected import path
+from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel
+from tsn_adapters.blocks.sql_source_descriptor import SqlAlchemySourceDescriptor
 from tests.fixtures.test_sql import DB_CONFIG
 
 # --- Fixtures ---
