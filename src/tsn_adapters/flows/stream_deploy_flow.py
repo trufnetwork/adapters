@@ -33,7 +33,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 )
 
 # Import TNAccessBlock and task_wait_for_tx so that we can use its waiting functionality.
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_filter_batch_initialized_streams, task_wait_for_tx
+from tsn_adapters.blocks.tn_access import TNAccessBlock, task_wait_for_tx
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel
 from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive
 
