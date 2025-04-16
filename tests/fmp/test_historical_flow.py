@@ -528,7 +528,7 @@ class TestHistoricalFlowAdvanced:
             psd_block=psd_block,
             tn_block=tn_block,
             min_fetch_date=datetime.datetime(2023, 1, 1),
-            ticker_chunk_size=1,
+            ticker_chunk_size=2,
             batch_size=TEST_BATCH_SIZE,
             return_state=True,
         )
