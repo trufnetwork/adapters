@@ -20,7 +20,6 @@ from tsn_adapters.blocks.shared_types import StreamLocatorModel
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.flows.stream_deploy_flow import (
     deploy_streams_flow,
-    filter_deployed_streams_task,
     mark_batch_deployed_task,
 )
 
@@ -334,87 +333,6 @@ def test_deploy_streams_flow_backward_compatibility(
     client = tn_access_block.client
     assert isinstance(client, TestTNClient)  # Type check for mypy
     assert set(client.deployed_streams) == {"stream_0", "stream_1", "stream_2"}
-
-
-@pytest.mark.usefixtures("prefect_test_fixture")
-def test_filter_deployed_streams_task(
-    primitive_descriptor: TestPrimitiveSourcesDescriptor, tn_access_block: TestTNAccessBlock, monkeypatch: MonkeyPatch
-) -> None:
-    """Test that filter_deployed_streams_task correctly filters streams."""
-    # Create a deployment state with stream_0 already deployed
-    deployment_state = TestDeploymentStateBlock(predeployed_streams={"stream_0"})
-
-    # Verify deployment state has stream_0 marked as deployed
-    assert deployment_state.has_been_deployed("stream_0")
-    assert deployment_state.check_multiple_streams(["stream_0"])["stream_0"]
-
-    # Get descriptor DataFrame
-    descriptor_df = primitive_descriptor.get_descriptor()
-
-    # Configure TN to have stream_0 exist (important for verification)
-    tn_access_block.set_existing_streams({"stream_0"})
-
-    # --- Mock the batch filter task ---
-    # It will be called with stream_0, and since it exists, it should return stream_0
-    mock_submit = MagicMock(return_value=create_mock_filter_future(existing_stream_ids=["stream_0"]))
-    monkeypatch.setattr(
-        "tsn_adapters.flows.stream_deploy_flow.task_filter_batch_initialized_streams.submit", mock_submit
-    )
-    # --- End Mock ---
-
-    # Apply filter
-    filtered_df = filter_deployed_streams_task(
-        descriptor_df=descriptor_df, deployment_state=deployment_state, tna_block=tn_access_block
-    )
-
-    # Check that stream_0 is filtered out
-    filtered_stream_ids: list[str] = filtered_df["stream_id"].tolist()
-    assert "stream_0" not in filtered_stream_ids
-    assert "stream_1" in filtered_stream_ids
-    assert "stream_2" in filtered_stream_ids
-    assert len(filtered_df) == 2
-
-
-@pytest.mark.usefixtures("prefect_test_fixture")
-def test_filter_deployed_streams_task_with_tn_verification(
-    primitive_descriptor: TestPrimitiveSourcesDescriptor, monkeypatch: MonkeyPatch
-) -> None:
-    """Test that filter_deployed_streams_task verifies deployment with TN."""
-    # Create a deployment state with all streams already deployed
-    deployment_state = TestDeploymentStateBlock(predeployed_streams={"stream_0", "stream_1", "stream_2"})
-
-    # Verify all streams are marked as deployed in the deployment state
-    for stream_id in ["stream_0", "stream_1", "stream_2"]:
-        assert deployment_state.has_been_deployed(stream_id)
-
-    # Create TN access block with only stream_0 existing in TN
-    tn_access_block = TestTNAccessBlock(existing_streams={"stream_0"})
-
-    # Get descriptor DataFrame
-    descriptor_df = primitive_descriptor.get_descriptor()
-
-    # --- Mock the batch filter task ---
-    # It will be called with stream_0, stream_1, stream_2.
-    # Since only stream_0 exists in TN, it should return only stream_0.
-    mock_submit = MagicMock(return_value=create_mock_filter_future(existing_stream_ids=["stream_0"]))
-    monkeypatch.setattr(
-        "tsn_adapters.flows.stream_deploy_flow.task_filter_batch_initialized_streams.submit", mock_submit
-    )
-    # --- End Mock ---
-
-    # Apply filter
-    filtered_df = filter_deployed_streams_task(
-        descriptor_df=descriptor_df, deployment_state=deployment_state, tna_block=tn_access_block
-    )
-
-    # Check that only stream_0 is filtered out (marked as deployed AND exists in TN)
-    # stream_1 and stream_2 should still be in the filtered_df because they're marked as
-    # deployed but don't exist in TN (as simulated by the mock)
-    filtered_stream_ids: list[str] = filtered_df["stream_id"].tolist()
-    assert "stream_0" not in filtered_stream_ids
-    assert "stream_1" in filtered_stream_ids
-    assert "stream_2" in filtered_stream_ids
-    assert len(filtered_df) == 2
 
 
 @pytest.mark.usefixtures("prefect_test_fixture")

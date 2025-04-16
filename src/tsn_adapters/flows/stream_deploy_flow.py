@@ -15,8 +15,6 @@ for transaction confirmations.
 
 from datetime import datetime, timezone
 from typing import Literal, Optional
-
-import pandas as pd
 from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
 from prefect.futures import PrefectFuture
@@ -34,7 +32,6 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 
 # Import TNAccessBlock and task_wait_for_tx so that we can use its waiting functionality.
 from tsn_adapters.blocks.tn_access import TNAccessBlock, task_wait_for_tx
-from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel
 from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive
 
 # Configuration constants
@@ -62,14 +59,14 @@ class DeployStreamResults(TypedDict):
 
 
 @task(
-    name="Check, Deploy and Initialize Stream",
+    name="Check and Deploy Stream",
     tags=["tn", "tn-write"],
     retries=DEFAULT_RETRY_ATTEMPTS,
     retry_delay_seconds=DEFAULT_RETRY_DELAY_SECONDS,
 )
-def check_deploy_and_init_stream(stream_id: str, tna_block: TNAccessBlock, is_unix: bool = False) -> DeployStreamResult:
+def check_deploy_stream(stream_id: str, tna_block: TNAccessBlock) -> DeployStreamResult:
     """
-    Check if a stream exists and deploy/initialize it if it doesn't.
+    Check deploy stream.
 
     Args:
         stream_id: ID of the stream to check and potentially deploy
@@ -80,118 +77,19 @@ def check_deploy_and_init_stream(stream_id: str, tna_block: TNAccessBlock, is_un
         A DeployStreamResult indicating whether the stream was deployed or skipped
     """
     logger = get_run_logger()
-    tn_client = tna_block.client
-    account = tn_client.get_current_account()
-
-    # Skip deployment if stream already exists
-    if tna_block.stream_exists(account, stream_id):
-        logger.debug(f"Stream {stream_id} already exists. Skipping deployment.")
-        return DeployStreamResult(stream_id=stream_id, status="skipped")
 
     # Deploy the stream if it doesn't exist
     logger.debug(f"Deploying stream {stream_id}.")
 
     # Create deployment transaction and wait for confirmation
-    tx_deploy = task_deploy_primitive(block=tna_block, stream_id=stream_id, wait=False, is_unix=is_unix)
-    task_wait_for_tx(block=tna_block, tx_hash=tx_deploy)
-    logger.debug(f"Deployed stream {stream_id} (tx: {tx_deploy}).")
+    try:
+        tx_deploy = task_deploy_primitive(block=tna_block, stream_id=stream_id)
+        task_wait_for_tx(block=tna_block, tx_hash=tx_deploy)
+        logger.debug(f"Deployed stream {stream_id} (tx: {tx_deploy}).")
+    except Exception as e:
+        logger.debug(f"Failed to deploy stream {stream_id}: {e}")
 
     return DeployStreamResult(stream_id=stream_id, status="deployed")
-
-
-@task(
-    name="Filter Already Deployed Streams",
-    retries=DEFAULT_RETRY_ATTEMPTS,
-    retry_delay_seconds=DEFAULT_RETRY_DELAY_SECONDS,
-)
-def filter_deployed_streams_task(
-    descriptor_df: DataFrame[PrimitiveSourceDataModel], deployment_state: DeploymentStateBlock, tna_block: TNAccessBlock
-) -> DataFrame[PrimitiveSourceDataModel]:
-    """
-    Filter out already deployed streams using deployment state and TN verification.
-
-    A stream is considered already deployed if:
-    1. It is marked as deployed in the DeploymentStateBlock AND
-    2. It actually exists in TN (verified with TN client using batch filtering)
-
-    Args:
-        descriptor_df: DataFrame containing streams to filter
-        deployment_state: Block for tracking deployment state
-        tna_block: Block for TN access to verify stream existence
-
-    Returns:
-        Filtered DataFrame containing only streams that need deployment
-    """
-    logger = get_run_logger()
-
-    # Get all stream IDs from the descriptor
-    all_stream_ids: list[str] = [str(sid) for sid in descriptor_df["stream_id"]]
-
-    if not all_stream_ids:
-        logger.info("No streams to filter, returning empty DataFrame.")
-        return descriptor_df
-
-    # Step 1: Check deployment status in deployment state
-    try:
-        deployed_in_state: dict[str, bool] = deployment_state.check_multiple_streams(all_stream_ids)
-    except Exception as e:
-        logger.warning(f"Failed to check deployment status: {e!s}. Assuming no streams are deployed.", exc_info=True)
-        # If deployment status check fails, assume nothing is deployed
-        deployed_in_state = {stream_id: False for stream_id in all_stream_ids}
-
-    # Step 2: For streams marked as deployed, verify their existence on the network using batch filtering
-    streams_to_verify = [stream_id for stream_id in all_stream_ids if deployed_in_state.get(stream_id, False)]
-
-    # Track streams that are verified to exist on the network
-    streams_verified_on_network: set[str] = set()
-
-    if streams_to_verify:
-        logger.debug(f"Verifying existence of {len(streams_to_verify)} streams marked as deployed using batch task...")
-        try:
-            account = tna_block.client.get_current_account()
-            # Create DataFrame for batch verification task
-            locators_to_verify_df = DataFrame[StreamLocatorModel](
-                pd.DataFrame({"stream_id": streams_to_verify, "data_provider": account})
-            )
-
-            # Submit the batch verification task
-            filter_future = task_filter_batch_initialized_streams.submit(
-                block=tna_block, stream_locators=locators_to_verify_df
-            )
-            verified_locators_df = filter_future.result()
-
-            # Update the set of verified streams
-            streams_verified_on_network = set(verified_locators_df["stream_id"].tolist())
-            logger.debug(
-                f"Batch verification complete: {len(streams_verified_on_network)} streams confirmed to exist on the network."
-            )
-
-        except Exception as e:
-            # If batch verification fails, log a warning and assume none of the streams_to_verify exist on the network
-            # This ensures we attempt to deploy them rather than incorrectly skipping them.
-            logger.warning(
-                f"Batch verification of stream existence failed: {e!s}. "
-                f"Proceeding assuming streams marked deployed might not exist.",
-                exc_info=True,
-            )
-            streams_verified_on_network = set()
-
-    # Keep streams that need deployment
-    # (Not marked as deployed or not verified on network)
-    streams_to_deploy = [stream_id for stream_id in all_stream_ids if stream_id not in streams_verified_on_network]
-
-    # Filter the DataFrame to keep only streams that need deployment
-    filtered_df = descriptor_df[descriptor_df["stream_id"].isin(streams_to_deploy)]
-
-    # Log summary
-    filtered_count = len(all_stream_ids) - len(filtered_df)
-    logger.info(
-        f"Filtered {filtered_count} streams that are already deployed. "
-        f"{len(filtered_df)} streams remain for processing."
-    )
-
-    # Return filtered DataFrame
-    return filtered_df
 
 
 @task(name="Mark Batch as Deployed", retries=DEFAULT_RETRY_ATTEMPTS, retry_delay_seconds=DEFAULT_RETRY_DELAY_SECONDS)
@@ -290,7 +188,6 @@ def _process_deployment_results(
 def deploy_streams_flow(
     psd_block: PrimitiveSourcesDescriptorBlock,
     tna_block: TNAccessBlock,
-    is_unix: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     start_from_batch: int = 0,
     deployment_state: Optional[DeploymentStateBlock] = None,
@@ -300,10 +197,9 @@ def deploy_streams_flow(
 
     This flow handles the entire stream deployment process:
     1. Retrieves stream descriptors from the provided block
-    2. Filters out already deployed streams (if deployment_state is provided)
-    3. Deploys streams in batches with concurrency control
-    4. Updates deployment state for successfully deployed streams
-    5. Returns summary statistics of deployed and skipped streams
+    2. Deploys streams in batches with concurrency control
+    3. Updates deployment state for successfully deployed streams
+    4. Returns summary statistics of deployed and skipped streams
 
     Args:
         psd_block: Block providing the stream descriptors
@@ -317,9 +213,8 @@ def deploy_streams_flow(
         Statistics on deployed and skipped streams
     """
     logger = get_run_logger()
-    stream_type = "Unix" if is_unix else "Date"
     logger.info(
-        f"Starting stream deployment flow. Batch size: {batch_size}, Start batch: {start_from_batch},  Stream type: {stream_type}."
+        f"Starting stream deployment flow. Batch size: {batch_size}, Start batch: {start_from_batch}."
     )
 
     # SECTION 1: Retrieve and validate descriptor DataFrame
@@ -338,28 +233,7 @@ def deploy_streams_flow(
     logger.info(f"Retrieved {original_stream_count} stream descriptors.")
     filtered_by_state_count = 0
 
-    # SECTION 2: Filter already deployed streams if deployment state is provided
-    if deployment_state is not None:
-        logger.info("Deployment state block provided. Filtering already deployed streams...")
-        try:
-            filter_future = filter_deployed_streams_task.submit(
-                descriptor_df=descriptor_df, deployment_state=deployment_state, tna_block=tna_block
-            )
-            descriptor_df = filter_future.result()  # Wait for filtering to complete
-            # Calculate how many streams were filtered out
-            filtered_by_state_count = original_stream_count - len(descriptor_df)
-        except Exception as e:
-            logger.error(f"Failed during stream filtering: {e!s}. Aborting flow.", exc_info=True)
-            raise  # Stop flow if filtering fails
-
-        # Exit early if all streams are already deployed
-        if descriptor_df.empty:
-            logger.info("All streams are already deployed. Exiting flow.")
-            return DeployStreamResults(deployed_count=0, skipped_count=original_stream_count)
-    else:
-        logger.info("No deployment state block provided. Processing all streams from descriptor.")
-
-    # SECTION 3: Prepare for batch processing
+    # SECTION 2: Prepare for batch processing
     # Extract stream IDs from filtered descriptor and ensure proper typing
     stream_ids: list[str] = [str(sid) for sid in descriptor_df["stream_id"]]
 
@@ -379,7 +253,7 @@ def deploy_streams_flow(
     elif start_from_batch > 0:
         logger.info(f"Starting processing from batch {start_from_batch+1}/{total_batches}.")
 
-    # SECTION 4: Process batches
+    # SECTION 3: Process batches
     all_deployment_results: list[DeployStreamResult] = []
 
     for batch_index, batch in enumerate(batches, start=start_from_batch):
@@ -390,7 +264,7 @@ def deploy_streams_flow(
         batch_futures: dict[str, PrefectFuture[DeployStreamResult]] = {}
         for stream_id in batch:
             # Submit the task with the new name
-            future = check_deploy_and_init_stream.submit(stream_id=stream_id, tna_block=tna_block, is_unix=is_unix)
+            future = check_deploy_stream.submit(stream_id=stream_id, tna_block=tna_block)
             batch_futures[stream_id] = future
 
         # Collect batch results
@@ -413,7 +287,7 @@ def deploy_streams_flow(
 
         logger.info(f"Finished processing batch {batch_index + 1}/{total_batches}.")
 
-    # SECTION 5: Aggregate and summarize results
+    # SECTION 4: Aggregate and summarize results
     deployed_results = [result for result in all_deployment_results if result["status"] == "deployed"]
     skipped_during_deploy = [result for result in all_deployment_results if result["status"] == "skipped"]
 

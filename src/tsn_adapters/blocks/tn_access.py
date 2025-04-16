@@ -624,6 +624,63 @@ def task_insert_tn_records(
 ) -> Optional[List[str]]:
     return block.insert_tn_records(stream_id, records)
 
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
+def task_split_and_insert_records(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    max_batch_size: int = 25000,
+    wait: bool = True,
+) -> SplitInsertResults:
+    """
+    Split records into batches and insert them into TN.
+
+    This function filters out streams that are not initialized using a divide-and-conquer approach,
+    then splits the remaining records into batches and inserts them.
+
+    Args:
+        block: The TNAccessBlock instance
+        records: The records to insert
+        max_batch_size: Maximum number of records per batch
+        wait: Whether to wait for the transaction to be mined
+
+    Returns:
+        SplitInsertResults if successful, None if no records to insert
+    """
+    logger = get_logger_safe(__name__)
+    failed_reasons: list[str] = []
+
+    # fill empty data provider with current account
+    records["data_provider"] = records["data_provider"].fillna(block.current_account)
+    split_records = block.split_records(records, max_batch_size)
+    if len(split_records) == 0:
+        logger.warning("No records to insert")
+        failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+        return SplitInsertResults(
+            success_tx_hashes=[], failed_records=failed_records_typed, failed_reasons=failed_reasons
+        )
+
+    tx_hashes: list[str] | None = []
+    failed_records: list[DataFrame[TnDataRowModel]] = []
+    for batch in split_records:
+        try:
+            tx_hashes = task_batch_insert_tn_records(
+                block=block,
+                records=batch,
+                wait=wait,
+            )
+        except Exception as e:
+            failed_records.append(batch)
+            failed_reasons.append(str(e))
+
+    if len(failed_records) > 0:
+        failed_records_typed = DataFrame[TnDataRowModel](pd.concat(failed_records))
+    else:
+        failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+
+    return SplitInsertResults(
+        success_tx_hashes=(tx_hashes or []), failed_records=failed_records_typed, failed_reasons=failed_reasons
+    )
+
 
 def hash_record_stream_id(records: DataFrame[TnDataRowModel]) -> str:
     """Hash records to check for duplicates"""
