@@ -449,7 +449,7 @@ def disable_prefect_retries():
         "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
         "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
         # Stream Deploy Flow
-        "tsn_adapters.flows.stream_deploy_flow.task_check_exist_deploy_init",
+        "tsn_adapters.flows.stream_deploy_flow.check_deploy_stream",
         # Primitive Source Descriptor
         "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url",
         "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github",
@@ -478,14 +478,8 @@ def disable_prefect_retries():
         # TN Access
         "tsn_adapters.blocks.tn_access.task_wait_for_tx",
         "tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx",
-        "tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx",
         "tsn_adapters.blocks.tn_access._task_only_batch_insert_records",
         "tsn_adapters.blocks.tn_access.task_split_and_insert_records",
-        "tsn_adapters.blocks.tn_access.task_filter_initialized_streams",
-        # Stream Filtering
-        "tsn_adapters.blocks.stream_filtering.task_filter_batch_initialized_streams",
-        "tsn_adapters.blocks.stream_filtering.task_get_stream_states_divide_conquer",
-        "tsn_adapters.blocks.stream_filtering.task_filter_streams_divide_conquer",
         # TN Common
         "tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records",
         "tsn_adapters.common.trufnetwork.tn.task_deploy_primitive",
