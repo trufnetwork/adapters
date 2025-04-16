@@ -20,7 +20,6 @@ from tsn_adapters.blocks.shared_types import StreamLocatorModel
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.flows.stream_deploy_flow import (
     deploy_streams_flow,
-    filter_deployed_streams_task,
     mark_batch_deployed_task,
 )
 

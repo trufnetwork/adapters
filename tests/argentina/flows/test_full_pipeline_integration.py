@@ -19,7 +19,7 @@ from prefect_aws import S3Bucket
 import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session as SqlaSession
-from src.tsn_adapters.flows.stream_deploy_flow import deploy_streams_flow
+from tsn_adapters.flows.stream_deploy_flow import deploy_streams_flow
 from tests.argentina.helpers import upload_df_to_s3_csv_zip
 
 from tsn_adapters.blocks.models.sql_models import primitive_sources_table  # For DB verification
