@@ -693,9 +693,6 @@ def task_split_and_insert_records(
     """
     Split records into batches and insert them into TN.
 
-    This function filters out streams that are not initialized using a divide-and-conquer approach,
-    then splits the remaining records into batches and inserts them.
-
     Args:
         block: The TNAccessBlock instance
         records: The records to insert

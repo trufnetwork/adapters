@@ -523,7 +523,7 @@ class TestHistoricalFlowAdvanced:
         psd_block = MultiTickerDescriptorBlock()
 
         # Run the flow
-        result = historical_flow(
+        result = await historical_flow(
             fmp_block=fmp_block,
             psd_block=psd_block,
             tn_block=tn_block,
@@ -534,7 +534,7 @@ class TestHistoricalFlowAdvanced:
         )
 
         assert result is not None
-        assert result.is_completed
+        assert result.is_completed()
 
         # Verify operations are sequential
         fetch_operations = sequence.get_operations_by_type("fetch_")
