@@ -328,9 +328,12 @@ def deploy_streams_flow(
 
         # --- Conditional Stream Processing based on check_stream_state ---
         final_wait_futures_map: dict[str, PrefectFuture[Any]] = {}
+        already_initialized_ids_in_batch = set() # Initialize before conditional block
+        # stream_states will be assigned within the if block below if check_stream_state is True
 
         if check_stream_state:
             logger.info(f"Batch {i+1}: Processing with check_stream_state=True (Detailed check)")
+            # Initialize placeholder for streams found already initialized in this path
             try:
                 # Build StreamLocatorModel DataFrame for the batch.
                 if not filtered_batch_df.empty:
@@ -361,9 +364,12 @@ def deploy_streams_flow(
                     )
 
                     # Count streams already deployed and initialized, so we can report them as skipped.
+                    # Also store their IDs for potential marking later.
                     deployed_and_init_df = stream_states["deployed_and_initialized"]
                     skipped_in_batch_already_initialized = len(deployed_and_init_df)
                     total_skipped_already_initialized += skipped_in_batch_already_initialized
+                    if not deployed_and_init_df.empty:
+                        already_initialized_ids_in_batch = set(deployed_and_init_df["stream_id"].tolist())
 
                     # Submit deploy+init for non-deployed streams.
                     non_deployed_df = stream_states["non_deployed"]
@@ -443,19 +449,27 @@ def deploy_streams_flow(
             logger.info(f"Batch {i+1}: No tasks submitted or all submission failed.")
 
         # Mark Batch Deployed:
-        # Update the deployment state block for all streams successfully processed in this batch.
-        if deployment_state and successfully_processed_in_batch_ids:
+        # Update the deployment state block for streams successfully processed AND those found already initialized.
+        ids_to_mark_deployed = set(successfully_processed_in_batch_ids)
+
+        # Add streams found already deployed and initialized during the state check (if applicable)
+        # This uses the 'already_initialized_ids_in_batch' populated within the 'if check_stream_state' block
+        if check_stream_state and already_initialized_ids_in_batch:
+             logger.debug(f"Batch {i+1}: Adding {len(already_initialized_ids_in_batch)} already initialized streams to the marking list.")
+             ids_to_mark_deployed.update(already_initialized_ids_in_batch)
+
+        if deployment_state and ids_to_mark_deployed:
             logger.debug(
-                f"Batch {i+1}: Marking {len(successfully_processed_in_batch_ids)} streams as deployed in state block."
+                f"Batch {i+1}: Marking {len(ids_to_mark_deployed)} streams as deployed in state block."
             )
             current_time = datetime.now(timezone.utc)
             mark_batch_deployed_task.submit(
-                stream_ids=successfully_processed_in_batch_ids,
+                stream_ids=list(ids_to_mark_deployed), # Convert set back to list
                 deployment_state=deployment_state,
                 timestamp=current_time,
             )
         elif deployment_state:
-            logger.debug(f"Batch {i+1}: No streams successfully processed in this batch, skipping state marking.")
+            logger.debug(f"Batch {i+1}: No streams to mark as deployed in this batch (either processed or found initialized).")
 
         # Aggregate results for the batch:
         # Update running totals for deployed and skipped streams.
