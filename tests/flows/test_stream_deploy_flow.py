@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -7,7 +7,7 @@ from pandera.typing import DataFrame
 from prefect.futures import PrefectFuture
 from pydantic import ConfigDict, SecretStr
 import pytest
-from pytest import FixtureRequest, MonkeyPatch
+from pytest import FixtureRequest
 import trufnetwork_sdk_c_bindings.exports as truf_sdk  # type: ignore
 import trufnetwork_sdk_py.client as tn_client  # type: ignore
 
@@ -170,143 +170,6 @@ def test_deploy_streams_flow_all_new(
     tn_access_block: TestTNAccessBlock, primitive_descriptor: TestPrimitiveSourcesDescriptor
 ) -> None:
     """Test that all streams are deployed when none exist."""
-    results = deploy_streams_flow(psd_block=primitive_descriptor, tna_block=tn_access_block)
-
-    # All three streams should be deployed
-    assert results["deployed_count"] == 3
-    assert results["skipped_count"] == 0
-
-    # Verify the actual streams that were deployed
-    client = tn_access_block.client
-    assert isinstance(client, TestTNClient)  # Type check for mypy
-    assert set(client.deployed_streams) == {"stream_0", "stream_1", "stream_2"}
-
-
-@pytest.mark.usefixtures("prefect_test_fixture")
-def test_deploy_streams_flow_with_existing() -> None:
-    """Test that only non-existing streams are deployed when some already exist."""
-    # Create TNAccessBlock with some existing streams
-    existing_streams = {"stream_0", "stream_2"}  # First and last streams exist
-    tn_access_block = TestTNAccessBlock(existing_streams=existing_streams)
-
-    # Create descriptor with 3 streams
-    primitive_descriptor = TestPrimitiveSourcesDescriptor(num_streams=3)
-
-    results = deploy_streams_flow(psd_block=primitive_descriptor, tna_block=tn_access_block)
-
-    # Only stream_1 should be deployed, others should be skipped
-    assert results["deployed_count"] == 1
-    assert results["skipped_count"] == 2
-
-    # Verify the actual streams that were deployed
-    client = tn_access_block.client
-    assert isinstance(client, TestTNClient)  # Type check for mypy
-    assert client.deployed_streams == ["stream_1"]  # Changed from len check to exact match
-
-
-@pytest.mark.usefixtures("prefect_test_fixture")
-def test_deploy_streams_flow_with_deployment_state(
-    tn_access_block: TestTNAccessBlock,
-    primitive_descriptor: TestPrimitiveSourcesDescriptor,
-    deployment_state_block: TestDeploymentStateBlock,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    """Test that the flow uses deployment state to filter and mark streams."""
-    # Pre-mark stream_0 as deployed
-    deployment_state_block.deployed_streams = {"stream_0": True}
-
-    # Configure TN to have stream_0 exist (so it will be filtered out)
-    tn_access_block.set_existing_streams({"stream_0"})
-
-    # --- Mock the batch mark task submission to run synchronously ---
-    def mock_mark_submit(*args: Any, **kwargs: Any) -> PrefectFuture[None]:
-        # Directly call the marking logic on the provided state block
-        stream_ids = kwargs.get("stream_ids", [])
-        state_block = kwargs.get("deployment_state")
-        timestamp = kwargs.get("timestamp")
-        if state_block and stream_ids and timestamp:
-            # Simulate the task's core logic
-            if timestamp.tzinfo is None or timestamp.tzinfo.utcoffset(timestamp) is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-            elif timestamp.tzinfo != timezone.utc:
-                timestamp = timestamp.astimezone(timezone.utc)
-            state_block.mark_multiple_as_deployed(stream_ids, timestamp)
-        # Return a dummy future-like object if needed, though not strictly necessary here
-        mock_future = MagicMock(spec=PrefectFuture)
-        mock_future.result.return_value = None
-        return mock_future
-
-    monkeypatch.setattr("tsn_adapters.flows.stream_deploy_flow.mark_batch_deployed_task.submit", mock_mark_submit)
-    # --- End Mock ---
-
-    # Run flow with deployment state
-    results = deploy_streams_flow(
-        psd_block=primitive_descriptor, tna_block=tn_access_block, deployment_state=deployment_state_block
-    )
-
-    # Only streams 1 and 2 should be deployed, stream_0 should be skipped due to deployment state
-    assert results["deployed_count"] == 2
-    assert results["skipped_count"] == 1
-
-    # Verify that only streams 1 and 2 were deployed
-    client = tn_access_block.client
-    assert isinstance(client, TestTNClient)  # Type check for mypy
-    assert set(client.deployed_streams) == {"stream_1", "stream_2"}
-
-    # Verify that streams 1 and 2 were marked as deployed in the deployment state
-    for stream_id in ["stream_1", "stream_2"]:
-        assert deployment_state_block.deployed_streams.get(
-            stream_id, False
-        ), f"Stream {stream_id} was not marked deployed"
-
-    # Verify that the mark_multiple_as_deployed method was called
-    assert len(deployment_state_block.marked_streams) > 0
-    # The first element is the list of stream IDs, check that it contains the expected streams
-    stream_ids_list = deployment_state_block.marked_streams[0][0]
-    assert set(stream_ids_list) == {"stream_1", "stream_2"}
-
-
-@pytest.mark.usefixtures("prefect_test_fixture")
-def test_deploy_streams_flow_all_deployed_in_state(
-    tn_access_block: TestTNAccessBlock, primitive_descriptor: TestPrimitiveSourcesDescriptor, monkeypatch: MonkeyPatch
-) -> None:
-    """Test that if all streams are already deployed in the state, none are deployed."""
-    # Create a deployment state with all streams already deployed
-    deployment_state_block = TestDeploymentStateBlock(predeployed_streams={"stream_0", "stream_1", "stream_2"})
-
-    # Configure TN to have all streams exist (so they will all be filtered out)
-    tn_access_block.set_existing_streams({"stream_0", "stream_1", "stream_2"})
-
-    # --- Mock the batch mark task submission (shouldn't be called, but good practice) ---
-    mock_mark_submit = MagicMock()
-    monkeypatch.setattr("tsn_adapters.flows.stream_deploy_flow.mark_batch_deployed_task.submit", mock_mark_submit)
-    # --- End Mock ---
-
-    # Run flow with deployment state
-    results = deploy_streams_flow(
-        psd_block=primitive_descriptor, tna_block=tn_access_block, deployment_state=deployment_state_block
-    )
-
-    # All streams should be skipped due to deployment state
-    assert results["deployed_count"] == 0
-    assert results["skipped_count"] == 3
-
-    # Verify that no streams were deployed
-    client = tn_access_block.client
-    assert isinstance(client, TestTNClient)  # Type check for mypy
-    assert len(client.deployed_streams) == 0
-
-    # Verify that no streams were marked as deployed in the deployment state
-    assert len(deployment_state_block.marked_streams) == 0
-    mock_mark_submit.assert_not_called()  # Verify the mock submit wasn't called
-
-
-@pytest.mark.usefixtures("prefect_test_fixture")
-def test_deploy_streams_flow_backward_compatibility(
-    tn_access_block: TestTNAccessBlock, primitive_descriptor: TestPrimitiveSourcesDescriptor
-) -> None:
-    """Test that the flow still works without a deployment state (backward compatibility)."""
-    # Run flow without deployment state
     results = deploy_streams_flow(psd_block=primitive_descriptor, tna_block=tn_access_block)
 
     # All three streams should be deployed

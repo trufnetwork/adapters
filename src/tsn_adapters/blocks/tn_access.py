@@ -15,7 +15,6 @@ from typing import (
     TypeVar,
     Union,
     cast,
-    overload,
 )
 from typing_extensions import ParamSpec
 from pandera.typing import DataFrame
@@ -27,7 +26,6 @@ from prefect.states import Completed
 from pydantic import ConfigDict, Field, SecretStr
 
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
-from tsn_adapters.utils.date_type import ShortIso8601Date
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
 from tsn_adapters.utils.unix import check_unix_timestamp
@@ -649,26 +647,6 @@ class TNAccessBlock(Block):
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_all_records(block: TNAccessBlock, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
     return block.read_all_records(stream_id, data_provider)
-
-
-@overload
-def task_read_records(
-    block: TNAccessBlock,
-    stream_id: str,
-    data_provider: Optional[str] = None,
-    date_from: Optional[ShortIso8601Date] = None,
-    date_to: Optional[ShortIso8601Date] = None,
-) -> DataFrame[TnRecordModel]: ...
-
-
-@overload
-def task_read_records(
-    block: TNAccessBlock,
-    stream_id: str,
-    data_provider: Optional[str] = None,
-    date_from: Optional[int] = None,
-    date_to: Optional[int] = None,
-) -> DataFrame[TnRecordModel]: ...
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_records(
