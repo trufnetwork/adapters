@@ -13,7 +13,7 @@ from prefect_aws import S3Bucket
 
 from tsn_adapters.blocks.deployment_state import DeploymentStateBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records
+from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records, task_filter_initialized_streams
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames  # Import config
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
@@ -204,12 +204,31 @@ State is managed by Prefect Variables.
             total_records_transformed += num_transformed
             logger.info(f"Transformed {num_transformed} records for date {date_str}.")
 
-            # Step 11: Insert Transformed Data to TN
+            # Step 11: Pre-Insertion Filtering and Insert Transformed Data to TN
             if not transformed_data.empty:
-                logger.info(
-                    f"Submitting {num_transformed} transformed records for date {date_str} to TN insertion task..."
-                )
-                
+                # Batch filtering of streams and fail fast on first uninitialized stream
+                logger.info(f"Filtering {len(transformed_data)} transformed records for date {date_str} in batches of size {max_filter_size}...")
+                total_records = len(transformed_data)
+                for start in range(0, total_records, max_filter_size):
+                    batch = transformed_data.iloc[start : start + max_filter_size]
+                    batch_result = task_filter_initialized_streams(
+                        block=tn_block,
+                        records=batch,
+                        max_filter_size=max_filter_size,
+                    )
+                    uninitialized_streams = batch_result["uninitialized_streams"]
+                    if not uninitialized_streams.empty:
+                        uninit_list = uninitialized_streams["stream_id"].tolist()[:20]
+                        error_msg = (
+                            f"Halting flow: Date {date_str} cannot be processed because the following streams "
+                            f"are not initialized: {uninit_list}..."
+                        )
+                        logger.error(error_msg)
+                        raise DeploymentCheckError(error_msg)
+                # All streams are initialized
+                logger.info(f"All streams are initialized for date {date_str}. Proceeding to insertion.")
+                # Proceed to insertion without additional filtering
+                logger.info(f"Submitting {num_transformed} transformed records for date {date_str} to TN insertion task...")
                 results = task_split_and_insert_records(
                     block=tn_block,
                     records=transformed_data,
@@ -218,7 +237,7 @@ State is managed by Prefect Variables.
                     wait=True,
                     return_state=False,
                     max_filter_size=max_filter_size,
-                    filter_deployed_streams=filter_deployed_streams,
+                    filter_deployed_streams=False,
                 )
                 if results["failed_records"].empty:
                     logger.info(f"Successfully submitted records for date {date_str} to TN insertion task.")
