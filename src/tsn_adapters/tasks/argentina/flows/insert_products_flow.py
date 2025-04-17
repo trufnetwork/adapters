@@ -40,6 +40,7 @@ async def insert_argentina_products_flow(
     deployment_state: DeploymentStateBlock,
     batch_size: int = 10000,  # Default batch size (empirically chosen to balance API load and memory)
     max_filter_size: int = 500,  # Max number of streams per batch when filtering deployed streams
+    filter_deployed_streams: bool = True,
 ):
     """
     Inserts pre-calculated Argentina SEPA daily average product prices into TN streams.
@@ -217,6 +218,7 @@ State is managed by Prefect Variables.
                     wait=True,
                     return_state=False,
                     max_filter_size=max_filter_size,
+                    filter_deployed_streams=filter_deployed_streams,
                 )
                 if results["failed_records"].empty:
                     logger.info(f"Successfully submitted records for date {date_str} to TN insertion task.")
