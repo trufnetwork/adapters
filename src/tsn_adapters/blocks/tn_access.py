@@ -1018,7 +1018,7 @@ def task_split_and_insert_records(
     is_unix: bool = False,
     fail_on_batch_error: bool = False,
     filter_deployed_streams: bool = True,
-    max_filter_size: int = 5000,
+    max_filter_size: int = 500,
     filter_cache_duration: timedelta = timedelta(days=1),
     max_filter_depth: int = 10,
     # this is used only by truflation's data adapter streams

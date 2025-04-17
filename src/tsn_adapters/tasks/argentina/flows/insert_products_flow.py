@@ -19,7 +19,7 @@ from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames  # Im
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks import (
-    determine_dates_to_insert, # Now using the task
+    determine_dates_to_insert,
     load_daily_averages,
     transform_product_data,
 )
@@ -38,20 +38,37 @@ async def insert_argentina_products_flow(
     tn_block: TNAccessBlock,
     descriptor_block: PrimitiveSourcesDescriptorBlock,
     deployment_state: DeploymentStateBlock,
-    batch_size: int = 10000,
+    batch_size: int = 10000,  # Default batch size (empirically chosen to balance API load and memory)
+    max_filter_size: int = 500,  # Max number of streams per batch when filtering deployed streams
 ):
     """
     Inserts pre-calculated Argentina SEPA daily average product prices into TN streams.
 
-    Reads daily averages, maps products using a descriptor, transforms data,
-    inserts using batching, and manages state via Prefect Variables.
+    This flow:
+      1) Loads product-to-stream mapping (descriptor).
+      2) Determines new dates since the last run.
+      3) For each date:
+         - Loads raw SEPA average price data.
+         - Checks TN stream deployment status.
+         - Transforms data into TnDataRowModel.
+         - Submits batched insert tasks to TN.
+      4) Updates Prefect Variables and creates summary artifacts.
 
     Args:
-        s3_block: Prefect S3Bucket block for accessing daily averages and state file.
-        tn_block: Prefect TNAccessBlock block for TN insertion.
-        descriptor_block: Prefect PrimitiveSourcesDescriptorBlock for reading the product descriptor.
-        deployment_state: Prefect DeploymentStateBlock for checking stream deployment status.
-        batch_size: Size of record batches for the TN insertion task.
+        s3_block (S3Bucket): Block for accessing S3 data and metadata.
+        tn_block (TNAccessBlock): Block for TN insert API access.
+        descriptor_block (PrimitiveSourcesDescriptorBlock): Provides product-to-stream mappings.
+        deployment_state (DeploymentStateBlock): Verifies TN stream deployment status.
+        batch_size (int): Number of records per TN insert batch.
+        max_filter_size (int): Max number of streams per batch during stream filtering.
+
+    Returns:
+        None: Flow does not return; outputs artifacts and updates Prefect Variables.
+
+    Raises:
+        DeploymentCheckError: If required TN streams are not deployed.
+        RuntimeError: If loading descriptor fails.
+        Exception: On fatal errors during provider initialization, date determination, load, transform, or insert.
     """
     logger = get_run_logger()
     logger.info(f"Starting Argentina product insertion flow. Batch size: {batch_size}")
@@ -135,7 +152,7 @@ State is managed by Prefect Variables.
             # Get unique product IDs for this date
             product_ids_for_date: set[str] = set(daily_avg_df["id_producto"].unique())
 
-            # Map product IDs to required stream IDs using the descriptor
+            # Business mapping: external 'id_producto' -> TN 'stream_id' (per ARG SEPA spec)
             descriptor_subset = descriptor_df[descriptor_df["source_id"].isin(product_ids_for_date)]
             required_stream_ids: list[str] = descriptor_subset["stream_id"].tolist()
 
@@ -191,7 +208,7 @@ State is managed by Prefect Variables.
                 logger.info(
                     f"Submitting {num_transformed} transformed records for date {date_str} to TN insertion task..."
                 )
-                # No need to await here if the task runs concurrently
+                
                 results = task_split_and_insert_records(
                     block=tn_block,
                     records=transformed_data,
@@ -199,6 +216,7 @@ State is managed by Prefect Variables.
                     is_unix=True,
                     wait=True,
                     return_state=False,
+                    max_filter_size=max_filter_size,
                 )
                 if results["failed_records"].empty:
                     logger.info(f"Successfully submitted records for date {date_str} to TN insertion task.")
