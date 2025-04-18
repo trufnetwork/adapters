@@ -7,8 +7,8 @@ from typing import cast
 import pandas as pd
 from pandera.typing import DataFrame
 from prefect_sqlalchemy import SqlAlchemyConnector
-from sqlalchemy import Table, delete, select, Column
-from sqlalchemy.engine import Engine, Connection, Transaction
+from sqlalchemy import Table, delete, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import Select, func, ColumnElement
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -86,15 +86,20 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
         engine = self._get_engine()
         try:
             # Use engine.connect() which yields a Connection
-            with engine.connect() as connection: # type: Connection
+            with engine.connect() as connection:
                 # Select specific columns for clarity and correctness
                 # Ensure columns exist on the table object
-                stmt: Select = select(
+                # Build list of columns
+                cols = [
                     self._table.c.stream_id,
                     self._table.c.source_id,
-                    self._table.c.source_type
-                    # Add other necessary columns if PrimitiveSourceDataModel requires them
-                ).where(self._table.c.source_type == self.source_type) # Filter by source_type
+                    self._table.c.source_type,
+                    self._table.c.source_display_name,
+                ]
+                # Create select statement
+                stmt: Select = select(cols).where(
+                    self._table.c.source_type == self.source_type
+                )
                 
                 self.logger.debug(f"Querying table '{self.table_name}' for source_type '{self.source_type}'.")
                 # Use specific dtypes for read_sql for better type inference
@@ -165,7 +170,6 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
         try:
             # Use engine.begin() which yields a Connection within a Transaction context
             with engine.begin() as connection:
-                # Delete only rows matching the configured source_type
                 self.logger.info(f"Deleting existing rows with source_type '{self.source_type}' from table '{self.table_name}'.")
                 delete_stmt = delete(self._table).where(self._table.c.source_type == self.source_type)
                 delete_result = connection.execute(delete_stmt) 

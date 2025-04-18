@@ -4,7 +4,7 @@ from typing import cast
 
 import pandas as pd
 import pandera as pa
-from pandera import DataFrameModel
+from pandera import DataFrameModel, Field
 from pandera.typing import DataFrame, Series
 from prefect import Task, task
 from prefect.blocks.core import Block
@@ -20,6 +20,11 @@ class PrimitiveSourceDataModel(DataFrameModel):
     stream_id: Series[str]
     source_id: Series[str]
     source_type: Series[str]
+    source_display_name: Series[str] = Field(
+        description="The display name of the source",
+        default=None,
+        nullable=True,
+    )
 
     class Config(pa.DataFrameModel.Config):
         strict = "filter"
