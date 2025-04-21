@@ -29,6 +29,7 @@ class PrimitiveSourceDataModel(DataFrameModel):
     class Config(pa.DataFrameModel.Config):
         strict = "filter"
         coerce = True
+        add_missing_columns = True
 
 
 """
