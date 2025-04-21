@@ -974,7 +974,7 @@ def task_filter_initialized_streams(
         A DataFrame of records with initialized streams only
     """
     # We'll do the import here to avoid circular imports
-    from .stream_filtering import task_filter_streams_divide_conquer
+    from tsn_adapters.blocks.stream_filtering import task_filter_streams_divide_conquer
 
     logger = get_run_logger()
     logger.info(f"Filtering {len(records)} records for initialized streams")

@@ -201,6 +201,8 @@ State is managed by Prefect Variables.
             )
 
             num_transformed = len(transformed_data)
+            # Fill missing data_provider values for filtering (StreamLocatorModel requires non-null data_provider)
+            transformed_data["data_provider"] = transformed_data["data_provider"].fillna(tn_block.current_account)
             total_records_transformed += num_transformed
             logger.info(f"Transformed {num_transformed} records for date {date_str}.")
 

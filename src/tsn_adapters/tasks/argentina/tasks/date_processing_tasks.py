@@ -264,10 +264,9 @@ async def transform_product_data(
         transformed_df["value"] = transformed_df["value"].astype(str)
         logger.debug(f"Converted average prices to string values for {date_str}.")
 
-        # 7. Add missing 'data_provider' column (default to None/null if not available)
-        # TnDataRowModel expects this column
+        # 7. Add missing 'data_provider' column (nullable); ensure pandas StringDtype for proper validation
         if "data_provider" not in transformed_df.columns:
-             transformed_df["data_provider"] = None # Pandera handles None for nullable str
+            transformed_df["data_provider"] = pd.Series([None] * len(transformed_df), dtype="string")
 
     except KeyError as e:
         logger.error(f"Missing expected column during transformation for {date_str}: {e}", exc_info=True)
