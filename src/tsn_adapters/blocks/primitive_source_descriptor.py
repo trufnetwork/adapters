@@ -24,12 +24,12 @@ class PrimitiveSourceDataModel(DataFrameModel):
         description="The display name of the source",
         default=None,
         nullable=True,
-        required=False,
     )
 
     class Config(pa.DataFrameModel.Config):
         strict = "filter"
         coerce = True
+        add_missing_columns = True
 
 
 """
