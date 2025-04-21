@@ -24,6 +24,7 @@ class PrimitiveSourceDataModel(DataFrameModel):
         description="The display name of the source",
         default=None,
         nullable=True,
+        required=False,
     )
 
     class Config(pa.DataFrameModel.Config):
