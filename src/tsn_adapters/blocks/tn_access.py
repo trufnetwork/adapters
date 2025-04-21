@@ -992,6 +992,8 @@ def task_filter_initialized_streams(
             "fallback_used": False,
         }
 
+    # Fill missing data_provider for stream locator extraction
+    records["data_provider"] = records["data_provider"].fillna(block.current_account)
     stream_locators_typed = extract_stream_locators(records)
 
     # Use the divide and conquer algorithm
