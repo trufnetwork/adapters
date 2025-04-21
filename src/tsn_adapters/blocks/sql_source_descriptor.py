@@ -97,7 +97,7 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
                     self._table.c.source_display_name,
                 ]
                 # Create select statement
-                stmt: Select = select(cols).where(
+                stmt: Select = select(*cols).where(
                     self._table.c.source_type == self.source_type
                 )
                 
@@ -132,11 +132,13 @@ class SqlAlchemySourceDescriptor(WritableSourceDescriptorBlock):
 
         except SQLAlchemyError as e:
             self.logger.error(f"Error querying table '{self.table_name}': {e}", exc_info=True)
+            raise
         except Exception as e:
             self.logger.error(
                 f"An unexpected error occurred retrieving descriptor from table '{self.table_name}': {e}",
                 exc_info=True,
             )
+            raise
             
         # Return validated empty DataFrame in case of any error
         empty_df = pd.DataFrame(columns=list(PrimitiveSourceDataModel.to_schema().columns.keys()))
