@@ -12,8 +12,8 @@ S = TypeVar("S", bound="TnDataRowModel")
 
 
 class TnRecord(BaseModel):
-    date: str
-    value: str
+    date: int
+    value: float
 
 
 class TnRecordModel(pa.DataFrameModel):
@@ -21,8 +21,8 @@ class TnRecordModel(pa.DataFrameModel):
     Schema for TN records
     """
 
-    date: Series[str]  # A string here to support both date formats and unix timestamps (seconds)
-    value: Series[str]  # Can't use decimal.Decimal in series
+    date: Series[int]  # A string here to support both date formats and unix timestamps (seconds)
+    value: Series[float]  # Can't use decimal.Decimal in series
 
     class Config(pa.DataFrameModel.Config):
         coerce = True
