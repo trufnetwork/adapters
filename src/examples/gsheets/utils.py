@@ -19,9 +19,9 @@ def task_prepare_records_for_tsn(df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_records_for_tsn(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare the records for TSN by converting the date to YYYY-MM-DD format.
+    Prepare the records for TSN by converting the date to UNIX format.
     """
-    df.loc[:, "date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df.loc[:, "date"] = pd.to_datetime(df["date"]).astype(int) // 10**9 # convert to UNIX
     return df
 
 

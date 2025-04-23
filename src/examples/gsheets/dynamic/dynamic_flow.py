@@ -93,7 +93,7 @@ def gsheets_flow(repo: str, sources_path: str, destination_tsn_provider: str):
 
             # Insert the records into TSN, concurrently, if needed
             insert_job = task_insert_tsn_records.submit(
-                stream_id=row["stream_id"], records=cast_future.cast_future(reconciled_records), client=client
+                stream_id=row["stream_id"], records=cast_future(reconciled_records), client=client
             )
             insert_jobs.append(insert_job)
 
