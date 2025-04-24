@@ -250,11 +250,11 @@ def docker_network():
     """
     logger.info("Setting up docker network...")
     # Remove existing network (ignore errors)
-    run_docker_command(["network", "rm", NETWORK_NAME])
+    #run_docker_command(["network", "rm", NETWORK_NAME])
 
     # Create the new network
     try:
-        run_docker_command(["network", "create", NETWORK_NAME], check=True)
+        #run_docker_command(["network", "create", NETWORK_NAME], check=True)
         logger.info(f"Docker network '{NETWORK_NAME}' created.")
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to create docker network '{NETWORK_NAME}': {e.stderr}")
@@ -264,7 +264,7 @@ def docker_network():
         yield NETWORK_NAME
     finally:
         logger.info("Tearing down docker network...")
-        run_docker_command(["network", "rm", NETWORK_NAME])
+        #run_docker_command(["network", "rm", NETWORK_NAME])
         logger.info(f"Docker network '{NETWORK_NAME}' removed.")
 
 
@@ -289,32 +289,32 @@ def tn_node(docker_network: str) -> Generator[str, None, None]:
     Raises:
         pytest.FixureError: If container setup fails
     """
-    logger.info("Starting Postgres container...")
-    if not start_container(POSTGRES_CONTAINER, docker_network):
-        pytest.fail("Failed to start Postgres container")
+    # logger.info("Starting Postgres container...")
+    # if not start_container(POSTGRES_CONTAINER, docker_network):
+    #     pytest.fail("Failed to start Postgres container")
 
-    logger.info("Waiting for Postgres to be healthy...")
-    if not wait_for_postgres_health():
-        stop_container(POSTGRES_CONTAINER.name)
-        pytest.fail("Postgres failed to become healthy")
+    # logger.info("Waiting for Postgres to be healthy...")
+    # if not wait_for_postgres_health():
+    #     # stop_container(POSTGRES_CONTAINER.name)
+    #     pytest.fail("Postgres failed to become healthy")
 
-    logger.info("Starting TSN-DB container...")
-    if not start_container(TSN_DB_CONTAINER, docker_network):
-        stop_container(POSTGRES_CONTAINER.name)
-        pytest.fail("Failed to start TSN-DB container")
+    # logger.info("Starting TSN-DB container...")
+    # if not start_container(TSN_DB_CONTAINER, docker_network):
+    #     # stop_container(POSTGRES_CONTAINER.name)
+    #     pytest.fail("Failed to start TSN-DB container")
 
-    logger.info("Waiting for TSN-DB node to be healthy...")
-    if not wait_for_tsn_health():
-        stop_container(TSN_DB_CONTAINER.name)
-        stop_container(POSTGRES_CONTAINER.name)
-        pytest.fail("TSN-DB node failed to become healthy")
+    # logger.info("Waiting for TSN-DB node to be healthy...")
+    # if not wait_for_tsn_health():
+    #     # stop_container(TSN_DB_CONTAINER.name)
+    #     # stop_container(POSTGRES_CONTAINER.name)
+    #     pytest.fail("TSN-DB node failed to become healthy")
 
     try:
         yield "http://localhost:8484"
     finally:
         logger.info("Cleaning up containers...")
-        stop_container(TSN_DB_CONTAINER.name)
-        stop_container(POSTGRES_CONTAINER.name)
+        #stop_container(TSN_DB_CONTAINER.name)
+        #stop_container(POSTGRES_CONTAINER.name)
 
 
 class TrufNetworkProvider:

@@ -778,15 +778,16 @@ def task_batch_insert_tn_records(
     logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
 
     # we use task so it may retry on network or nonce errors
-    tx_or_none = _task_only_batch_insert_records(
+    tx_hashes = _task_only_batch_insert_records(
         block=block, records=records
     )
 
-    if wait and tx_or_none is not None:
+    if wait and tx_hashes is not None:
         # we need to use task so it may retry on network errors
-        task_wait_for_tx(block=block, tx_hash=tx_or_none)
+        for tx_hash in tx_hashes:
+            task_wait_for_tx(block=block, tx_hash=tx_hash)
 
-    return tx_or_none
+    return tx_hashes
 
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=2, retry_condition_fn=tn_special_retry_condition(3))

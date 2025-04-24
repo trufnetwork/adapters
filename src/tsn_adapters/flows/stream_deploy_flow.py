@@ -71,7 +71,6 @@ def check_deploy_stream(stream_id: str, tna_block: TNAccessBlock) -> DeployStrea
     Args:
         stream_id: ID of the stream to check and potentially deploy
         tna_block: TNAccessBlock instance for TN interactions
-        is_unix: Whether to use Unix timestamps (default: False)
 
     Returns:
         A DeployStreamResult indicating whether the stream was deployed or skipped
@@ -204,7 +203,6 @@ def deploy_streams_flow(
     Args:
         psd_block: Block providing the stream descriptors
         tna_block: Block for TN interactions
-        is_unix: Whether to use Unix timestamps (default: False)
         batch_size: Number of streams to deploy in each batch (default: 500)
         start_from_batch: Batch number to start from (default: 0)
         deployment_state: Optional block for tracking deployment state

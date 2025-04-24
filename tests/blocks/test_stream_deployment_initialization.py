@@ -57,7 +57,7 @@ def test_task_deploy_primitive_success():
     mock_block.deploy_stream.assert_called_once_with(
         stream_id="test_stream_success",
         wait=True, # Default value
-        stream_type=truf_sdk.StreamTypePrimitive # Default value for is_unix=False
+        stream_type=truf_sdk.StreamTypePrimitive
     )
     assert result == "dummy_tx_hash"
 

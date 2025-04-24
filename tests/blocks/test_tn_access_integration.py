@@ -92,7 +92,7 @@ def insert_unix_records(tn_block: TNAccessBlock, stream_id: str, records: DataFr
     records_copy = records.copy()
     records_copy["date"] = records_copy["date"].astype(int)
 
-    # Use batch_insert_tn_records with is_unix=True
+    # Use batch_insert_tn_records
     tx_hash = tn_block.batch_insert_tn_records(
         DataFrame[TnDataRowModel](
             pd.DataFrame(

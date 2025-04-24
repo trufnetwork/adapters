@@ -196,7 +196,6 @@ State is managed by Prefect Variables.
                     block=tn_block,
                     records=transformed_data,
                     max_batch_size=batch_size,
-                    is_unix=True,
                     wait=True,
                     return_state=False,
                 )
