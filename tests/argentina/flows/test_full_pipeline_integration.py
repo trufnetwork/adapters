@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from functools import partial  # To pass verification args
 import inspect
 from typing import Any, Callable, Optional
+from collections import defaultdict
 
 from mypy_boto3_s3 import S3Client
 import pandas as pd
@@ -34,6 +35,7 @@ from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPricePro
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import _generate_stream_id  # type: ignore
 from tsn_adapters.utils.logging import get_logger_safe
 
+
 # === Helper Functions for Verification ===
 
 
@@ -53,6 +55,7 @@ def _generate_expected_tn_records(
         expected_records[source_id] = sorted(
             [(_dt_to_ts(date_str), str(price)) for date_str, price in data_list], key=lambda x: x[0]
         )  # Sort by date
+    
     return expected_records
 
 
@@ -162,7 +165,7 @@ def _verify_tn_records(
         logger.debug(f"[{phase_name}] Verifying records for {source_id} (stream: {stream_id})...")
         try:
             # Read records (returns DataFrame[TnRecordModel])
-            tn_records_df: DataFrame[TnRecordModel] = tn_block.read_records(stream_id=stream_id, is_unix=True)
+            tn_records_df: DataFrame[TnRecordModel] = tn_block.read_records(stream_id=stream_id)
 
             # Prepare expected DataFrame
             expected_df = pd.DataFrame(expected_data, columns=["date", "value"])
@@ -206,13 +209,10 @@ def _verify_stream_existence(
         stream_id = id_map.get(source_id)
         assert stream_id is not None, f"[{phase_name}] Stream ID missing for {source_id} in id_map"
         try:
-            if not tn_block.stream_exists(account, stream_id):
-                logger.error(
-                    f"[{phase_name}] Verification failed: Expected stream '{stream_id}' ({source_id}) does not exist in TN."
-                )
-                missing_streams.append(stream_id)
+            tn_block.get_stream_type(account, stream_id)
         except Exception as e:
-            pytest.fail(f"[{phase_name}] tn_block.stream_exists failed for expected stream '{stream_id}': {e}")
+            missing_streams.append(stream_id)
+            pytest.fail(f"[{phase_name}] failed for expected stream '{stream_id}': {e}")
 
     assert not missing_streams, f"[{phase_name}] Expected streams not found in TN: {missing_streams}"
     logger.info(f"TrufNetwork stream existence verification successful after {phase_name}.")
@@ -440,6 +440,13 @@ async def test_full_argentina_pipeline(
     )
     db_df = agg_results["_verify_db_state"]  # Get DB state for next phase
     id_map_d1_d3 = db_df.set_index("source_id")["stream_id"].to_dict()
+    
+    # Cleanup previous deployment
+    for stream_id in id_map_d1_d3.values():
+        try: 
+            tn_block.destroy_stream(stream_id)
+        except:
+            logger.info("Stream doesn't exist, continue to next stream cleanup..")
 
     # Phase 3: Deployment (First Run)
     _ = await _run_flow_and_verify(
@@ -449,7 +456,6 @@ async def test_full_argentina_pipeline(
             "psd_block": sql_descriptor_block,
             "tna_block": tn_block,
             "deployment_state": sql_deployment_state,
-            "is_unix": True,
         },
         verifications=[
             (partial(_verify_variable_state, expected_agg_date="2024-05-03", expected_ins_date="1970-01-01"), {}),
@@ -472,10 +478,12 @@ async def test_full_argentina_pipeline(
     )
 
     # Phase 4: Insertion (First Run)
-    initial_source_data = {**source_data_d1, **source_data_d2, **source_data_d3}
-    records_d1_d3_data = {}
-    for pid, (date, price) in initial_source_data.items():
-        records_d1_d3_data.setdefault(pid, []).append((date, price))
+    records_d1_d3_data = defaultdict(list)
+
+    for d in [source_data_d1, source_data_d2, source_data_d3]:
+        for k, v in d.items():
+            records_d1_d3_data[k].append(v)
+        
     expected_records_d1_d3 = _generate_expected_tn_records(records_d1_d3_data)
 
     await _run_flow_and_verify(
@@ -606,7 +614,6 @@ async def test_full_argentina_pipeline(
             "psd_block": sql_descriptor_block,
             "tna_block": tn_block,
             "deployment_state": sql_deployment_state,
-            "is_unix": True,
         },
         verifications=[
             (
@@ -632,10 +639,13 @@ async def test_full_argentina_pipeline(
     )
 
     # === Phase 8: Insertion (Resumption) ===
-    final_source_data = {**source_data_d1, **source_data_d2, **source_data_d3, **source_data_d4, **source_data_d5}
-    records_d1_d5_data = {}
-    for pid, (date, price) in final_source_data.items():
-        records_d1_d5_data.setdefault(pid, []).append((date, price))
+
+    records_d1_d5_data = defaultdict(list)
+
+    for d in [source_data_d1, source_data_d2, source_data_d3, source_data_d4, source_data_d5]:
+        for k, v in d.items():
+            records_d1_d5_data[k].append(v)
+
     expected_records_d1_d5 = _generate_expected_tn_records(records_d1_d5_data)
 
     await _run_flow_and_verify(
@@ -666,3 +676,6 @@ async def test_full_argentina_pipeline(
 
     # Phase 9: Cleanup (Handled by fixtures)
     logger.info("--- Test finished successfully ---")
+
+    for stream_id in id_map_d1_d5.values():
+        tn_block.destroy_stream(stream_id)

@@ -5,6 +5,8 @@ This module contains the Pandera model for validating and typing the aggregated
 price data from the SEPA dataset.
 """
 
+import pandas as pd
+
 from typing import Callable
 
 from pandera import DataFrameModel
@@ -45,6 +47,7 @@ def sepa_aggregated_prices_to_tn_records(
 ) -> DataFrame[TnDataRowModel]:
     new_df = df.copy()
     new_df["value"] = new_df["avg_price"].astype(str)
-    new_df["date"] = new_df["date"].astype(str)
+    new_df["date"] = pd.to_datetime(new_df["date"])
+    new_df["date"] = new_df["date"].astype(int) // 10**9 # convert to UNIX
     new_df["stream_id"] = new_df["category_id"].apply(get_stream_id)
     return DataFrame[TnDataRowModel](new_df)
