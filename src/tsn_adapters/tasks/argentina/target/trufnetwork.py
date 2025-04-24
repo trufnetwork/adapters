@@ -92,9 +92,7 @@ class TrufNetworkClient(ITargetClient[StreamId]):
         results = task_split_and_insert_records(
             block=self.block,
             records=data,
-            is_unix=False,
             wait=True,
-            has_external_created_at=True,
         )
 
         if not results["failed_records"].empty:
