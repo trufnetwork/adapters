@@ -585,6 +585,7 @@ class TNAccessBlock(Block):
         Returns:
             Transaction hash if successful, None otherwise
         """
+        logging = get_run_logger()
         if len(records) == 0:
             return None
 
@@ -611,10 +612,13 @@ class TNAccessBlock(Block):
                 inputs=inputs
             ))
 
+        logging.info(f"batches fffff", batches)
         if not batches:
             return None
 
         with concurrency("tn-write", occupy=1):
+            logging.info(self.client.get_current_account)
+
             tx_hashes = self.client.batch_insert_records(
                 batches=batches,
                 wait=False,
