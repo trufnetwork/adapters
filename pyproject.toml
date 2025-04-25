@@ -10,7 +10,7 @@ readme = "README.md"
 dependencies = [
     "prefect-client>=3.3.1",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
-    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@409cd13e89374fc8ebd82e07abc38536a4d040a6",
+    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@289b73aff04447e7af5551982816391af8bd947f",
     "PyGithub",
     "pandera>=0.23.1",
     "pandas",
