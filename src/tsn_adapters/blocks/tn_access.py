@@ -518,16 +518,27 @@ class TNAccessBlock(Block):
                 for rec in recs
             ]
             df = pd.DataFrame(recs_list, columns=["date", "value"])
+            return DataFrame[TnRecordModel](df)
 
         except Exception as e:
+            msg = str(e).lower()
+            # If no records exist, return an empty typed DataFrame instead of erroring
+            if "record not found" in msg:
+                self.logger.warning(
+                    f"No records found for stream '{stream_id}' "
+                    f"(provider={data_provider}, from={date_from}, to={date_to}); "
+                    "returning empty DataFrame."
+                )
+                # utility from above: create an empty DataFrame with the right schema
+                return create_typed_empty_df(TnRecordModel, ["date", "value"])
+
+            # All other errors are real failures
             self.logger.error(
                 f"Error reading records from TN, stream_id: {stream_id}, "
                 f"data_provider: {data_provider}, date_from: {date_from}, "
                 f"date_to: {date_to}: {e}"
             )
             raise e
-
-        return DataFrame[TnRecordModel](df)
 
     @handle_tn_errors
     def insert_tn_records(
@@ -775,7 +786,19 @@ def task_batch_insert_tn_records(
     """
     logging = get_run_logger()
 
+    logging.info("Inserting records bbbbb")
     logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
+
+    logging.info(f"Columns: {list(records.columns)}")
+    logging.info(f"Records to insert: {records}")
+
+    for idx, row in records.iterrows():
+        vals = ", ".join(f"{col}={row[col]!r}" for col in records.columns)
+        logging.info(f"Row {idx + 1}: {vals}")
+        # and if you want a full table print:
+        logging.info("\n" + records.to_string(index=True))
+
+    logging.info("Batch insert complete cccc")
 
     # we use task so it may retry on network or nonce errors
     tx_hashes = _task_only_batch_insert_records(
