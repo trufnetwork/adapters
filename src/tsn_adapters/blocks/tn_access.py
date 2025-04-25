@@ -615,6 +615,9 @@ class TNAccessBlock(Block):
         if not batches:
             return None
 
+        print(f"aaa bathces", batches)
+        print(f"batches[0]", batches[0])
+
         with concurrency("tn-write", occupy=1):
             tx_hashes = self.client.batch_insert_records(
                 batches=batches,
