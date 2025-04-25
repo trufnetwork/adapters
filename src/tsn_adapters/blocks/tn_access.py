@@ -796,6 +796,8 @@ def task_batch_insert_tn_records(
     logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
 
     logging.info(f"Columns: {list(records.columns)}")
+    logging.info(f"account: {block.current_account}")
+    logging.info(f"account: {block.client.get_current_account}")
     # logging.info(f"Records to insert: {records}")
 
     # for idx, row in records.iterrows():
