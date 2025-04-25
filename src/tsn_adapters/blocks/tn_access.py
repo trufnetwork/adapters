@@ -523,6 +523,7 @@ class TNAccessBlock(Block):
         except Exception as e:
             msg = str(e).lower()
             # If no records exist, return an empty typed DataFrame instead of erroring
+            self.logger.info(f"msg is", msg)
             if "record not found" in msg:
                 self.logger.warning(
                     f"No records found for stream '{stream_id}' "
