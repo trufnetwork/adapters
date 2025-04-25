@@ -82,7 +82,7 @@ def check_deploy_stream(stream_id: str, tna_block: TNAccessBlock) -> DeployStrea
 
     # Create deployment transaction and wait for confirmation
     try:
-        tx_deploy = task_deploy_primitive(block=tna_block, stream_id=stream_id, wait=False)
+        tx_deploy = task_deploy_primitive(block=tna_block, stream_id=stream_id, wait=True)
         task_wait_for_tx(block=tna_block, tx_hash=tx_deploy)
         logger.debug(f"Deployed stream {stream_id} (tx: {tx_deploy}).")
     except Exception as e:
