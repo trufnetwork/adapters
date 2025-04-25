@@ -566,6 +566,7 @@ class TNAccessBlock(Block):
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
+            logging.info(self.client.get_current_account)
             tx_hashes = self.client.batch_insert_records(batches)
             logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
 
