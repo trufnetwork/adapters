@@ -790,13 +790,13 @@ def task_batch_insert_tn_records(
     logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
 
     logging.info(f"Columns: {list(records.columns)}")
-    logging.info(f"Records to insert: {records}")
+    # logging.info(f"Records to insert: {records}")
 
-    for idx, row in records.iterrows():
-        vals = ", ".join(f"{col}={row[col]!r}" for col in records.columns)
-        logging.info(f"Row {idx + 1}: {vals}")
+    # for idx, row in records.iterrows():
+    #     vals = ", ".join(f"{col}={row[col]!r}" for col in records.columns)
+        # logging.info(f"Row {idx + 1}: {vals}")
         # and if you want a full table print:
-        logging.info("\n" + records.to_string(index=True))
+        # logging.info("\n" + records.to_string(index=True))
 
     logging.info("Batch insert complete cccc")
 
