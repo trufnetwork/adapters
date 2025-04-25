@@ -520,6 +520,20 @@ class TNAccessBlock(Block):
             df = pd.DataFrame(recs_list, columns=["date", "value"])
 
         except Exception as e:
+            msg = str(e).lower()
+            # If no records exist, return an empty typed DataFrame instead of erroring
+            self.logger.info(f"msg is", msg)
+            if "record not found" in msg:
+                self.logger.warning(
+                    f"No records found for stream '{stream_id}' "
+                    f"(provider={data_provider}, from={date_from}, to={date_to}); "
+                    "returning empty DataFrame."
+                )
+
+                # utility from above: create an empty DataFrame with the right schema
+                return create_typed_empty_df(TnRecordModel, ["date", "value"])
+
+            # All other errors are real failures
             self.logger.error(
                 f"Error reading records from TN, stream_id: {stream_id}, "
                 f"data_provider: {data_provider}, date_from: {date_from}, "
