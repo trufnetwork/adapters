@@ -232,11 +232,17 @@ def _prepare_new_products_df(
         # Return empty DataFrame matching PrimitiveSourceDataModel schema
         return create_empty_df(PrimitiveSourceDataModel)
 
-    # Expect 'id_producto'
-    new_products_output = new_products[["id_producto"]].copy()
+    # Expect 'id_producto' and 'productos_descripcion' for display name
+    new_products_output = new_products[["id_producto", "productos_descripcion"]].copy()
 
-    # Rename 'id_producto' to 'source_id'
-    new_products_output.rename(columns={"id_producto": "source_id"}, inplace=True)
+    # Rename columns to match PrimitiveSourceDataModel fields
+    new_products_output.rename(
+        columns={
+            "id_producto": "source_id",
+            "productos_descripcion": "source_display_name",
+        },
+        inplace=True,
+    )
 
     # Generate stream_id
     new_products_output["stream_id"] = new_products_output["source_id"].apply(_generate_stream_id)

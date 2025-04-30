@@ -138,6 +138,7 @@ def expected_df_day1() -> pd.DataFrame:
             "stream_id": ["arg_sepa_prod_1"],
             "source_id": ["1"],
             "source_type": ["argentina_sepa_product"],
+            "source_display_name": [None],
         }
     )
     return PrimitiveSourceDataModel.validate(df, lazy=True)
@@ -151,6 +152,7 @@ def expected_df_day2(expected_df_day1: pd.DataFrame) -> pd.DataFrame:
             "stream_id": ["arg_sepa_prod_1", "arg_sepa_prod_2"],
             "source_id": ["1", "2"],
             "source_type": ["argentina_sepa_product", "argentina_sepa_product"],
+            "source_display_name": [None, None],
         }
     )
     # Re-validate to ensure schema compliance
@@ -403,11 +405,13 @@ async def test_aggregate_flow_end_to_end_resume(
             "stream_id": "arg_sepa_prod_P001",
             "source_id": "P001",
             "source_type": "argentina_sepa_product",
+            "source_display_name": None,
         },
         {
             "stream_id": "arg_sepa_prod_P002",
             "source_id": "P002",
             "source_type": "argentina_sepa_product",
+            "source_display_name": None,
         },
     ]
     initial_data_df = pd.DataFrame(initial_products)
@@ -481,6 +485,7 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
             "stream_id": "arg_sepa_prod_OLD",
             "source_id": "OLD",
             "source_type": "argentina_sepa_product",
+            "source_display_name": None,
         }
     ]
     initial_data_df = pd.DataFrame(initial_products)
