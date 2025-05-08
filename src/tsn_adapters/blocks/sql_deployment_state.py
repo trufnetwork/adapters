@@ -64,9 +64,11 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
     def has_been_deployed(self, stream_id: str) -> bool:
         """Check if the deployment has been performed for a given stream_id."""
         engine = self._get_engine()
-        stmt = select(self._table.c.is_deployed).where(
-            self._table.c.stream_id == stream_id,
-            self._table.c.source_type == self.source_type,  # Filter by source_type
+        stmt = select([self._table.c.is_deployed]).where(
+            and_(
+                self._table.c.stream_id == stream_id,
+                self._table.c.source_type == self.source_type,  # Filter by source_type
+            )
         )
         try:
             with engine.connect() as connection:
@@ -74,10 +76,10 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
                 return bool(result)  # Return False if None (not found) or False
         except SQLAlchemyError as e:
             self.logger.error(f"Database error checking deployment for '{stream_id}': {e}", exc_info=True)
-            return False  # Treat errors as not deployed
+            raise  # Re-raise after logging
         except Exception as e:
             self.logger.error(f"Unexpected error checking deployment for '{stream_id}': {e}", exc_info=True)
-            return False
+            raise  # Re-raise after logging
 
     def check_multiple_streams(self, stream_ids: list[str]) -> dict[str, bool]:
         """Check deployment status for multiple stream_ids."""
@@ -88,9 +90,11 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         if not unique_ids:
             return {}
 
-        stmt = select(self._table.c.stream_id, self._table.c.is_deployed).where(
-            self._table.c.stream_id.in_(unique_ids),
-            self._table.c.source_type == self.source_type,  # Filter by source_type
+        stmt = select([self._table.c.stream_id, self._table.c.is_deployed]).where(
+            and_(
+                self._table.c.stream_id.in_(unique_ids),
+                self._table.c.source_type == self.source_type,  # Filter by source_type
+            )
         )
         results = {stream_id: False for stream_id in unique_ids}  # Initialize all as False
         try:
@@ -101,10 +105,10 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
             return results
         except SQLAlchemyError as e:
             self.logger.error(f"Database error checking multiple deployments: {e}", exc_info=True)
-            return results  # Return initialized dict on error
+            raise  # Re-raise after logging
         except Exception as e:
             self.logger.error(f"Unexpected error checking multiple deployments: {e}", exc_info=True)
-            return results
+            raise  # Re-raise after logging
 
     def get_deployment_states(self) -> DataFrame[DeploymentStateModel]:
         """Retrieve the deployment states (stream_id and nullable deployment_timestamp)
@@ -113,7 +117,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         engine = self._get_engine()
         # Select stream_id and deployed_at for all streams of the specified type
         stmt = (
-            select(self._table.c.stream_id, self._table.c.deployed_at.label("deployment_timestamp")).where(
+            select([self._table.c.stream_id, self._table.c.deployed_at.label("deployment_timestamp")]).where(
                 self._table.c.source_type == self.source_type
             )  # Filter by source_type
         )
@@ -278,7 +282,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
 
         # Start transaction
         with engine.begin() as connection:
-            for index, row in validated_states.iterrows():
+            for _, row in validated_states.iterrows():
                 stream_id = row["stream_id"]
                 timestamp = row["deployment_timestamp"]
 
