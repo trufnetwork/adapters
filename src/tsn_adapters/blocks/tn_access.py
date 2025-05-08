@@ -1,6 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import decimal
 from functools import wraps
+
+# Import hashing and json libs, Prefect context
+import hashlib
+import json
 from math import ceil
 from typing import (
     Any,
@@ -18,6 +22,7 @@ from prefect import Task, get_run_logger, task
 from prefect.blocks.core import Block
 from prefect.client.schemas.objects import State, TaskRun
 from prefect.concurrency.sync import concurrency, rate_limit
+from prefect.context import TaskRunContext
 from prefect.states import Completed
 from pydantic import ConfigDict, Field, SecretStr
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
@@ -25,6 +30,7 @@ import trufnetwork_sdk_py.client as tn_client
 from typing_extensions import ParamSpec
 
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
+from tsn_adapters.common.trufnetwork.tn import task_batch_filter_streams_by_existence
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
 from tsn_adapters.utils.tn_record import create_record_batches
@@ -138,8 +144,10 @@ def handle_tn_errors(func: F) -> F:
 
     return cast(F, wrapper)
 
+
 P = ParamSpec("P")
 R = TypeVar("R")
+
 
 def tn_special_retry_condition(max_other_error_retries: int) -> Any:
     """
@@ -257,6 +265,7 @@ class MetadataProcedureNotFoundError(Exception):
 
 class StreamAlreadyExistsError(Exception):
     """Custom exception raised when attempting to deploy a stream that already exists."""
+
     def __init__(self, stream_id: str):
         self.stream_id = stream_id
         super().__init__(f"Stream '{stream_id}' already exists.")
@@ -270,16 +279,16 @@ class StreamAlreadyExistsError(Exception):
             return error
         msg = str(error).lower()
         import re
+
         # Match "transaction failed: dataset exists: <stream_id>"
         match = re.search(r"dataset exists: ([a-z0-9]+)", msg)
         if match:
             stream_id = match.group(1)
             return cls(stream_id)
-        if (
-            isinstance(error, RuntimeError) and ("dataset exists" in msg or "already exists" in msg)
-        ):
+        if isinstance(error, RuntimeError) and ("dataset exists" in msg or "already exists" in msg):
             # Try to extract stream_id if possible, else use a placeholder
             import re
+
             match = re.search(r"stream '([^']+)' already exists", str(error))
             stream_id = match.group(1) if match else "unknown"
             return cls(stream_id)
@@ -299,6 +308,7 @@ class StreamAlreadyExistsError(Exception):
 
 class StreamAlreadyInitializedError(Exception):
     """Custom exception raised when attempting to initialize a stream that is already initialized."""
+
     def __init__(self, stream_id: str):
         self.stream_id = stream_id
         super().__init__(f"Stream '{stream_id}' is already initialized.")
@@ -311,10 +321,9 @@ class StreamAlreadyInitializedError(Exception):
         if isinstance(error, StreamAlreadyInitializedError):
             return error
         msg = str(error).lower()
-        if (
-            isinstance(error, RuntimeError) and ("already initialized" in msg)
-        ):
+        if isinstance(error, RuntimeError) and ("already initialized" in msg):
             import re
+
             match = re.search(r"stream '([^']+)' is already initialized", str(error))
             stream_id = match.group(1) if match else "unknown"
             return cls(stream_id)
@@ -435,9 +444,7 @@ class TNAccessBlock(Block):
         raise NotImplementedError("is_allowed_to_write is not implemented")
 
     @handle_tn_errors
-    def get_earliest_date(
-        self, stream_id: str, data_provider: Optional[str] = None
-    ) -> Optional[datetime]:
+    def get_earliest_date(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[datetime]:
         """
         Get the earliest date available for a stream.
 
@@ -480,9 +487,7 @@ class TNAccessBlock(Block):
         return self.read_records(stream_id, data_provider, date_from=date_string_to_unix("1000-01-01"))
 
     @handle_tn_errors
-    def get_first_record(
-        self, stream_id: str, data_provider: Optional[str] = None
-    ) -> Optional[TnRecord]:
+    def get_first_record(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[TnRecord]:
         with concurrency("tn-read", occupy=1):
             result = self.client.get_first_record(stream_id, data_provider)
 
@@ -544,10 +549,7 @@ class TNAccessBlock(Block):
 
     @handle_tn_errors
     def insert_tn_records(
-        self,
-        stream_id: str,
-        records: DataFrame[TnRecordModel],
-        records_per_batch: int = 300
+        self, stream_id: str, records: DataFrame[TnRecordModel], records_per_batch: int = 300
     ) -> Optional[list[str]]:
         logging = get_run_logger()
 
@@ -596,7 +598,7 @@ class TNAccessBlock(Block):
                 (records["stream_id"] == row["stream_id"])
                 & (records["data_provider"].fillna("") == (row["data_provider"] or ""))
             ]
-            
+
             inputs = [
                 tn_client.Record(date=int(record["date"]), value=float(record["value"]))
                 for record in stream_records.to_dict(orient="records")
@@ -605,11 +607,8 @@ class TNAccessBlock(Block):
             # check that all dates are unix timestamps
             if not all(check_unix_timestamp(int(record["date"])) for record in inputs):
                 raise ValueError("All dates must be unix timestamps")
-    
-            batches.append(tn_client.RecordBatch(
-                stream_id=row["stream_id"],
-                inputs=inputs
-            ))
+
+            batches.append(tn_client.RecordBatch(stream_id=row["stream_id"], inputs=inputs))
 
         if not batches:
             return None
@@ -657,9 +656,7 @@ class TNAccessBlock(Block):
         ]
 
     @handle_tn_errors
-    def batch_deploy_streams(
-        self, definitions: list[tn_client.StreamDefinitionInput], wait: bool = True
-    ) -> str:
+    def batch_deploy_streams(self, definitions: list[tn_client.StreamDefinitionInput], wait: bool = True) -> str:
         """
         Deploy multiple streams using the batch SDK function.
 
@@ -675,7 +672,9 @@ class TNAccessBlock(Block):
         # Assuming a concurrency limit name, replace 'tn_write_operations' if a different one is used
         # or if no specific limit is needed here beyond what the SDK/network handles.
         # For consistency with batch_insert_tn_records, let's assume a general write limit.
-        with concurrency("tn-write", timeout_seconds=300): #timeout needs to be set based on typical network conditions for batch deployment
+        with concurrency(
+            "tn-write", timeout_seconds=300
+        ):  # timeout needs to be set based on typical network conditions for batch deployment
             tx_hash = self.client.batch_deploy_streams(definitions=definitions, wait=wait)
         self.logger.info(
             f"Batch deployment transaction submitted for {len(definitions)} streams: {tx_hash} (wait: {wait})"
@@ -698,9 +697,7 @@ class TNAccessBlock(Block):
         Returns:
             A list of `tn_client.StreamLocatorInput` for streams that match the filter criteria.
         """
-        self.logger.debug(
-            f"Batch filtering {len(locators)} streams by existence (return_existing: {return_existing})."
-        )
+        self.logger.debug(f"Batch filtering {len(locators)} streams by existence (return_existing: {return_existing}).")
         # Assuming read operations might have a different or no specific concurrency limit
         # If TN operations are generally limited, apply a relevant concurrency scope.
         # For now, let's assume this is a lighter operation not needing the same write lock.
@@ -708,23 +705,23 @@ class TNAccessBlock(Block):
         filtered_locators = self.client.batch_filter_streams_by_existence(
             locators=locators, return_existing=return_existing
         )
-        self.logger.info(
-            f"Batch filter by existence complete. Found {len(filtered_locators)} matching streams."
-        )
+        self.logger.info(f"Batch filter by existence complete. Found {len(filtered_locators)} matching streams.")
         return filtered_locators
+
 
 # --- Top Level Task Functions ---
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_all_records(block: TNAccessBlock, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
     return block.read_all_records(stream_id, data_provider)
 
+
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_records(
-        block: TNAccessBlock,
-        stream_id: str,
-        data_provider: Optional[str] = None,
-        date_from: Union[int, None] = None,
-        date_to: Union[int, None] = None,
+    block: TNAccessBlock,
+    stream_id: str,
+    data_provider: Optional[str] = None,
+    date_from: Union[int, None] = None,
+    date_to: Union[int, None] = None,
 ) -> DataFrame[TnRecordModel]:
     """Read records from TSN with support for both ISO dates and Unix timestamps.
 
@@ -745,6 +742,7 @@ def task_read_records(
         date_to=date_to,
     )
 
+
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_tn_records(
     block: TNAccessBlock,
@@ -753,59 +751,71 @@ def task_insert_tn_records(
 ) -> Optional[list[str]]:
     return block.insert_tn_records(stream_id, records)
 
+
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_split_and_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     max_batch_size: int = 25000,
     wait: bool = True,
+    filter_deployed_streams: bool = True,
+    filter_cache_duration: timedelta = timedelta(days=1),
+    max_streams_per_existence_check: int = 1000,
 ) -> SplitInsertResults:
     """
-    Split records into batches and insert them into TN.
+    Splits records into batches and inserts them into TN, optionally filtering by stream existence first.
+
+    Orchestrates filtering and batch insertion logic.
 
     Args:
-        block: The TNAccessBlock instance
-        records: The records to insert
-        max_batch_size: Maximum number of records per batch
-        wait: Whether to wait for the transaction to be mined
+        block: The TNAccessBlock instance.
+        records: The records to insert.
+        max_batch_size: Maximum number of records per insert batch.
+        wait: Whether to wait for the insertion transaction(s) to be mined.
+        filter_deployed_streams: Whether to filter out streams that do not exist on TN.
+        filter_cache_duration: How long to cache the stream existence filter results.
+        max_streams_per_existence_check: Max streams to check in one existence API call.
 
     Returns:
-        SplitInsertResults if successful, None if no records to insert
+        SplitInsertResults containing transaction hashes and any failed records/reasons.
     """
     logger = get_logger_safe(__name__)
-    failed_reasons: list[str] = []
+    processed_records = records.copy()
 
-    # fill empty data provider with current account
-    records["data_provider"] = records["data_provider"].fillna(block.current_account)
-    split_records = block.split_records(records, max_batch_size)
-    if len(split_records) == 0:
-        logger.warning("No records to insert")
-        failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
-        return SplitInsertResults(
-            success_tx_hashes=[], failed_records=failed_records_typed, failed_reasons=failed_reasons
-        )
+    # 1. Fill default data provider
+    processed_records["data_provider"] = processed_records["data_provider"].fillna(block.current_account)
 
-    tx_hashes: list[str] | None = []
-    failed_records: list[DataFrame[TnDataRowModel]] = []
-    for batch in split_records:
+    # 2. Optionally Filter Records
+    if filter_deployed_streams and not processed_records.empty:
         try:
-            tx_hashes = task_batch_insert_tn_records(
+            processed_records = _filter_records_by_stream_existence(
                 block=block,
-                records=batch,
-                wait=wait,
+                records=processed_records,
+                max_streams_per_existence_check=max_streams_per_existence_check,
+                filter_cache_duration=filter_cache_duration,
             )
         except Exception as e:
-            failed_records.append(batch)
-            failed_reasons.append(str(e))
+            # Error during filtering is critical, re-raise to fail the task
+            logger.error(f"Halting task due to error during stream existence filtering: {e!s}", exc_info=True)
+            raise
 
-    if len(failed_records) > 0:
-        failed_records_typed = DataFrame[TnDataRowModel](pd.concat(failed_records))
-    else:
-        failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+    # 3. Perform Batch Insertions
+    if processed_records.empty:
+        logger.warning("No records remaining to insert after filtering.")
+        # Return empty success result
+        empty_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+        return SplitInsertResults(success_tx_hashes=[], failed_records=empty_df, failed_reasons=[])
 
-    return SplitInsertResults(
-        success_tx_hashes=(tx_hashes or []), failed_records=failed_records_typed, failed_reasons=failed_reasons
+    # Call the helper function for insertion
+    # Pass through necessary params if they were kept (e.g., wait)
+    insertion_results = _perform_batch_insertions(
+        block=block,
+        records_to_insert=processed_records,
+        max_batch_size=max_batch_size,
+        wait=wait,
     )
+
+    return insertion_results
 
 
 def hash_record_stream_id(records: DataFrame[TnDataRowModel]) -> str:
@@ -848,9 +858,7 @@ def task_batch_insert_tn_records(
     logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
 
     # we use task so it may retry on network or nonce errors
-    tx_hashes = _task_only_batch_insert_records(
-        block=block, records=records
-    )
+    tx_hashes = _task_only_batch_insert_records(block=block, records=records)
 
     if wait and tx_hashes is not None:
         # we need to use task so it may retry on network errors
@@ -876,9 +884,7 @@ def task_insert_and_wait_for_tx(
     logging = get_run_logger()
 
     logging.info(f"Inserting {len(records)} records into stream {stream_id}")
-    insertion = task_insert_tn_records(
-        block=block, stream_id=stream_id, records=records, data_provider=data_provider
-    )
+    insertion = task_insert_tn_records(block=block, stream_id=stream_id, records=records, data_provider=data_provider)
 
     if insertion.result() is None:
         return Completed(message="No records to insert")
@@ -907,6 +913,227 @@ def task_destroy_stream(block: TNAccessBlock, stream_id: str, wait: bool = True)
         The transaction hash
     """
     return block.destroy_stream(stream_id, wait)
+
+
+# --- Custom Cache Key Function ---
+
+
+def filter_existence_cache_key(
+    context: TaskRunContext,  # Prefect provides context
+    parameters: dict[str, Any],  # Prefect provides parameters
+) -> str:
+    """
+    Generates a cache key for task_batch_filter_streams_by_existence
+    based on a stable representation of locators and the return_existing flag.
+    Raises KeyError if required parameters are missing.
+    """
+    try:
+        locators = parameters["locators"]  # Direct access, will raise KeyError if missing
+        return_existing = parameters["return_existing"]  # Direct access
+    except KeyError as e:
+        # Fail fast with an informative error
+        raise KeyError(
+            f"Cache key generation failed: Missing expected parameter '{e.args[0]}' for task referenced by "
+            f"TaskRunContext '{context.task_run.name if context and context.task_run else 'Unknown'}'"
+        ) from e
+
+    # Proceed with sorting and hashing only if parameters are present
+    try:
+        # Ensure keys exist and handle potential None values robustly
+        stable_locators = sorted(
+            [(str(loc.get("stream_id", "")), str(loc.get("data_provider", ""))) for loc in locators]
+        )
+    except Exception as e:
+        # Log error if locators aren't as expected, fall back to less specific key
+        # get_run_logger() might not be available outside task/flow context, use basic print/log
+        print(f"WARNING: Could not generate stable locator list for caching: {e}. Using basic key.")
+        stable_locators = []  # Avoid hashing potentially unstable input on error
+
+    # Combine with return_existing flag
+    key_data = {
+        "locators_repr": stable_locators,  # Use a different key name from param
+        "return_existing": return_existing,
+    }
+
+    # Use json dumps with sort_keys for a stable string representation, then hash
+    # Using sha256 for robustness against potential hash collisions with large inputs
+    hasher = hashlib.sha256()
+    hasher.update(json.dumps(key_data, sort_keys=True).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+# --- Helper Function for Filtering ---
+
+
+def _filter_records_by_stream_existence(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    max_streams_per_existence_check: int,
+    filter_cache_duration: timedelta,
+) -> DataFrame[TnDataRowModel]:
+    """Filters records based on stream existence on TN.
+
+    Args:
+        block: TNAccessBlock instance.
+        records: Input DataFrame with potential records.
+        max_streams_per_existence_check: Max streams per filter API call.
+        filter_cache_duration: Cache duration for the existence check.
+
+    Returns:
+        Filtered DataFrame containing only records for existing streams.
+
+    Raises:
+        Exception: If the underlying existence check task fails.
+    """
+    logger = get_logger_safe(__name__)
+    logger.info(
+        f"Filtering {len(records)} records by stream existence (batch size: {max_streams_per_existence_check})..."
+    )
+    unique_locators_df = extract_stream_locators(records)
+
+    locators_to_check: list[tn_client.StreamLocatorInput] = [
+        tn_client.StreamLocatorInput(stream_id=str(row["stream_id"]), data_provider=str(row["data_provider"]))
+        for _, row in unique_locators_df.iterrows()
+    ]
+
+    if not locators_to_check:
+        logger.info("No unique stream locators found to filter.")
+        return records  # Return original if no locators to check
+
+    total_non_existent_set = set()
+    num_filter_batches = ceil(len(locators_to_check) / max_streams_per_existence_check)
+    logger.info(f"Checking existence for {len(locators_to_check)} unique locators in {num_filter_batches} batches (asking for non-existent).")
+
+    for i in range(num_filter_batches):
+        start_idx = i * max_streams_per_existence_check
+        end_idx = start_idx + max_streams_per_existence_check
+        current_filter_batch = locators_to_check[start_idx:end_idx]
+        batch_num_log = i + 1
+
+        logger.debug(
+            f"Checking existence filter batch {batch_num_log}/{num_filter_batches} ({len(current_filter_batch)} locators, asking for non-existent)..."
+        )
+
+        try:
+            # Apply custom cache key function
+            existence_check_task = task_batch_filter_streams_by_existence.with_options(
+                cache_key_fn=filter_existence_cache_key, cache_expiration=filter_cache_duration
+            )
+            # Request non-existent streams
+            non_existent_locators_in_batch = existence_check_task.submit(
+                block=block, locators=current_filter_batch, return_existing=False
+            ).result()
+
+            batch_non_existent_set = {
+                (str(loc["data_provider"]), str(loc["stream_id"])) for loc in non_existent_locators_in_batch
+            }
+            total_non_existent_set.update(batch_non_existent_set)
+            logger.debug(
+                f"Existence filter batch {batch_num_log}: Found {len(batch_non_existent_set)} non-existent streams."
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Error during stream existence filtering for batch {batch_num_log}: {e!s}. Halting filter process.",
+                exc_info=True,
+            )
+            raise  # Re-raise to fail the calling task
+
+    # Filter the original records using the aggregated set of non-existent streams
+    original_count = len(records)
+    if total_non_existent_set:
+        # Create a MultiIndex of non-existent streams to check against
+        non_existent_tuples = list(total_non_existent_set)
+        non_existent_index = pd.MultiIndex.from_tuples(non_existent_tuples, names=["data_provider", "stream_id"])
+        
+        # Create a MultiIndex from the records DataFrame for efficient filtering
+        records_index = pd.MultiIndex.from_frame(records[["data_provider", "stream_id"]])
+        
+        # Keep records that are NOT in the non_existent_index
+        filtered_records = records[~records_index.isin(non_existent_index)]
+    else:
+        # If no streams were reported as non-existent, all are considered existent
+        filtered_records = records.copy()
+
+
+    filtered_out_count = original_count - len(filtered_records)
+    logger.info(
+        f"Finished existence check. Filtered out {filtered_out_count} records belonging to non-existent streams."
+    )
+    return DataFrame[TnDataRowModel](filtered_records)  # Ensure Pandera type is returned
+
+
+# --- Helper Function for Batch Insertion ---
+
+
+def _perform_batch_insertions(
+    block: TNAccessBlock,
+    records_to_insert: DataFrame[TnDataRowModel],
+    max_batch_size: int,
+    wait: bool,
+) -> SplitInsertResults:
+    """Splits records and performs batch insertions, collecting results.
+
+    Args:
+        block: TNAccessBlock instance.
+        records_to_insert: DataFrame of records ready for insertion.
+        max_batch_size: Max records per insertion API call.
+        wait: Whether to wait for insertion transactions.
+
+    Returns:
+        SplitInsertResults dictionary.
+    """
+    logger = get_logger_safe(__name__)
+    failed_reasons: list[str] = []
+    success_tx_hashes: list[str] = []
+    failed_records_list: list[DataFrame[TnDataRowModel]] = []
+
+    split_records_batches = block.split_records(records_to_insert, max_batch_size)
+
+    if not split_records_batches:
+        logger.warning("No record batches to insert.")
+        # Fall through to return empty results
+    else:
+        logger.info(
+            f"Submitting {len(records_to_insert)} records for insertion in {len(split_records_batches)} batches."
+        )
+        for i, batch in enumerate(split_records_batches):
+            batch_num_log = i + 1
+            logger.debug(
+                f"Submitting insertion batch {batch_num_log}/{len(split_records_batches)} ({len(batch)} records)..."
+            )
+            try:
+                # Assuming task_batch_insert_tn_records handles the actual API call
+                # It might need `is_unix` and `has_external_created_at` if those params are still relevant
+                # Passing them through from the main task signature if needed.
+                tx_hashes_or_none = task_batch_insert_tn_records(
+                    block=block,
+                    records=batch,
+                    wait=wait,
+                    # Add is_unix and has_external_created_at here if they were kept in task_split_and_insert_records signature
+                    # is_unix=is_unix,
+                    # has_external_created_at=has_external_created_at
+                )
+                if tx_hashes_or_none:
+                    success_tx_hashes.extend(tx_hashes_or_none)
+                logger.debug(f"Insertion batch {batch_num_log} submitted. TXs: {tx_hashes_or_none}")
+            except Exception as e:
+                logger.error(f"Insertion batch {batch_num_log} failed: {e!s}", exc_info=True)
+                failed_records_list.append(batch)
+                failed_reasons.append(str(e))
+                # Decide if fail_on_batch_error logic is needed here or handled by Prefect retries on the task
+
+    # Combine failed records
+    if failed_records_list:
+        failed_records_df = DataFrame[TnDataRowModel](pd.concat(failed_records_list))
+    else:
+        failed_records_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+
+    return SplitInsertResults(
+        success_tx_hashes=success_tx_hashes,
+        failed_records=failed_records_df,
+        failed_reasons=failed_reasons,
+    )
 
 
 if __name__ == "__main__":
