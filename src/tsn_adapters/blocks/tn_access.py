@@ -1,22 +1,18 @@
-import decimal
-from math import ceil
-import pandas as pd
-import trufnetwork_sdk_c_bindings.exports as truf_sdk
-import trufnetwork_sdk_py.client as tn_client
-
 from datetime import datetime, timezone
+import decimal
 from functools import wraps
+from math import ceil
 from typing import (
     Any,
     Callable,
-    List,
     Optional,
     TypedDict,
     TypeVar,
     Union,
     cast,
 )
-from typing_extensions import ParamSpec
+
+import pandas as pd
 from pandera.typing import DataFrame
 from prefect import Task, get_run_logger, task
 from prefect.blocks.core import Block
@@ -24,12 +20,15 @@ from prefect.client.schemas.objects import State, TaskRun
 from prefect.concurrency.sync import concurrency, rate_limit
 from prefect.states import Completed
 from pydantic import ConfigDict, Field, SecretStr
+import trufnetwork_sdk_c_bindings.exports as truf_sdk
+import trufnetwork_sdk_py.client as tn_client
+from typing_extensions import ParamSpec
 
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
-from tsn_adapters.utils.unix import check_unix_timestamp
 from tsn_adapters.utils.tn_record import create_record_batches
+from tsn_adapters.utils.unix import check_unix_timestamp
 
 # --- Type Variables ---
 T = TypeVar("T")  # Generic type for DataFrame models
@@ -522,7 +521,7 @@ class TNAccessBlock(Block):
         except Exception as e:
             msg = str(e).lower()
             # If no records exist, return an empty typed DataFrame instead of erroring
-            self.logger.info(f"msg is", msg)
+            self.logger.info(f"msg is {msg}")
             if "record not found" in msg:
                 self.logger.warning(
                     f"No records found for stream '{stream_id}' "
@@ -549,7 +548,7 @@ class TNAccessBlock(Block):
         stream_id: str,
         records: DataFrame[TnRecordModel],
         records_per_batch: int = 300
-    ) -> Optional[List[str]]:
+    ) -> Optional[list[str]]:
         logging = get_run_logger()
 
         if len(records) == 0:
@@ -577,7 +576,7 @@ class TNAccessBlock(Block):
     def batch_insert_tn_records(
         self,
         records: DataFrame[TnDataRowModel],
-    ) -> Optional[List[str]]:
+    ) -> Optional[list[str]]:
         """Batch insert records into multiple streams.
 
         Args:
@@ -657,6 +656,63 @@ class TNAccessBlock(Block):
             for i in range(0, len(records), max_batch_size)
         ]
 
+    @handle_tn_errors
+    def batch_deploy_streams(
+        self, definitions: list[tn_client.StreamDefinitionInput], wait: bool = True
+    ) -> str:
+        """
+        Deploy multiple streams using the batch SDK function.
+
+        Args:
+            definitions: A list of stream definitions, where each definition is a
+                         `tn_client.StreamDefinitionInput` typed dict.
+            wait: If True, wait for the transaction to be confirmed.
+
+        Returns:
+            The transaction hash of the batch deployment.
+        """
+        self.logger.debug(f"Batch deploying {len(definitions)} streams (wait: {wait}).")
+        # Assuming a concurrency limit name, replace 'tn_write_operations' if a different one is used
+        # or if no specific limit is needed here beyond what the SDK/network handles.
+        # For consistency with batch_insert_tn_records, let's assume a general write limit.
+        with concurrency("tn-write", timeout_seconds=300): #timeout needs to be set based on typical network conditions for batch deployment
+            tx_hash = self.client.batch_deploy_streams(definitions=definitions, wait=wait)
+        self.logger.info(
+            f"Batch deployment transaction submitted for {len(definitions)} streams: {tx_hash} (wait: {wait})"
+        )
+        return tx_hash
+
+    @handle_tn_errors
+    def batch_filter_streams_by_existence(
+        self, locators: list[tn_client.StreamLocatorInput], return_existing: bool
+    ) -> list[tn_client.StreamLocatorInput]:
+        """
+        Filter a list of streams based on their existence using the batch SDK function.
+
+        Args:
+            locators: A list of stream locators, where each locator is a
+                      `tn_client.StreamLocatorInput` typed dict.
+            return_existing: If True, returns streams that exist.
+                             If False, returns streams that do not exist.
+
+        Returns:
+            A list of `tn_client.StreamLocatorInput` for streams that match the filter criteria.
+        """
+        self.logger.debug(
+            f"Batch filtering {len(locators)} streams by existence (return_existing: {return_existing})."
+        )
+        # Assuming read operations might have a different or no specific concurrency limit
+        # If TN operations are generally limited, apply a relevant concurrency scope.
+        # For now, let's assume this is a lighter operation not needing the same write lock.
+        # If issues arise, a 'tn-read' concurrency scope could be added.
+        filtered_locators = self.client.batch_filter_streams_by_existence(
+            locators=locators, return_existing=return_existing
+        )
+        self.logger.info(
+            f"Batch filter by existence complete. Found {len(filtered_locators)} matching streams."
+        )
+        return filtered_locators
+
 # --- Top Level Task Functions ---
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_all_records(block: TNAccessBlock, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
@@ -694,7 +750,7 @@ def task_insert_tn_records(
     block: TNAccessBlock,
     stream_id: str,
     records: DataFrame[TnRecordModel],
-) -> Optional[List[str]]:
+) -> Optional[list[str]]:
     return block.insert_tn_records(stream_id, records)
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
@@ -764,7 +820,7 @@ def hash_record_stream_id(records: DataFrame[TnDataRowModel]) -> str:
 def _task_only_batch_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-) -> Optional[List[str]]:
+) -> Optional[list[str]]:
     """Insert records into TSN without waiting for transaction confirmation"""
     return block.batch_insert_tn_records(records=records)
 
@@ -775,7 +831,7 @@ def task_batch_insert_tn_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     wait: bool = False,
-) -> Optional[List[str]]:
+) -> Optional[list[str]]:
     """Batch insert records into multiple streams
 
     Args:

@@ -7,7 +7,7 @@ from trufnetwork_sdk_py.utils import generate_stream_id
 from math import ceil
 from prefect import flow, task
 from dotenv import load_dotenv
-from typing import Dict, Optional
+from typing import  Optional, TypedDict
 from tsn_adapters.blocks.tn_access import UNUSED_INFINITY_RETRIES, TNAccessBlock, tn_special_retry_condition, StreamAlreadyExistsError
 from tsn_adapters.utils.time_utils import date_string_to_unix
 from tsn_adapters.utils.tn_record import create_record_batches
@@ -56,14 +56,14 @@ def insert_tsn_records(
     tags=["tn", "tn-write"],
 )
 def task_insert_multiple_tsn_records(
-    data: Dict[str, pd.DataFrame],
+    data: dict[str, pd.DataFrame],
     client: tn_client.TNClient,
     wait: bool = False,
 ):
     return insert_multiple_tsn_records(data, client, wait)
 
 def insert_multiple_tsn_records(
-    data: Dict[str, pd.DataFrame],
+    data: dict[str, pd.DataFrame],
     client: tn_client.TNClient,
     wait: bool = True,
     records_per_batch: int = 300
@@ -159,6 +159,184 @@ def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = Tru
         # For any other error, re-raise it to be handled by Prefect's retry mechanism
         logger.error(f"Error deploying stream {stream_id}: {e!s}", exc_info=True)
         raise e
+
+
+@task(
+    name="Batch Deploy Streams",
+    retries=UNUSED_INFINITY_RETRIES,
+    retry_delay_seconds=10,
+    retry_condition_fn=tn_special_retry_condition(3),
+    tags=["tn", "tn-write"],
+)
+def task_batch_deploy_streams(
+    block: TNAccessBlock, definitions: list[tn_client.StreamDefinitionInput], wait: bool = True
+) -> str:
+    """
+    Task to deploy multiple streams using the TNAccessBlock.
+
+    Args:
+        block: The TNAccessBlock instance.
+        definitions: A list of stream definitions for batch deployment.
+        wait: If True, wait for the transaction to be confirmed.
+
+    Returns:
+        The transaction hash of the batch deployment.
+    """
+    logger = get_logger_safe()
+    logger.info(f"Task: Batch deploying {len(definitions)} streams (wait: {wait}).")
+    try:
+        tx_hash = block.batch_deploy_streams(definitions=definitions, wait=wait)
+        logger.info(f"Task: Batch deployment TX hash: {tx_hash}")
+        return tx_hash
+    except Exception as e:
+        logger.error(f"Task: Error during batch deployment of {len(definitions)} streams: {e!s}", exc_info=True)
+        raise
+
+
+@task(
+    name="Batch Filter Streams by Existence",
+    retries=UNUSED_INFINITY_RETRIES, # Read operations might not need as aggressive retries, adjust if necessary
+    retry_delay_seconds=5,
+    retry_condition_fn=tn_special_retry_condition(3),
+    tags=["tn", "tn-read"],
+)
+def task_batch_filter_streams_by_existence(
+    block: TNAccessBlock, locators: list[tn_client.StreamLocatorInput], return_existing: bool
+) -> list[tn_client.StreamLocatorInput]:
+    """
+    Task to filter a list of streams based on their existence using TNAccessBlock.
+
+    Args:
+        block: The TNAccessBlock instance.
+        locators: A list of stream locators.
+        return_existing: If True, returns streams that exist. Otherwise, returns non-existent ones.
+
+    Returns:
+        A list of stream locators matching the filter criteria.
+    """
+    logger = get_logger_safe()
+    logger.info(
+        f"Task: Batch filtering {len(locators)} streams by existence (return_existing: {return_existing})."
+    )
+    try:
+        filtered_locators = block.batch_filter_streams_by_existence(
+            locators=locators, return_existing=return_existing
+        )
+        logger.info(f"Task: Found {len(filtered_locators)} matching streams after filtering.")
+        return filtered_locators
+    except Exception as e:
+        logger.error(
+            f"Task: Error during batch filtering of {len(locators)} streams: {e!s}", exc_info=True
+        )
+        raise
+
+
+class FilterAndDeployResult(TypedDict):
+    deployed_stream_ids: list[str]
+    skipped_stream_ids_already_exist: list[str]
+    deployment_tx_hash: Optional[str]
+
+
+@task(
+    name="Filter and Deploy Streams",
+    retries=UNUSED_INFINITY_RETRIES, # Relies on sub-task retries primarily
+    retry_delay_seconds=5,
+    retry_condition_fn=tn_special_retry_condition(2), # Fewer retries for the orchestrator
+    tags=["tn", "tn-write", "tn-read"],
+)
+def task_filter_and_deploy_streams(
+    block: TNAccessBlock,
+    potential_definitions: list[tn_client.StreamDefinitionInput],
+    wait_for_deployment_tx: bool = False, # If True, task_batch_deploy_streams waits
+) -> FilterAndDeployResult:
+    """
+    Filters a list of potential stream definitions for existence on TN,
+    then deploys those that do not exist. Orchestrates other batch tasks.
+    All definitions are assumed to be for primitive streams.
+
+    Args:
+        block: The TNAccessBlock instance.
+        potential_definitions: A list of stream definitions that might need deployment.
+        wait_for_deployment_tx: Passed to task_batch_deploy_streams's 'wait' param.
+                                  If False, a tx_hash is returned for later waiting.
+
+    Returns:
+        A FilterAndDeployResult dictionary.
+    """
+    logger = get_logger_safe()
+    logger.info(f"Task: Starting filter and deploy for {len(potential_definitions)} potential streams.")
+
+    deployed_sids: list[str] = []
+    skipped_sids_exist: list[str] = []
+    tx_hash: Optional[str] = None
+
+    if not potential_definitions:
+        logger.info("Task: No potential definitions provided. Nothing to do.")
+        return FilterAndDeployResult(
+            deployed_stream_ids=deployed_sids,
+            skipped_stream_ids_already_exist=skipped_sids_exist,
+            deployment_tx_hash=tx_hash,
+        )
+
+    # 1. Create locators for existence check
+    locators_for_check: list[tn_client.StreamLocatorInput] = []
+    data_provider = block.current_account
+    potential_ids_map = {defn["stream_id"]: defn for defn in potential_definitions}
+
+    for defn in potential_definitions:
+        locators_for_check.append(
+            tn_client.StreamLocatorInput(stream_id=defn["stream_id"], data_provider=data_provider)
+        )
+
+    # 2. Filter by existence (call task directly)
+    try:
+        logger.debug(f"Task: Checking existence for {len(locators_for_check)} streams.")
+        # Use return_existing=True to find streams that ARE on TN
+        existent_locators = task_batch_filter_streams_by_existence(
+            block=block, locators=locators_for_check, return_existing=True
+        )
+        
+        existent_sids = {str(loc["stream_id"]) for loc in existent_locators}
+        logger.debug(f"Task: Found {len(existent_sids)} streams already on TN.")
+
+    except Exception as e:
+        logger.error(f"Task: Error during batch stream existence check: {e!s}. Cannot proceed with this batch.", exc_info=True)
+        # This is critical; if we can't check existence, we shouldn't deploy.
+        raise # Re-raise to let Prefect handle retry for this orchestrating task
+
+    # 3. Determine streams to deploy and skipped streams
+    definitions_to_deploy: list[tn_client.StreamDefinitionInput] = []
+    for sid, defn in potential_ids_map.items():
+        if sid in existent_sids:
+            skipped_sids_exist.append(sid)
+        else:
+            definitions_to_deploy.append(defn)
+    
+    logger.info(f"Task: {len(definitions_to_deploy)} streams to deploy, {len(skipped_sids_exist)} streams already exist.")
+
+    # 4. Deploy non-existent streams if any
+    if definitions_to_deploy:
+        try:
+            logger.debug(f"Task: Deploying {len(definitions_to_deploy)} streams (wait_for_tx: {wait_for_deployment_tx}).")
+            # Call task directly
+            tx_hash = task_batch_deploy_streams(
+                block=block, definitions=definitions_to_deploy, wait=wait_for_deployment_tx
+            )
+            deployed_sids = [str(d["stream_id"]) for d in definitions_to_deploy]
+            logger.info(f"Task: Submitted deployment for {len(deployed_sids)} streams. TX Hash: {tx_hash}")
+        except Exception as e:
+            logger.error(f"Task: Error during batch stream deployment: {e!s}.", exc_info=True)
+            # This is critical for the streams that were attempted.
+            raise # Re-raise
+    else:
+        logger.info("Task: No new streams to deploy.")
+
+    return FilterAndDeployResult(
+        deployed_stream_ids=deployed_sids,
+        skipped_stream_ids_already_exist=skipped_sids_exist,
+        deployment_tx_hash=tx_hash,
+    )
+
 
 if __name__ == "__main__":
     @flow(log_prints=True)
