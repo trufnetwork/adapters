@@ -163,15 +163,20 @@ def deploy_streams_flow(
         all_stream_ids_from_descriptor = [str(sid) for sid in current_streams_to_process_df["stream_id"]]
         if all_stream_ids_from_descriptor:
             logger.info(f"Checking {len(all_stream_ids_from_descriptor)} streams against DeploymentStateBlock.")
-            already_deployed_sids = deployment_state.check_multiple_streams(all_stream_ids_from_descriptor)
+            already_deployed_status_map = deployment_state.check_multiple_streams(all_stream_ids_from_descriptor)
 
-            streams_not_in_state_block = current_streams_to_process_df[
-                ~current_streams_to_process_df["stream_id"].astype(str).isin(already_deployed_sids)
+            # Create a set of stream IDs that are actually marked as deployed (value is True)
+            sids_confirmed_deployed_in_state = {
+                sid for sid, deployed_status in already_deployed_status_map.items() if deployed_status
+            }
+
+            streams_not_in_state_block_df = current_streams_to_process_df[
+                ~current_streams_to_process_df["stream_id"].astype(str).isin(sids_confirmed_deployed_in_state)
             ]
-            num_filtered_by_state = len(current_streams_to_process_df) - len(streams_not_in_state_block)
+            num_filtered_by_state = len(current_streams_to_process_df) - len(streams_not_in_state_block_df)
             skipped_count += num_filtered_by_state
             logger.info(f"Filtered out {num_filtered_by_state} streams already marked in DeploymentStateBlock.")
-            current_streams_to_process_df = streams_not_in_state_block
+            current_streams_to_process_df = streams_not_in_state_block_df
 
             if current_streams_to_process_df.empty:
                 logger.info("All streams from descriptor were already marked in DeploymentStateBlock. Exiting.")
