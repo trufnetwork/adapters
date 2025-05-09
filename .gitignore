@@ -50,6 +50,8 @@ __pycache__/
 .cursorrules
 .cursor
 *.code-workspace
+.vscode
+.repomix
 
 # Python specific
 *.pyc

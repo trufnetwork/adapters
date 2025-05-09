@@ -13,12 +13,11 @@ from prefect.utilities.asyncutils import sync_compatible
 
 from tsn_adapters.blocks.tn_access import (
     TNAccessBlock,
-    task_insert_and_wait_for_tx,
     task_read_records,
-    task_split_and_insert_records,
 )
 from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.tasks.insert import task_insert_and_wait_for_tx, task_split_and_insert_records
 from tsn_adapters.tasks.argentina.types import StreamId
 
 logger = logging.getLogger(__name__)

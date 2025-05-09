@@ -142,7 +142,7 @@ class FMPBlock(Block):
         filtered_symbols = cast(list[str], df.loc[null_price_mask, "symbol"].tolist())
 
         # Filter out rows with null prices
-        filtered_df = cast(DataFrame[BatchQuoteShort], df.loc[~null_price_mask].copy())
+        filtered_df = df.loc[~null_price_mask].copy()
 
         # Log the filtering if any symbols were filtered
         if filtered_symbols:
@@ -225,7 +225,8 @@ class FMPBlock(Block):
         data = self._get_jsonparsed_data(path)
         if isinstance(data, list):
             return DataFrame[IntradayData](data)
-        elif isinstance(data, dict) and "historical" in data:
+        elif "historical" in data:
+            assert isinstance(data, dict)
             return DataFrame[IntradayData](data["historical"])
         return DataFrame[IntradayData](pd.DataFrame())  # Return empty DataFrame with correct schema
 

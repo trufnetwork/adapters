@@ -14,12 +14,12 @@ for transaction confirmations.
 """
 
 from datetime import datetime, timezone
-from typing import Literal, Optional
+import math
+from typing import Optional
+
 from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
-from prefect.futures import PrefectFuture
-
-# Import the TN client types and the task to deploy a primitive stream.
+import trufnetwork_sdk_py.client as tn_client
 from typing_extensions import TypedDict
 
 from tsn_adapters.blocks.deployment_state import DeploymentStateBlock
@@ -32,23 +32,16 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 
 # Import TNAccessBlock and task_wait_for_tx so that we can use its waiting functionality.
 from tsn_adapters.blocks.tn_access import TNAccessBlock, task_wait_for_tx
-from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive
+
+# Import new batch tasks
+from tsn_adapters.common.trufnetwork.tn import (
+    task_filter_and_deploy_streams,
+)
 
 # Configuration constants
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 5
-DEFAULT_BATCH_SIZE = 500
-
-
-class DeployStreamResult(TypedDict):
-    """Result of deploying or checking a single stream."""
-
-    stream_id: str
-    status: Literal["deployed", "skipped"]
-    # Could add in future:
-    # tx_deploy_hash: Optional[str]
-    # tx_init_hash: Optional[str]
-    # error: Optional[str]
+DEFAULT_MAX_STREAMS_PER_BATCH_API_CALL = 1000
 
 
 class DeployStreamResults(TypedDict):
@@ -56,39 +49,6 @@ class DeployStreamResults(TypedDict):
 
     deployed_count: int
     skipped_count: int
-
-
-@task(
-    name="Check and Deploy Stream",
-    tags=["tn", "tn-write"],
-    retries=DEFAULT_RETRY_ATTEMPTS,
-    retry_delay_seconds=DEFAULT_RETRY_DELAY_SECONDS,
-)
-def check_deploy_stream(stream_id: str, tna_block: TNAccessBlock) -> DeployStreamResult:
-    """
-    Check deploy stream.
-
-    Args:
-        stream_id: ID of the stream to check and potentially deploy
-        tna_block: TNAccessBlock instance for TN interactions
-
-    Returns:
-        A DeployStreamResult indicating whether the stream was deployed or skipped
-    """
-    logger = get_run_logger()
-
-    # Deploy the stream if it doesn't exist
-    logger.debug(f"Deploying stream {stream_id}.")
-
-    # Create deployment transaction and wait for confirmation
-    try:
-        tx_deploy = task_deploy_primitive(block=tna_block, stream_id=stream_id, wait=False)
-        task_wait_for_tx(block=tna_block, tx_hash=tx_deploy)
-        logger.debug(f"Deployed stream {stream_id} (tx: {tx_deploy}).")
-    except Exception as e:
-        logger.debug(f"Failed to deploy stream {stream_id}: {e}")
-
-    return DeployStreamResult(stream_id=stream_id, status="deployed")
 
 
 @task(name="Mark Batch as Deployed", retries=DEFAULT_RETRY_ATTEMPTS, retry_delay_seconds=DEFAULT_RETRY_DELAY_SECONDS)
@@ -125,184 +85,214 @@ def mark_batch_deployed_task(
         logger.warning(f"Failed to mark streams as deployed: {e!s}. Continuing with flow execution.", exc_info=True)
 
 
-def _create_stream_batches(stream_ids: list[str], batch_size: int, start_from_batch: int) -> list[list[str]]:
+def _create_deployment_super_batches(
+    definitions: list[tn_client.StreamDefinitionInput], max_streams_per_call: int
+) -> list[list[tn_client.StreamDefinitionInput]]:
     """
-    Split a list of stream IDs into batches of specified size.
+    Split a list of stream definitions into super-batches for API calls.
 
     Args:
-        stream_ids: List of stream IDs to batch
-        batch_size: Maximum number of streams per batch
-        start_from_batch: Index of the first batch to process
+        definitions: List of stream definitions to batch
+        max_streams_per_call: Maximum number of streams per batch API call
 
     Returns:
-        List of batches, where each batch is a list of stream IDs
+        List of batches, where each batch is a list of stream definitions
     """
-    # Create batches of specified size
-    all_batches = [stream_ids[i : i + batch_size] for i in range(0, len(stream_ids), batch_size)]
-
-    # Return only batches starting from the specified index
-    return all_batches[start_from_batch:]
-
-
-def _process_deployment_results(
-    deployment_results: list[DeployStreamResult],
-    deployment_state: Optional[DeploymentStateBlock] = None,
-    batch_timestamp: Optional[datetime] = None,
-) -> None:
-    """
-    Process deployment results and update deployment state if provided.
-
-    Args:
-        deployment_results: List of individual stream deployment results
-        deployment_state: Optional block for tracking deployment state
-        batch_timestamp: Timestamp to use for this batch (required if deployment_state is provided)
-    """
-    logger = get_run_logger()
-
-    # Skip if no deployment state provided
-    if deployment_state is None:
-        return
-
-    # We need a timestamp to mark streams as deployed
-    if batch_timestamp is None:
-        batch_timestamp = datetime.now(timezone.utc)
-
-    # Collect successfully deployed stream IDs
-    deployed_stream_ids = [result["stream_id"] for result in deployment_results if result["status"] == "deployed"]
-
-    # Skip if no streams were deployed
-    if not deployed_stream_ids:
-        return
-
-    # Mark batch as deployed in deployment state
-    try:
-        mark_batch_deployed_task.submit(
-            stream_ids=deployed_stream_ids, deployment_state=deployment_state, timestamp=batch_timestamp
-        )
-    except Exception as e:
-        logger.warning(f"Failed to submit marking task: {e!s}. Continuing with next batch.")
+    if not definitions:
+        return []
+    num_super_batches = math.ceil(len(definitions) / max_streams_per_call)
+    super_batches = []
+    for i in range(num_super_batches):
+        start_idx = i * max_streams_per_call
+        end_idx = start_idx + max_streams_per_call
+        super_batches.append(definitions[start_idx:end_idx])
+    return super_batches
 
 
 @flow(name="Stream Deployment Flow")
 def deploy_streams_flow(
     psd_block: PrimitiveSourcesDescriptorBlock,
     tna_block: TNAccessBlock,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    start_from_batch: int = 0,
+    max_streams_per_batch_api_call: int = DEFAULT_MAX_STREAMS_PER_BATCH_API_CALL,
     deployment_state: Optional[DeploymentStateBlock] = None,
 ) -> DeployStreamResults:
     """
-    Deploy primitive streams from a descriptor, with optional deployment state tracking.
+    Deploy primitive streams from a descriptor using batch SDK functions.
 
-    This flow handles the entire stream deployment process:
-    1. Retrieves stream descriptors from the provided block
-    2. Deploys streams in batches with concurrency control
-    3. Updates deployment state for successfully deployed streams
-    4. Returns summary statistics of deployed and skipped streams
+    This flow handles the stream deployment process:
+    1. Retrieves stream descriptors.
+    2. Optionally filters streams already marked deployed by DeploymentStateBlock.
+    3. Filters streams by actual existence on TN using a batch call.
+    4. Deploys non-existent streams in chunked "super-batches" using batch SDK calls.
+    5. Updates deployment state for successfully deployed streams.
+    6. Returns summary statistics.
 
     Args:
-        psd_block: Block providing the stream descriptors
-        tna_block: Block for TN interactions
-        batch_size: Number of streams to deploy in each batch (default: 500)
-        start_from_batch: Batch number to start from (default: 0)
-        deployment_state: Optional block for tracking deployment state
+        psd_block: Block providing the stream descriptors.
+        tna_block: Block for TN interactions.
+        max_streams_per_batch_api_call: Max streams to include in a single batch API deployment call.
+        deployment_state: Optional block for tracking and filtering by deployment state.
 
     Returns:
-        Statistics on deployed and skipped streams
+        Statistics on deployed and skipped streams.
     """
     logger = get_run_logger()
-    logger.info(
-        f"Starting stream deployment flow. Batch size: {batch_size}, Start batch: {start_from_batch}."
-    )
+    logger.info(f"Starting stream deployment flow. Max streams per batch API call: {max_streams_per_batch_api_call}.")
+
+    deployed_count = 0
+    skipped_count = 0
 
     # SECTION 1: Retrieve and validate descriptor DataFrame
     try:
         descriptor_df: DataFrame[PrimitiveSourceDataModel] = psd_block.get_descriptor()
     except Exception as e:
         logger.error(f"Failed to retrieve stream descriptors: {e!s}", exc_info=True)
-        raise  # Cannot proceed without descriptors
+        raise
 
     if descriptor_df.empty:
         logger.info("No stream descriptors found. Exiting flow.")
         return DeployStreamResults(deployed_count=0, skipped_count=0)
 
-    # Track original stream count for calculating filtered count
     original_stream_count = len(descriptor_df)
     logger.info(f"Retrieved {original_stream_count} stream descriptors.")
-    filtered_by_state_count = 0
 
-    # SECTION 2: Prepare for batch processing
-    # Extract stream IDs from filtered descriptor and ensure proper typing
-    stream_ids: list[str] = [str(sid) for sid in descriptor_df["stream_id"]]
+    current_streams_to_process_df = descriptor_df.copy()
 
-    logger.info(f"Found {len(stream_ids)} stream descriptors to process.")
+    # SECTION 2: Initial Filtering (Optional, using DeploymentStateBlock)
+    if deployment_state:
+        all_stream_ids_from_descriptor = [str(sid) for sid in current_streams_to_process_df["stream_id"]]
+        if all_stream_ids_from_descriptor:
+            logger.info(f"Checking {len(all_stream_ids_from_descriptor)} streams against DeploymentStateBlock.")
+            already_deployed_status_map = deployment_state.check_multiple_streams(all_stream_ids_from_descriptor)
 
-    # Create batches for processing
-    batches = _create_stream_batches(stream_ids, batch_size, start_from_batch)
-    total_batches = len(batches)
+            # Create a set of stream IDs that are actually marked as deployed (value is True)
+            sids_confirmed_deployed_in_state = {
+                sid for sid, deployed_status in already_deployed_status_map.items() if deployed_status
+            }
 
-    # Check if start_from_batch is out of range
-    if start_from_batch >= total_batches and total_batches > 0:
-        logger.warning(
-            f"Start batch {start_from_batch} is out of range (total batches: {total_batches}). "
-            f"No batches will be processed."
+            streams_not_in_state_block_df = current_streams_to_process_df[
+                ~current_streams_to_process_df["stream_id"].astype(str).isin(sids_confirmed_deployed_in_state)
+            ]
+            num_filtered_by_state = len(current_streams_to_process_df) - len(streams_not_in_state_block_df)
+            skipped_count += num_filtered_by_state
+            logger.info(f"Filtered out {num_filtered_by_state} streams already marked in DeploymentStateBlock.")
+            current_streams_to_process_df = streams_not_in_state_block_df
+
+            if current_streams_to_process_df.empty:
+                logger.info("All streams from descriptor were already marked in DeploymentStateBlock. Exiting.")
+                return DeployStreamResults(deployed_count=0, skipped_count=skipped_count)
+        else:
+            logger.info(
+                "No streams from descriptor to check against DeploymentStateBlock (empty after initial load or previous filters)."
+            )
+
+    # SECTION 3: Prepare for TN Existence Check
+    if current_streams_to_process_df.empty:
+        logger.info("No streams left to process after DeploymentStateBlock filtering. Exiting.")
+        return DeployStreamResults(deployed_count=deployed_count, skipped_count=skipped_count)
+
+    # SECTION 5: Prepare Definitions for Batch Deployment
+    initial_deployment_definitions: list[tn_client.StreamDefinitionInput] = []
+    for _, row in current_streams_to_process_df.iterrows():
+        initial_deployment_definitions.append(
+            tn_client.StreamDefinitionInput(
+                stream_id=str(row["stream_id"]), stream_type=tn_client.STREAM_TYPE_PRIMITIVE
+            )
         )
-        return DeployStreamResults(deployed_count=0, skipped_count=filtered_by_state_count)
-    elif start_from_batch > 0:
-        logger.info(f"Starting processing from batch {start_from_batch+1}/{total_batches}.")
 
-    # SECTION 3: Process batches
-    all_deployment_results: list[DeployStreamResult] = []
+    if not initial_deployment_definitions:
+        logger.info("No streams definitions to process after initial filtering. Exiting.")
+        return DeployStreamResults(deployed_count=deployed_count, skipped_count=skipped_count)
 
-    for batch_index, batch in enumerate(batches, start=start_from_batch):
-        # Log batch progress
-        logger.info(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch)} streams.")
-
-        # Process each stream in the batch, in parallel
-        batch_futures: dict[str, PrefectFuture[DeployStreamResult]] = {}
-        for stream_id in batch:
-            # Submit the task with the new name
-            future = check_deploy_stream.submit(stream_id=stream_id, tna_block=tna_block)
-            batch_futures[stream_id] = future
-
-        # Collect batch results
-        batch_results: list[DeployStreamResult] = []
-        for stream_id, future in batch_futures.items():
-            try:
-                result = future.result()
-                batch_results.append(result)
-            except Exception as e:
-                logger.error(f"Task failed for stream {stream_id} even after retries: {e!s}", exc_info=True)
-                # Continue with other streams even if one fails
-
-        # Add to overall results
-        all_deployment_results.extend(batch_results)
-
-        # Update deployment state if provided
-        if deployment_state is not None:
-            batch_timestamp = datetime.now(timezone.utc)
-            _process_deployment_results(batch_results, deployment_state, batch_timestamp)
-
-        logger.info(f"Finished processing batch {batch_index + 1}/{total_batches}.")
-
-    # SECTION 4: Aggregate and summarize results
-    deployed_results = [result for result in all_deployment_results if result["status"] == "deployed"]
-    skipped_during_deploy = [result for result in all_deployment_results if result["status"] == "skipped"]
-
-    # Calculate summary statistics
-    deployed_count = len(deployed_results)
-    skipped_during_processing = len(skipped_during_deploy)
-    total_skipped_count = skipped_during_processing + filtered_by_state_count
-
-    # Prepare final results
-    summary_results = DeployStreamResults(deployed_count=deployed_count, skipped_count=total_skipped_count)
-
-    # Log summary
+    # SECTION 6: Chunking for Batch API Calls (Super-Batches)
+    super_batches = _create_deployment_super_batches(initial_deployment_definitions, max_streams_per_batch_api_call)
+    total_super_batches = len(super_batches)
     logger.info(
-        f"Deployment summary: {summary_results['deployed_count']} deployed, "
-        f"{summary_results['skipped_count']} skipped "
-        f"({filtered_by_state_count} filtered by deployment state, "
-        f"{skipped_during_processing} skipped during processing)."
+        f"Prepared {len(initial_deployment_definitions)} potential streams for deployment in {total_super_batches} super-batches based on descriptor and state block."
     )
 
-    return summary_results
+    # SECTION 7: Iterate and Deploy Super-Batches (using the new orchestrating task)
+    for i, current_super_batch_definitions in enumerate(super_batches):
+        batch_num_for_logging = i + 1
+        logger.info(
+            f"Processing super-batch {batch_num_for_logging}/{total_super_batches} "
+            f"with {len(current_super_batch_definitions)} potential streams using task_filter_and_deploy_streams."
+        )
+
+        if not current_super_batch_definitions:
+            logger.info(f"Super-batch {batch_num_for_logging}: No definitions to process. Skipping.")
+            continue
+
+        try:
+            # Call the new orchestrating task. It handles existence check and deployment attempt.
+            # We set wait_for_deployment_tx=False because we want to get the tx_hash back
+            # and then explicitly wait for it in the flow, allowing the flow to manage this.
+            # The user's previous direct calls to tasks also implied this pattern.
+            filter_deploy_result = task_filter_and_deploy_streams(
+                block=tna_block, 
+                potential_definitions=current_super_batch_definitions, 
+                wait_for_deployment_tx=False
+            )
+
+            # Process results from the new task
+            num_actually_deployed = len(filter_deploy_result["deployed_stream_ids"])
+            num_skipped_exist = len(filter_deploy_result["skipped_stream_ids_already_exist"])
+            batch_tx_hash = filter_deploy_result["deployment_tx_hash"]
+
+            if num_skipped_exist > 0:
+                skipped_count += num_skipped_exist
+                logger.info(f"Super-batch {batch_num_for_logging}: Skipped {num_skipped_exist} streams that already exist on TN.")
+
+            if batch_tx_hash: # A deployment was attempted
+                logger.info(
+                    f"Super-batch {batch_num_for_logging}: Deployment attempt resulted in TX: {batch_tx_hash}. Waiting for confirmation."
+                )
+                # Explicitly wait for the transaction in the flow
+                task_wait_for_tx(block=tna_block, tx_hash=batch_tx_hash)
+                logger.info(f"Super-batch {batch_num_for_logging}: Transaction {batch_tx_hash} confirmed.")
+                
+                # If TX confirmed and streams were intended for deployment
+                if num_actually_deployed > 0:
+                    deployed_count += num_actually_deployed
+                    successfully_deployed_ids_in_batch = filter_deploy_result["deployed_stream_ids"]
+                    
+                    if deployment_state and successfully_deployed_ids_in_batch:
+                        batch_timestamp = datetime.now(timezone.utc)
+                        mark_batch_deployed_task(
+                            stream_ids=successfully_deployed_ids_in_batch,
+                            deployment_state=deployment_state,
+                            timestamp=batch_timestamp,
+                        )
+                        logger.info(
+                            f"Super-batch {batch_num_for_logging}: Submitted task to mark {num_actually_deployed} streams as deployed in DeploymentStateBlock."
+                        )
+                elif num_actually_deployed == 0 and filter_deploy_result["deployed_stream_ids"] == []:
+                     # This case means a TX was made, but it deployed zero streams from the ones filtered for deployment by the task.
+                     # This could happen if all streams passed to task_batch_deploy_streams inside the new task already existed
+                     # despite the prior check, or if the batch deploy call itself deployed nothing but gave a TX.
+                     logger.info(f"Super-batch {batch_num_for_logging}: Deployment TX {batch_tx_hash} confirmed, but no new streams were reported as deployed by the task for this TX.")
+
+            elif num_actually_deployed > 0 and not batch_tx_hash:
+                # This case should ideally not happen if deployment means a tx_hash is always returned.
+                # It implies streams were marked for deployment by the task but no tx_hash was provided.
+                logger.warning(
+                    f"Super-batch {batch_num_for_logging}: {num_actually_deployed} streams reported for deployment by orchestrator task, but no TX hash was returned. State not updated."
+                )
+            
+            # If no deployment was attempted (e.g., all streams in batch already existed, or definitions_to_deploy was empty within the task)
+            # and no tx_hash, then num_actually_deployed would be 0. This is fine.
+            if num_actually_deployed == 0 and not batch_tx_hash:
+                logger.info(f"Super-batch {batch_num_for_logging}: No new streams were deployed (either all existed or none to deploy after filtering within task). No TX hash.")
+
+        except Exception as e:
+            # This exception is from the orchestrating task task_filter_and_deploy_streams itself failing after its retries.
+            logger.error(
+                f"Super-batch {batch_num_for_logging}/{total_super_batches}: Orchestrating task 'task_filter_and_deploy_streams' failed: {e!s}. "
+                f"Continuing to next super-batch if any.",
+                exc_info=True,
+            )
+            # Streams in this failed super-batch (where the orchestrator task failed) are not counted.
+
+    # SECTION 8: Return Results
+    logger.info(f"Stream deployment flow finished. Deployed: {deployed_count}, Skipped: {skipped_count} streams.")
+    return DeployStreamResults(deployed_count=deployed_count, skipped_count=skipped_count)

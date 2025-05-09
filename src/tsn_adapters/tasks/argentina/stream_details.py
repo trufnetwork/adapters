@@ -2,7 +2,7 @@
 Stream details fetcher implementations.
 """
 
-from typing import Literal, TypeGuard, cast
+from typing import Literal, TypeGuard
 
 from prefect import task
 
@@ -15,13 +15,16 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 from tsn_adapters.common.interfaces.provider import IStreamSourceMapFetcher
 from tsn_adapters.tasks.argentina.models.stream_source import StreamSourceMetadataModel
 from tsn_adapters.tasks.argentina.types import StreamSourceMapDF
+from tsn_adapters.utils.deroutine import force_sync
 
 PrimitiveSourcesTypeStr = Literal["url", "github"]
+
 
 def is_valid_source_type(source_type: str) -> TypeGuard[PrimitiveSourcesTypeStr]:
     """Check if the source type is valid."""
     valid_types = ("url", "github")
     return source_type in valid_types
+
 
 class GitHubStreamDetailsFetcher(IStreamSourceMapFetcher):
     """Fetches stream details from a GitHub source."""
@@ -34,7 +37,7 @@ class GitHubStreamDetailsFetcher(IStreamSourceMapFetcher):
             block_name: Name of the GithubPrimitiveSourcesDescriptor block
         """
         self.block_name = block_name
-        self.block = GithubPrimitiveSourcesDescriptor.load(block_name)
+        self.block = force_sync(GithubPrimitiveSourcesDescriptor.load)(block_name)
 
     def get_streams(self) -> StreamSourceMapDF:
         """
@@ -45,8 +48,6 @@ class GitHubStreamDetailsFetcher(IStreamSourceMapFetcher):
         """
         # Get stream metadata from GitHub
         source_metadata_df = get_descriptor_from_github(block=self.block)
-        if source_metadata_df is None:
-            raise ValueError("Source metadata is None")
 
         # Validate and coerce using the model
         validated_df = StreamSourceMetadataModel.validate(source_metadata_df)
@@ -64,7 +65,7 @@ class URLStreamDetailsFetcher(IStreamSourceMapFetcher):
             block_name: Name of the UrlPrimitiveSourcesDescriptor block
         """
         self.block_name = block_name
-        self.block = UrlPrimitiveSourcesDescriptor.load(block_name)
+        self.block = force_sync(UrlPrimitiveSourcesDescriptor.load)(block_name)
 
     def get_streams(self) -> StreamSourceMapDF:
         """
@@ -75,8 +76,6 @@ class URLStreamDetailsFetcher(IStreamSourceMapFetcher):
         """
         # Get stream metadata from URL
         source_metadata_df = get_descriptor_from_url(block=self.block)
-        if source_metadata_df is None:
-            raise ValueError("Source metadata is None")
 
         # Validate and coerce using the model
         validated_df = StreamSourceMetadataModel.validate(source_metadata_df)

@@ -16,7 +16,6 @@ from tsn_adapters.common.interfaces.target import ITargetClient
 from tsn_adapters.common.interfaces.transformer import IDataTransformer
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.tasks.argentina.models.category_map import SepaProductCategoryMapModel
-from tsn_adapters.tasks.argentina.provider.factory import create_sepa_processed_provider
 from tsn_adapters.tasks.argentina.reconciliation.strategies import create_reconciliation_strategy
 from tsn_adapters.tasks.argentina.stream_details import PrimitiveSourcesTypeStr, create_stream_details_fetcher
 from tsn_adapters.tasks.argentina.transformers.sepa import create_sepa_transformer
@@ -58,27 +57,6 @@ def task_get_streams(fetcher: IStreamSourceMapFetcher) -> StreamSourceMapDF:
     except Exception as e:
         logger.error(f"Failed to fetch streams: {e}")
         raise
-
-
-# Provider Tasks
-@task(retries=3)
-def task_create_sepa_provider() -> IProviderGetter[DateStr, DataFrame[AggregatedPricesDF]]:
-    """
-    Create a SEPA provider instance.
-
-    Args:
-        provider_type: Type of provider to create ('website' or 's3')
-        s3_block_name: Name of the S3 block to use (required for 's3' provider)
-        s3_prefix: The prefix for S3 keys (only used for 's3' provider)
-        delay_seconds: Delay between requests for website scraping (only used for 'website' provider)
-        show_progress_bar: Whether to show progress bars during downloads
-
-    Returns:
-        IProviderGetter: The provider instance
-    """
-    logger = get_run_logger()
-    logger.info("Creating SEPA provider")
-    return create_sepa_processed_provider()
 
 
 @task(

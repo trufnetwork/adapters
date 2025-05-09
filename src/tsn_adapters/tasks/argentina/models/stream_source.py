@@ -25,7 +25,7 @@ class StreamSourceMetadataModel(pa.DataFrameModel):
         """Validate and coerce stream_id to StreamId."""
         # We need to return Series[str] because that's what pandera expects,
         # but the values will be StreamId instances
-        result = series.apply(lambda x: StreamId(str(x)))
+        result = series.apply(StreamId)
         return cast(Series[str], result)
 
     @pa.check("source_id")
@@ -33,5 +33,5 @@ class StreamSourceMetadataModel(pa.DataFrameModel):
         """Validate and coerce source_id to SourceId."""
         # We need to return Series[str] because that's what pandera expects,
         # but the values will be SourceId instances
-        result = series.apply(lambda x: SourceId(str(x)))
+        result = series.apply(SourceId)
         return cast(Series[str], result)

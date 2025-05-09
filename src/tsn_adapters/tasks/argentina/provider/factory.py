@@ -2,7 +2,6 @@
 Factory functions for creating SEPA data providers.
 """
 
-from pandera.typing import DataFrame
 from prefect import task
 from prefect_aws import S3Bucket
 
@@ -12,7 +11,7 @@ from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, DateStr
 
 
 @task(name="Create SEPA Provider")
-def create_sepa_processed_provider(block: S3Bucket) -> IProviderGetter[DateStr, DataFrame[AggregatedPricesDF]]:
+def create_sepa_processed_provider(block: S3Bucket) -> IProviderGetter[DateStr, AggregatedPricesDF]:
     """
     Create a SEPA provider instance.
 

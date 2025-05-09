@@ -23,8 +23,9 @@ from prefect import flow, task, unmapped
 
 from tsn_adapters.blocks.fmp import BatchQuoteShort, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records
+from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.utils.logging import get_logger_safe
 
 from ...utils.deroutine import force_sync
