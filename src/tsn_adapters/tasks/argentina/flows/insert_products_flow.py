@@ -13,7 +13,8 @@ from prefect_aws import S3Bucket
 
 from tsn_adapters.blocks.deployment_state import DeploymentStateBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records, extract_stream_locators
+from tsn_adapters.blocks.tn_access import TNAccessBlock, extract_stream_locators
+from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.common.trufnetwork.tn import task_batch_filter_streams_by_existence
 import trufnetwork_sdk_py.client as tn_client

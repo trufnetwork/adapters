@@ -32,7 +32,9 @@ class RawDataProvider(SepaS3BaseProvider[SepaDF]):
         return process_sepa_zip(self.create_reader(file_key), date, "sepa")
 
 
-class ProcessedDataProvider(SepaS3BaseProvider[AggregatedPricesDF], IProviderGetter[DateStr, AggregatedPricesDF]):
+class ProcessedDataProvider(
+    SepaS3BaseProvider[AggregatedPricesDF], IProviderGetter[DateStr, AggregatedPricesDF]
+):
     """Handles processed data from processed/ prefix"""
 
     @property

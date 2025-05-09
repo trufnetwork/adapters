@@ -4,7 +4,7 @@ from typing import cast
 import pandas as pd
 from pandera.typing import DataFrame
 from prefect_sqlalchemy import SqlAlchemyConnector  # type: ignore
-from sqlalchemy import Table, select, update, and_
+from sqlalchemy import Table, and_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -269,7 +269,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         skipped_count = 0
 
         # Ensure timestamp column is tz-aware UTC
-        if not pd.api.types.is_datetime64tz_dtype(validated_states["deployment_timestamp"]):
+        if not pd.api.types.is_datetime64tz_dtype(validated_states["deployment_timestamp"]):  # type: ignore
             self.logger.warning("Input DataFrame timestamps are not timezone-aware UTC. Converting.")
             try:
                 # Use utc=True for conversion

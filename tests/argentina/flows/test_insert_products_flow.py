@@ -28,14 +28,16 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourceDataModel,
     PrimitiveSourcesDescriptorBlock,
 )
-from tsn_adapters.blocks.tn_access import SplitInsertResults, TNAccessBlock
+from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.tasks.insert import SplitInsertResults
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.flows.insert_products_flow import DeploymentCheckError, insert_argentina_products_flow
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.tasks.date_processing_tasks import DailyAverageLoadingError, MappingIntegrityError
 from tsn_adapters.tasks.argentina.tasks.descriptor_tasks import DescriptorError
 from tsn_adapters.tasks.argentina.types import DateStr
+from tests.utils.fake_tn_access import FakeTNAccessBlock
 
 # --- Constants ---
 TEST_E2E_BUCKET_NAME = "test-e2e-insertion-bucket"
@@ -79,8 +81,8 @@ def mock_s3_block() -> MagicMock:
 
 
 @pytest.fixture
-def mock_tn_block() -> MagicMock:
-    return MagicMock(spec=TNAccessBlock)
+def mock_tn_block() -> FakeTNAccessBlock:
+    return FakeTNAccessBlock()
 
 
 @pytest.fixture
@@ -167,7 +169,7 @@ async def test_insert_flow_successful_run(
     prefect_test_fixture: Any,
     mocked_flow_context: dict[str, MagicMock],
     mock_s3_block: MagicMock,
-    mock_tn_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
     mock_descriptor_block: MagicMock,
     mock_deployment_state_block: MagicMock,
     sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
@@ -257,7 +259,7 @@ async def test_insert_flow_basic_scenarios(
     prefect_test_fixture: Any,
     mocked_flow_context: dict[str, MagicMock],
     mock_s3_block: MagicMock,
-    mock_tn_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
     mock_descriptor_block: MagicMock,
     mock_deployment_state_block: MagicMock,
     sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
@@ -333,7 +335,7 @@ async def test_insert_flow_fatal_error_load_descriptor(
     prefect_test_fixture: Any,
     mocked_flow_context: dict[str, MagicMock],
     mock_s3_block: MagicMock,
-    mock_tn_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
     mock_descriptor_block: MagicMock,
     mock_deployment_state_block: MagicMock,
 ):
@@ -359,7 +361,7 @@ async def test_insert_flow_fatal_error_load_daily(
     prefect_test_fixture: Any,
     mocked_flow_context: dict[str, MagicMock],
     mock_s3_block: MagicMock,
-    mock_tn_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
     mock_descriptor_block: MagicMock,
     mock_deployment_state_block: MagicMock,
     sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],

@@ -21,7 +21,7 @@ def convert_date_str_series_to_unix_ts(date_series: Series[str]) -> Series[int]:
         ValueError: If dates are outside the valid range (e.g., before 1970) or conversion fails.
     """
     if date_series.empty:
-        return pd.Series([], dtype=int)
+        return pd.Series([], dtype=int)  # type: ignore
 
     # 1. Convert strings to datetime objects
     # errors='coerce' will turn unparseable dates into NaT (Not a Time)
@@ -51,9 +51,10 @@ def convert_date_str_series_to_unix_ts(date_series: Series[str]) -> Series[int]:
             f"min={second_timestamps.min()}, max={second_timestamps.max()}"
         )
 
-    return second_timestamps
+    return second_timestamps  # type: ignore
 
-def date_string_to_unix(date_str: str, date_format: str ="%Y-%m-%d"):
+
+def date_string_to_unix(date_str: str, date_format: str = "%Y-%m-%d"):
     """Convert a date string to a Unix timestamp (integer)."""
     dt = datetime.strptime(date_str, date_format).replace(tzinfo=timezone.utc)
     return int(dt.timestamp())
