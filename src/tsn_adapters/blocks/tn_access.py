@@ -657,6 +657,40 @@ class TNAccessBlock(Block):
             for i in range(0, len(records), max_batch_size)
         ]
 
+    @handle_tn_errors
+    def batch_deploy_streams(
+        self,
+        definitions: list[dict[str, str]],
+        wait: bool = True,
+    ) -> str | None:
+        """
+        Batch‐deploy streams via TNClient, skipping any that already exist.
+        `definitions` is a list of {"stream_id": str, "stream_type": str}.
+        """
+        # build locators for existence check
+        locators = [
+            {"stream_id": d["stream_id"], "data_provider": self.current_account}
+            for d in definitions
+        ]
+        # only those not yet deployed
+        missing = self.client.batch_filter_streams_by_existence(locators, return_existing=False)
+        if not missing:
+            self.logger.info("All streams already exist; skipping batch deployment.")
+            return None
+
+        # filter definitions down to just the missing ones
+        to_deploy = [
+            {"stream_id": loc["stream_id"],
+             "stream_type": next(d["stream_type"]
+                                 for d in definitions
+                                 if d["stream_id"] == loc["stream_id"])}
+            for loc in missing
+        ]
+
+        tx_hash = self.client.batch_deploy_streams(to_deploy, wait)
+        self.logger.debug(f"Batch deployed streams (tx={tx_hash})")
+        return tx_hash
+
 # --- Top Level Task Functions ---
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_all_records(block: TNAccessBlock, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
@@ -851,6 +885,22 @@ def task_destroy_stream(block: TNAccessBlock, stream_id: str, wait: bool = True)
         The transaction hash
     """
     return block.destroy_stream(stream_id, wait)
+
+@task(
+    retries=UNUSED_INFINITY_RETRIES,
+    retry_delay_seconds=10,
+    retry_condition_fn=tn_special_retry_condition(5),
+    tags=["tn", "tn-write"],
+)
+def task_batch_deploy_streams_block(
+    block: TNAccessBlock,
+    definitions: list[dict[str, str]],
+    wait: bool = True,
+) -> str | None:
+    """
+    Prefect task wrapper around TNAccessBlock.batch_deploy_streams.
+    """
+    return block.batch_deploy_streams(definitions, wait)
 
 
 if __name__ == "__main__":

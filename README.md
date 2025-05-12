@@ -53,5 +53,5 @@ We recommend using a virtual environment to manage dependencies. You can create 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e .[dev]
 ```
