@@ -52,6 +52,11 @@ def sometimes_fail_task() -> str:
         raise TNNodeNetworkError("Simulated TN network error for testing short retry.")
     return "success"
 
+# Restore retries stripped by conftest.py patch
+sometimes_fail_task.retries = 3
+sometimes_fail_task.retry_condition_fn = tn_special_retry_condition(3)
+sometimes_fail_task.retry_delay_seconds = 0
+
 
 @flow(name="retry-flow-test")
 def retry_flow():
@@ -75,6 +80,11 @@ def long_fail_task() -> str:
         raise TNNodeNetworkError("Simulated TN network error for long retry test.")
     return "success_long"
 
+# Restore retries stripped by conftest.py patch
+long_fail_task.retries = 100
+long_fail_task.retry_condition_fn = tn_special_retry_condition(3)
+long_fail_task.retry_delay_seconds = 0
+
 
 @flow(name="retry-flow-long-test")
 def retry_flow_long():
@@ -95,6 +105,11 @@ def always_fail_task() -> str:
     logger = get_run_logger()
     logger.info(f"always_fail_task called, attempt {non_network_attempt_counter}")
     raise ValueError("Non-network error")
+
+# Restore retries stripped by conftest.py patch
+always_fail_task.retries = 5
+always_fail_task.retry_condition_fn = tn_special_retry_condition(3)
+always_fail_task.retry_delay_seconds = 0
 
 
 @flow(name="retry-flow-non-network-test")
@@ -121,6 +136,11 @@ def mixed_fail_task() -> str:
     elif mixed_attempt_counter <= 8:
         raise ValueError("Simulated non-network error for mixed fail test.")
     return "mixed_success"
+
+# Restore retries stripped by conftest.py patch
+mixed_fail_task.retries = 10
+mixed_fail_task.retry_condition_fn = tn_special_retry_condition(4)
+mixed_fail_task.retry_delay_seconds = 0
 
 
 @flow(name="retry-flow-mixed-test")

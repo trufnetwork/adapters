@@ -64,7 +64,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
     def has_been_deployed(self, stream_id: str) -> bool:
         """Check if the deployment has been performed for a given stream_id."""
         engine = self._get_engine()
-        stmt = select([self._table.c.is_deployed]).where(
+        stmt = select(self._table.c.is_deployed).where(  # type: ignore[arg-type]
             and_(
                 self._table.c.stream_id == stream_id,
                 self._table.c.source_type == self.source_type,  # Filter by source_type
@@ -90,7 +90,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         if not unique_ids:
             return {}
 
-        stmt = select([self._table.c.stream_id, self._table.c.is_deployed]).where(
+        stmt = select(self._table.c.stream_id, self._table.c.is_deployed).where(  # type: ignore[arg-type]
             and_(
                 self._table.c.stream_id.in_(unique_ids),
                 self._table.c.source_type == self.source_type,  # Filter by source_type
@@ -117,7 +117,7 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
         engine = self._get_engine()
         # Select stream_id and deployed_at for all streams of the specified type
         stmt = (
-            select([self._table.c.stream_id, self._table.c.deployed_at.label("deployment_timestamp")]).where(
+            select(self._table.c.stream_id, self._table.c.deployed_at.label("deployment_timestamp")).where(  # type: ignore[arg-type]
                 self._table.c.source_type == self.source_type
             )  # Filter by source_type
         )
