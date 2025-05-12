@@ -29,7 +29,7 @@ def test_deploy_stream(tn_block: TNAccessBlock, test_stream_id: str):
 def test_get_stream_type(tn_block: TNAccessBlock, test_stream_id: str):
     """Test checking stream type status."""
     # Initially, for a non-existent stream, it should error out
-    with pytest.raises(Exception, match="record not found"):
+    with pytest.raises(Exception, match="no type found"):
         tn_block.get_stream_type("", test_stream_id)
     
     # Deploy the stream

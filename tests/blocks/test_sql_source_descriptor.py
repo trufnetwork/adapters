@@ -62,6 +62,7 @@ def initial_mixed_data(test_source_type: str, other_source_type: str) -> pd.Data
         # Add other columns needed by table schema with defaults if necessary
         "is_deployed": [False, False, False],
         "deployed_at": [pd.NaT, pd.NaT, pd.NaT],
+        "source_display_name": ["srcA", "srcB", "srcC"],
     }
     df = pd.DataFrame(data)
     # Ensure correct dtypes matching the table/model if needed, especially for timestamps
