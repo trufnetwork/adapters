@@ -20,6 +20,7 @@ from typing import Any, Optional, TypedDict, TypeGuard, cast
 import pandas as pd
 from pandera.typing import DataFrame
 from prefect import flow, task, unmapped
+from prefect.client.schemas.objects import State
 
 from tsn_adapters.blocks.fmp import BatchQuoteShort, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
@@ -27,8 +28,6 @@ from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.utils.logging import get_logger_safe
-
-from ...utils.deroutine import force_sync
 
 
 class QuoteData(TypedDict):
@@ -481,6 +480,44 @@ def process_data(
     return result_df
 
 
+def _get_batch_error_message(state_or_result: Any, batch_info: str) -> Optional[tuple[str, bool]]:
+    """
+    Checks if a result from a mapped task represents a failure and returns error info.
+
+    Args:
+        state_or_result: The item returned from the mapped task (State, Exception, or result).
+        batch_info: String identifying the batch (e.g., "Batch 1/10").
+
+    Returns:
+        A tuple (error_message, log_exc_info) if it's an error, otherwise None.
+        log_exc_info is True if the original exception object is available.
+    """
+    error_msg: Optional[str] = None
+    log_exc_info: bool = False
+
+    # Check if it's a Prefect State object and if it failed
+    if isinstance(state_or_result, State) and state_or_result.is_failed():
+        original_error = state_or_result.data # Prefer state.data which might hold the Exception
+        if isinstance(original_error, Exception):
+            error_msg = f"{batch_info} Failed: {original_error!s}"
+            log_exc_info = True # Log traceback if we have the exception object
+        elif state_or_result.message:
+            error_msg = f"{batch_info} Failed: {state_or_result.message}"
+        else:
+            error_msg = f"{batch_info} Failed: Unknown error in state {type(state_or_result).__name__}"
+
+    # Handle cases where the map might return a raw exception (less likely)
+    elif isinstance(state_or_result, Exception):
+        error_msg = f"{batch_info} Failed directly: {state_or_result!s}"
+        log_exc_info = True
+
+    # Could add checks for other unexpected non-success types here if needed
+
+    if error_msg:
+        return error_msg, log_exc_info
+    return None
+
+
 @flow(name="Real-Time Market Data Sync Flow")
 def real_time_flow(
     fmp_block: FMPBlock,
@@ -515,6 +552,12 @@ def real_time_flow(
     """
     logger = get_logger_safe()
     logger.info("Starting real-time market data sync flow", extra={"tickers_per_request": tickers_per_request})
+    
+    # Initialize variables that might be accessed in the final except block
+    quotes_batches = None
+    map_failed_batches_count = 0
+    total_symbols = 0
+    total_batches = 0
     error_details: list[str] = []
 
     # Extract source descriptors
@@ -563,19 +606,85 @@ def real_time_flow(
             symbols_batch=batches,
             batch_number=list(range(1, total_batches + 1)),
             total_batches=unmapped(total_batches),
+            # Ensure Prefect waits for all mapped tasks before proceeding
+            # (Though this is default behavior for .map results access)
         )
 
-        # Combine all batch results
+        # NOTE(Prefect): Explicitly resolve futures and check results immediately.
+        # This is necessary to reliably capture exceptions from failed mapped tasks
+        # and prevent potential downstream `UnfinishedRun` errors observed when
+        # accessing results/states of failed futures later in the flow, especially
+        # in certain testing or execution environments.
+        # --- Check for immediate failures from mapped tasks ---
+        batch_errors = []
+        successful_batches_for_combine = []
+        for i, future in enumerate(quotes_batches):
+            batch_number = i + 1
+            try:
+                # Wait for the future to complete and get the result or exception
+                state_or_result = future.result(raise_on_failure=False)
+            except Exception as e:
+                # Handle potential errors during future resolution itself (less common)
+                state_or_result = e 
+
+            batch_info = f"Batch {batch_number}/{total_batches}"
+            error_info = _get_batch_error_message(state_or_result, batch_info)
+
+            if error_info:
+                map_failed_batches_count += 1
+                error_msg, log_exc_info = error_info
+                logger.error(error_msg, exc_info=log_exc_info)
+                batch_errors.append(error_msg) # Append the extracted error message
+
+            elif is_valid_quotes_df(state_or_result):
+                successful_batches_for_combine.append(state_or_result)
+
+            else:
+                # Handle unexpected types that aren't errors but aren't valid DataFrames
+                # This case might indicate a logic error in the fetch task if it returns
+                # something other than a DataFrame, State, or Exception.
+                # After calling .result(), we expect either DataFrame or Exception.
+                # If it's something else, it's truly unexpected.
+                unexpected_type_msg = f"{batch_info} returned unexpected type after result retrieval: {type(state_or_result).__name__}"
+                logger.warning(unexpected_type_msg)
+                # Optionally treat this as a failure
+                # map_failed_batches_count += 1
+                # batch_errors.append(unexpected_type_msg)
+
+        # If any batch failed during the map phase, return early with those specific errors
+        if batch_errors:
+             logger.error(f"Flow failed during batch fetching. Reporting {len(batch_errors)} errors.")
+             # Use the accurate count of failures detected here
+             return create_error_result(
+                 error_msg="One or more batches failed during fetch.", # Primary message for the result dict
+                 total_symbols=total_symbols,
+                 failed_batches=map_failed_batches_count,
+                 existing_errors=batch_errors # List of detailed batch errors
+             )
+        # --- End check for immediate failures ---
+
+
+        # Combine *only successful* batch results
+        # Note: failed_batches is now accurately counted above
+        failed_batches = map_failed_batches_count
         try:
-            combined_data_state = combine_batch_results(*quotes_batches, return_state=True)
-            combined_data = force_sync(combined_data_state.result)()
-            failed_batches = sum(1 for batch in quotes_batches if batch is None or isinstance(batch, Exception))
+            # Pass only the successfully completed DataFrames to combine_batch_results
+            # No need for return_state=True here as we handled failures already
+            # The `combine_batch_results` task might still fail if the list is empty or for other reasons
+            combined_data = combine_batch_results(*successful_batches_for_combine)
+
+            # Ensure combined_data is a DataFrame before proceeding
+            if not isinstance(combined_data, pd.DataFrame):
+                # combine_batch_results should raise RuntimeError if it fails, 
+                # but add a check here just in case it returns something unexpected.
+                raise RuntimeError(f"combine_batch_results returned unexpected type: {type(combined_data)}")
+
             logger.info(
                 "Combined batch results",
                 extra={
                     "total_batches": total_batches,
                     "failed_batches": failed_batches,
-                    "success_rate": f"{((total_batches - failed_batches) / total_batches) * 100:.2f}%",
+                    "success_rate": f"{(total_batches - failed_batches) / total_batches * 100:.2f}%",
                 },
             )
         except RuntimeError as e:
@@ -593,10 +702,12 @@ def real_time_flow(
         except Exception as e:
             error_msg = f"Failed to process combined data: {e!s}"
             logger.error(error_msg, exc_info=True)
+            # Ensure failed_batches count is accurate here
             return create_error_result(error_msg, total_symbols=total_symbols, failed_batches=failed_batches)
 
-        # Calculate filtered quotes
-        total_filtered = total_symbols - len(processed_df)
+        # Calculate filtered quotes - Ensure processed_df is a DataFrame
+        processed_count = len(processed_df) if isinstance(processed_df, pd.DataFrame) else 0
+        total_filtered = total_symbols - processed_count
         if total_filtered > 0:
             logger.warning(
                 "Quotes filtered during processing",
@@ -607,11 +718,12 @@ def real_time_flow(
             )
 
         # If no data is left after processing, return operational success.
-        if processed_df.empty:
+        # Ensure processed_df is a DataFrame before checking if empty
+        if not isinstance(processed_df, pd.DataFrame) or processed_df.empty:
             logger.info(
                 "No data to insert after processing. Flow completed operationally.",
                 extra={
-                    "processed_quotes": 0,
+                    "processed_quotes": processed_count, # Use calculated count
                     "filtered_quotes": total_filtered,
                     "failed_batches": failed_batches,
                     "errors": error_details,
@@ -619,7 +731,7 @@ def real_time_flow(
             )
             return FlowResult(
                 success=True,
-                processed_quotes=0,
+                processed_quotes=processed_count, # Use calculated count
                 filtered_quotes=total_filtered,
                 failed_batches=failed_batches,
                 errors=error_details,
@@ -635,15 +747,15 @@ def real_time_flow(
             logger.info(
                 "Completed real-time market data sync flow",
                 extra={
-                    "processed_quotes": len(processed_df),
+                    "processed_quotes": processed_count,
                     "filtered_quotes": total_filtered,
                     "failed_batches": failed_batches,
-                    "success_rate": f"{((total_batches - failed_batches) / total_batches) * 100:.2f}%",
+                    "success_rate": f"{(total_batches - failed_batches) / total_batches * 100:.2f}%" if total_batches > 0 else "N/A",
                 },
             )
             return FlowResult(
                 success=True,
-                processed_quotes=len(processed_df),
+                processed_quotes=processed_count, # Use calculated count
                 filtered_quotes=total_filtered,
                 failed_batches=failed_batches,
                 errors=error_details,
@@ -651,16 +763,33 @@ def real_time_flow(
         except Exception as e:
             error_msg = f"Failed to insert records: {e!s}"
             logger.error(error_msg, exc_info=True)
+            # Ensure failed_batches count is accurate here
             return create_error_result(
                 error_msg,
                 total_symbols=total_symbols,
                 failed_batches=failed_batches,
-                processed_quotes=len(processed_df),
+                processed_quotes=processed_count, # Use calculated count
                 existing_errors=error_details,
             )
 
     except Exception as e:
         # Handle any unexpected errors
-        error_msg = f"Unexpected error: {e!s}"
-        logger.error(error_msg, exc_info=True)
-        return create_error_result(error_msg, total_symbols=total_symbols, failed_batches=total_batches)
+        logger.error(f"Flow encountered an error: {e!s}", exc_info=True)
+        
+        # error_details is guaranteed to be initialized earlier in the flow
+        final_errors = list(error_details)
+
+        # Simplified: Treat any exception caught here as a general flow failure
+        # occurred after the initial batch fetch check.
+        # Add the current exception to the list of errors.
+        final_errors.append(f"Unexpected flow error: {e!s}")
+
+        return create_error_result(
+            # The primary message can still be the top-level exception, but details are in final_errors
+            error_msg=f"Flow failed with error: {e!s}",
+            total_symbols=total_symbols,
+            # Try to use the most accurate failed_batches count available
+            # Default to total_batches if the specific count wasn't calculated (e.g., early failure)
+            failed_batches=map_failed_batches_count, # map_failed_batches_count is now guaranteed to exist
+            existing_errors=final_errors
+        )
