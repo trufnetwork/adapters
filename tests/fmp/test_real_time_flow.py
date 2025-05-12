@@ -108,9 +108,7 @@ class FakeTNAccessBlock(TNAccessBlock):
     def batch_insert_tn_records(
         self,
         records: DataFrame[TnDataRowModel],
-        is_unix: bool = False,
-        has_external_created_at: bool = False,
-    ) -> str | None:
+    ) -> list[str] | None:
         """Store records for verification."""
         self.inserted_records.append(records)
         return None
@@ -229,9 +227,9 @@ class TestProcessDataAndDescriptor:
 
         result = process_data(quotes_df=sample_quotes_df, descriptor_df=descriptor_df)  # type: ignore
 
-        assert_tn_data_schema(result)
-        assert len(result) == len(sample_quotes_df)
-        assert "stream_aapl" in result["stream_id"].values
+        assert_tn_data_schema(result.result())
+        assert len(result.result()) == len(sample_quotes_df)
+        assert "stream_aapl" in result.result()["stream_id"].values
 
     def test_process_data_with_none(self, sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]):
         """Test that process_data raises RuntimeError with detailed error messages when quotes_df is None."""

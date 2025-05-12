@@ -228,7 +228,7 @@ async def test_insert_flow_successful_run(
     )
 
     mocks["insert"].assert_called_once_with(
-        block=mock_tn_block, records=sample_transformed_df_date1, max_batch_size=batch_size, is_unix=True, wait=True, return_state=False
+        block=mock_tn_block, records=sample_transformed_df_date1, max_batch_size=batch_size, wait=True, return_state=False
     )
     mocks["var_aset"].assert_called_once_with(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_to_process, overwrite=True)
     mocks["create_artifact"].assert_called_once()

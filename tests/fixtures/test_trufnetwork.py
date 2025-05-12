@@ -57,21 +57,12 @@ TSN_DB_CONTAINER = ContainerSpec(
     tmpfs_path="/root/.kwild",
     entrypoint="/app/kwild",
     args=[
+        "start",
         "--autogen",
-        "--app.pg-db-host",
+        "--db-owner",
+        "0xecCc1ffEe06311c50Aa16e0E2acf2CD142d63905",
+        "--db.host",
         "test-kwil-postgres",
-        "--app.hostname",
-        "test-tsn-db",
-        "--chain.p2p.external-address",
-        "http://test-tsn-db:26656",
-        "--chain.consensus.timeout-propose",
-        "300ms",
-        "--chain.consensus.timeout-prevote",
-        "200ms",
-        "--chain.consensus.timeout-precommit",
-        "200ms",
-        "--chain.consensus.timeout-commit",
-        "600ms",
     ],
     env_vars=[
         "CONFIG_PATH=/root/.kwild",
@@ -449,7 +440,7 @@ def disable_prefect_retries():
         "tsn_adapters.flows.fmp.historical_flow.fetch_historical_data",
         "tsn_adapters.flows.fmp.historical_flow.get_earliest_data_date",
         # Stream Deploy Flow
-        "tsn_adapters.flows.stream_deploy_flow.task_check_exist_deploy_init",
+        "tsn_adapters.flows.stream_deploy_flow.check_deploy_stream",
         # Primitive Source Descriptor
         "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_url",
         "tsn_adapters.blocks.primitive_source_descriptor.get_descriptor_from_github",
@@ -478,18 +469,11 @@ def disable_prefect_retries():
         # TN Access
         "tsn_adapters.blocks.tn_access.task_wait_for_tx",
         "tsn_adapters.blocks.tn_access.task_insert_and_wait_for_tx",
-        "tsn_adapters.blocks.tn_access.task_insert_unix_and_wait_for_tx",
         "tsn_adapters.blocks.tn_access._task_only_batch_insert_records",
         "tsn_adapters.blocks.tn_access.task_split_and_insert_records",
-        "tsn_adapters.blocks.tn_access.task_filter_initialized_streams",
-        # Stream Filtering
-        "tsn_adapters.blocks.stream_filtering.task_filter_batch_initialized_streams",
-        "tsn_adapters.blocks.stream_filtering.task_get_stream_states_divide_conquer",
-        "tsn_adapters.blocks.stream_filtering.task_filter_streams_divide_conquer",
         # TN Common
         "tsn_adapters.common.trufnetwork.tn.task_insert_tsn_records",
         "tsn_adapters.common.trufnetwork.tn.task_deploy_primitive",
-        "tsn_adapters.common.trufnetwork.tn.task_init_stream",
         "tsn_adapters.common.trufnetwork.tn.task_get_all_tsn_records",
         # GSheet Tasks
         "tsn_adapters.tasks.gsheet.task_read_gsheet",
@@ -591,7 +575,7 @@ def deploy_helper_contract(tn_block: TNAccessBlock, helper_stream_id: str):
 
     # Try to deploy helper contract
     try:
-        client.deploy_stream(helper_stream_id, stream_type=truf_sdk.StreamTypeHelper, wait=True)
+        client.deploy_stream(helper_stream_id, stream_type=truf_sdk.StreamTypePrimitive, wait=True)
     except Exception as e:
         if "dataset exists" not in str(e) and "already exists" not in str(e):
             raise e
