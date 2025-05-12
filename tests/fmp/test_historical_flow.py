@@ -388,7 +388,7 @@ class TestDataProcessing:
 
         # Verify date conversion to UNIX timestamps
         for iso_date, unix_ts in zip(sample_eod_data["date"], tn_df["date"]):
-            expected_ts = str(int(parse_iso_date(iso_date).timestamp()))
+            expected_ts = int(parse_iso_date(iso_date).timestamp())
             assert unix_ts == expected_ts, f"Timestamp mismatch for {iso_date}: expected {expected_ts}, got {unix_ts}"
 
 
