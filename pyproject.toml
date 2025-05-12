@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A collection of prefect tasks and examples ingesting data into TSN"
 readme = "README.md"
 dependencies = [
-    "prefect-client>=3.3.1",
+    "prefect-client==3.3.7",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
     "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@d7a4547ac6134e172c04f7d6aaccda85072a0242",
     "PyGithub",
@@ -32,7 +32,7 @@ argentina = [
 ]
 dev = [
     # we need this for the testing harness
-    "prefect>=3.3.1",
+    "prefect==3.3.7",
     "pytest-timeout",
     "pytest-mock",
     "black",
