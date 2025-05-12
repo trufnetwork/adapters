@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
 import trufnetwork_sdk_py.client as tn_client
+from trufnetwork_sdk_py.client import StreamDefinitionInput
 
 from trufnetwork_sdk_py.utils import generate_stream_id
 from math import ceil
@@ -159,6 +160,45 @@ def task_deploy_primitive(block: TNAccessBlock, stream_id: str, wait: bool = Tru
         # For any other error, re-raise it to be handled by Prefect's retry mechanism
         logger.error(f"Error deploying stream {stream_id}: {e!s}", exc_info=True)
         raise e
+
+@task(
+    retries=UNUSED_INFINITY_RETRIES,
+    retry_delay_seconds=10,
+    retry_condition_fn=tn_special_retry_condition(3),
+    tags=["tn", "tn-write"],
+)
+def task_batch_deploy_streams(
+    client: tn_client.TNClient,
+    definitions: list[StreamDefinitionInput],
+    wait: bool = True,
+) -> str | None:
+    """
+    Deploy multiple streams in one transaction, skipping any that already exist.
+    """
+    logger = get_logger_safe()
+    # build locators for existence check (use the client’s current account as data_provider)
+    data_provider = client.get_current_account()
+    locators = [
+        {"stream_id": d["stream_id"], "data_provider": data_provider}
+        for d in definitions
+    ]
+    # returns only those locators which do NOT exist yet
+    missing = client.batch_filter_streams_by_existence(locators, return_existing=False)
+    if not missing:
+        logger.info("All streams already exist; skipping batch deployment.")
+        return None
+
+    # map back to the subset of definitions we actually need to deploy
+    to_deploy: list[StreamDefinitionInput] = [
+        {"stream_id": loc["stream_id"],
+         "stream_type": next(d["stream_type"]
+                             for d in definitions
+                             if d["stream_id"] == loc["stream_id"])}
+        for loc in missing
+    ]
+
+    # perform the batch deploy
+    return client.batch_deploy_streams(to_deploy, wait)
 
 if __name__ == "__main__":
     @flow(log_prints=True)
