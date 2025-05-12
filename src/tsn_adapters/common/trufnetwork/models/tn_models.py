@@ -22,7 +22,7 @@ class TnRecordModel(pa.DataFrameModel):
     """
 
     date: Series[int]  # A string here to support both date formats and unix timestamps (seconds)
-    value: Series[float]  # Can't use decimal.Decimal in series
+    value: Series[str]  # Can't use decimal.Decimal in series
 
     class Config(pa.DataFrameModel.Config):
         coerce = True

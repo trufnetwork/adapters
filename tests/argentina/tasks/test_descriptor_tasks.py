@@ -1,18 +1,21 @@
-import pytest
+from unittest.mock import MagicMock
+
 import pandas as pd
 from pandera.typing import DataFrame
-from unittest.mock import MagicMock, AsyncMock
+import pytest
+from pytest import LogCaptureFixture
 
 from tsn_adapters.blocks.primitive_source_descriptor import (
-    S3SourceDescriptor, PrimitiveSourceDataModel # Corrected import
+    PrimitiveSourceDataModel,
+    S3SourceDescriptor,
 )
-from tsn_adapters.tasks.argentina.tasks.descriptor_tasks import load_product_descriptor, DescriptorError
+from tsn_adapters.tasks.argentina.tasks.descriptor_tasks import DescriptorError, load_product_descriptor
 
 # Sample valid BASE descriptor data (columns from PrimitiveSourceDataModel)
 SAMPLE_DESCRIPTOR_DATA = {
-    'stream_id': ['s1', 's2'],
-    'source_id': ['p1', 'p2'],
-    'source_type': ['argentina_sepa_product'] * 2,
+    "stream_id": ["s1", "s2"],
+    "source_id": ["p1", "p2"],
+    "source_type": ["argentina_sepa_product"] * 2,
 }
 
 
@@ -27,7 +30,7 @@ def mock_s3_descriptor_block() -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_load_product_descriptor_success(mock_s3_descriptor_block):
+async def test_load_product_descriptor_success(mock_s3_descriptor_block: MagicMock):
     """Test successful loading of a valid product descriptor."""
     # Arrange
     # Create DataFrame conforming to the BASE model
@@ -44,11 +47,11 @@ async def test_load_product_descriptor_success(mock_s3_descriptor_block):
 
 
 @pytest.mark.asyncio
-async def test_load_product_descriptor_empty_dataframe(mock_s3_descriptor_block, caplog):
+async def test_load_product_descriptor_empty_dataframe(mock_s3_descriptor_block: MagicMock, caplog: LogCaptureFixture):
     """Test that an empty descriptor DataFrame raises DescriptorError."""
     # Arrange
     # Create empty DataFrame conforming to the BASE model
-    empty_df = DataFrame[PrimitiveSourceDataModel](pd.DataFrame(columns=SAMPLE_DESCRIPTOR_DATA.keys()))
+    empty_df = DataFrame[PrimitiveSourceDataModel](pd.DataFrame(columns=list(SAMPLE_DESCRIPTOR_DATA.keys())))
     mock_s3_descriptor_block.get_descriptor.return_value = empty_df
 
     # Act & Assert
@@ -61,7 +64,7 @@ async def test_load_product_descriptor_empty_dataframe(mock_s3_descriptor_block,
 
 
 @pytest.mark.asyncio
-async def test_load_product_descriptor_block_exception(mock_s3_descriptor_block, caplog):
+async def test_load_product_descriptor_block_exception(mock_s3_descriptor_block: MagicMock, caplog: LogCaptureFixture):
     """Test that an exception from the block's get_descriptor raises DescriptorError."""
     # Arrange
     test_exception = ValueError("Simulated block error")
@@ -76,4 +79,4 @@ async def test_load_product_descriptor_block_exception(mock_s3_descriptor_block,
     assert "Simulated block error" in caplog.text
     assert "ERROR" in caplog.text
     # Check that the original exception is chained
-    assert exc_info.value.__cause__ is test_exception 
+    assert exc_info.value.__cause__ is test_exception

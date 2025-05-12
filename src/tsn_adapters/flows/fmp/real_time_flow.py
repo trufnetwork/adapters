@@ -53,7 +53,7 @@ class FlowResult(TypedDict):
         and track processing statistics.
 
     Fields:
-        success: True if any data was processed successfully
+        success: True if the flow completed its operational steps without critical errors
         processed_quotes: Number of quotes successfully processed
         filtered_quotes: Number of quotes filtered out (e.g., null prices)
         failed_batches: Number of batches that failed processing
@@ -567,7 +567,8 @@ def real_time_flow(
 
         # Combine all batch results
         try:
-            combined_data = combine_batch_results(*quotes_batches)
+            combined_data_state = combine_batch_results(*quotes_batches, return_state=True)
+            combined_data = force_sync(combined_data_state.result)()
             failed_batches = sum(1 for batch in quotes_batches if batch is None or isinstance(batch, Exception))
             logger.info(
                 "Combined batch results",
@@ -584,9 +585,7 @@ def real_time_flow(
 
         # Process the combined data into TnDataRowModel format
         try:
-            processed_data = process_data(quotes_df=combined_data, descriptor_df=descriptor_df, return_state=True)
-            # Get the actual processed data and ensure it's the right type
-            processed_df = force_sync(processed_data.result)()
+            processed_df = process_data(quotes_df=combined_data, descriptor_df=descriptor_df)
 
             if isinstance(processed_df, Exception):
                 raise processed_df
@@ -607,11 +606,30 @@ def real_time_flow(
                 },
             )
 
+        # If no data is left after processing, return operational success.
+        if processed_df.empty:
+            logger.info(
+                "No data to insert after processing. Flow completed operationally.",
+                extra={
+                    "processed_quotes": 0,
+                    "filtered_quotes": total_filtered,
+                    "failed_batches": failed_batches,
+                    "errors": error_details,
+                },
+            )
+            return FlowResult(
+                success=True,
+                processed_quotes=0,
+                filtered_quotes=total_filtered,
+                failed_batches=failed_batches,
+                errors=error_details,
+            )
+            
         # Insert processed data into TN
         try:
             task_split_and_insert_records(
                 block=tn_block,
-                records=processed_data,
+                records=processed_df,
                 max_batch_size=insert_batch_size,
             )
             logger.info(

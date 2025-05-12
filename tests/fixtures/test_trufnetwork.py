@@ -1,6 +1,5 @@
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from functools import wraps
 import json
 import logging
 import os
@@ -8,14 +7,12 @@ import shutil
 import signal
 import subprocess
 import time
-from typing import Any, Callable, Optional
-from unittest.mock import Mock, patch
+from typing import Any, Optional
+from unittest.mock import Mock
 
-from prefect import Task, task as original_prefect_task
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import GlobalConcurrencyLimitCreate
 from prefect.exceptions import ObjectNotFound
-from prefect.logging.loggers import disable_run_logger
 from prefect.testing.utilities import prefect_test_harness
 from pydantic import SecretStr
 import pytest
@@ -399,125 +396,23 @@ def term_handler():
     signal.signal(signal.SIGTERM, orig)
 
 
-@pytest.fixture(scope="session", autouse=True)
-def disable_prefect_retries():
-    """
-    Patches prefect.task globally for the test session to ensure all tasks
-    are created with retries=0 and no caching, and that subsequent
-    .with_options() calls also enforce this.
-    """
-
-    # This function takes a Task instance and modifies it
-    def apply_test_options_to_task(task_instance: Task[Any, Any]) -> Task[Any, Any]:
-        if not isinstance(task_instance, Task): # type: ignore[unreachable]
-            # Should not happen if original_prefect_task behaves as expected
-            return task_instance
-
-        # Always override retries, cache_key_fn, and cache_expiration
-        # regardless of how the task was created
-        # print(f"Patching options for task: {getattr(task_instance, 'name', 'Unnamed Task')}") # For debugging
-        patched_task = task_instance.with_options(
-            retries=0,
-            cache_key_fn=None,
-            cache_expiration=None,
-            retry_condition_fn=None,
-            # You might want to set a specific task_run_name for easier test debugging
-            # task_run_name=f"{task_instance.name}-test-run" if task_instance.name else "unnamed-task-test-run"
-        )
-
-        # Also patch the with_options method of the returned task to ensure
-        # any subsequent calls also have these options overridden
-        original_with_options = patched_task.with_options
-
-        @wraps(original_with_options)
-        def ensure_no_retries_or_cache_on_with_options(*args: Any, **kwargs: Any) -> Task[Any, Any]:
-            # Force these options regardless of what was passed
-            # The first arg to with_options can be a function for state handlers,
-            # so we need to be careful if we're modifying args.
-            # It's safer to just update kwargs.
-            kwargs["retries"] = 0
-            kwargs["cache_key_fn"] = None
-            kwargs["cache_expiration"] = None
-            kwargs["retry_condition_fn"] = None
-            return original_with_options(*args, **kwargs)
-
-        # Use setattr to avoid type checking issues if any, or direct assignment
-        # setattr(patched_task, "with_options", ensure_no_retries_or_cache_on_with_options)
-        patched_task.with_options = ensure_no_retries_or_cache_on_with_options # type: ignore[assignment]
-
-        return patched_task
-
-    # This is the replacement for the prefect.task decorator
-    def patched_task_decorator_factory(*decorator_args: Any, **decorator_kwargs: Any) -> Any:
-        """
-        This function replaces `prefect.task`.
-        It handles both `@task` and `@task(...)` usage.
-        """
-        # Case 1: @task (used without arguments, decorating a function directly)
-        # e.g. @task
-        #      def my_fn(): ...
-        if len(decorator_args) == 1 and callable(decorator_args[0]) and not decorator_kwargs:
-            original_func = decorator_args[0]
-            # Create the task instance using the original decorator
-            task_instance = original_prefect_task(original_func)
-            # Apply our modifications
-            return apply_test_options_to_task(task_instance)
-
-        # Case 2: @task(...) (used with arguments, returns a decorator)
-        # e.g. @task(name="My Task", retries=3)
-        #      def my_fn(): ...
-        # Or direct call: my_task = task(my_fn, name="My Task")
-        else:
-            # It's either @task(options) or task(fn, options)
-            # Call original_prefect_task to get either the task or the inner decorator
-            task_or_inner_decorator = original_prefect_task(*decorator_args, **decorator_kwargs)
-
-            if isinstance(task_or_inner_decorator, Task):
-                # This happens if called like: task(fn, name="foo")
-                return apply_test_options_to_task(task_or_inner_decorator)
-            elif callable(task_or_inner_decorator):
-                # This happens if called like: @task(name="foo")
-                # task_or_inner_decorator is now the thing that will take the function
-                @wraps(task_or_inner_decorator) # Preserves signature of the inner decorator
-                def actual_decorator_to_apply_options(fn: Callable[..., Any]) -> Task[Any, Any]:
-                    task_instance = task_or_inner_decorator(fn)
-                    return apply_test_options_to_task(task_instance)
-                return actual_decorator_to_apply_options
-            else:
-                # Should not be reached with standard prefect.task usage
-                return task_or_inner_decorator
-
-
-    # Patch prefect.task globally. All imports of prefect.task thereafter will get our version.
-    # This needs to happen before any of your tasks are imported and defined.
-    # autouse=True, scope="session" for the fixture helps ensure this.
-    with patch("prefect.task", new=patched_task_decorator_factory):
-        yield
-
-
-@pytest.fixture(scope="function")
-def disable_prefect_logger():
-    with disable_run_logger():
-        yield
-
-
 @pytest.fixture(scope="session", autouse=False)
-async def prefect_test_fixture(disable_prefect_retries: Any):
+def prefect_test_fixture():
     """Prefect test harness fixture that also manages the 'tn-write' GCL."""
     limit_name = "tn-write"
     with prefect_test_harness(server_startup_timeout=120):
-        async with get_client() as client:
+        with get_client(sync_client=True) as client:
             # Attempt to create the global concurrency limit
             try:
                 logger.info(f"Creating '{limit_name}' global concurrency limit...")
-                await client.create_global_concurrency_limit(
+                client.create_global_concurrency_limit(
                     concurrency_limit=GlobalConcurrencyLimitCreate(name=limit_name, limit=1)
                 )
                 logger.info(f"'{limit_name}' global concurrency limit created.")
             except Exception as e:
                 # Check if it already exists by trying to read it
                 try:
-                    await client.read_global_concurrency_limit_by_name(name=limit_name)
+                    client.read_global_concurrency_limit_by_name(name=limit_name)
                     logger.warning(f"Global concurrency limit '{limit_name}' already exists. Skipping creation.")
                 except ObjectNotFound:
                     logger.error(f"Failed to create global concurrency limit '{limit_name}': {e!s}")
@@ -532,10 +427,10 @@ async def prefect_test_fixture(disable_prefect_retries: Any):
             yield
         finally:
             # Clean up the concurrency limit
-            async with get_client() as client:
+            with get_client(sync_client=True) as client:
                 try:
                     logger.info(f"Deleting '{limit_name}' global concurrency limit...")
-                    await client.delete_global_concurrency_limit_by_name(name=limit_name)
+                    client.delete_global_concurrency_limit_by_name(name=limit_name)
                     logger.info(f"'{limit_name}' global concurrency limit deleted.")
                 except ObjectNotFound:
                     logger.warning(
@@ -556,13 +451,12 @@ DEFAULT_TN_PRIVATE_KEY = "0" * 63 + "1"  # 64 zeros ending with 1
 
 @pytest.fixture(scope="session")
 def tn_block(
-    tn_provider: TrufNetworkProvider, prefect_test_fixture: Any, disable_prefect_retries: Any, helper_contract_id: str
+    tn_provider: TrufNetworkProvider, prefect_test_fixture: Any, helper_contract_id: str
 ) -> TNAccessBlock:
     """Create a TNAccessBlock with test node and default credentials. Also deploys the helper contract."""
     tn_block = TNAccessBlock(
         tn_provider=tn_provider.api_endpoint,
         tn_private_key=SecretStr(os.environ.get("TN_PRIVATE_KEY", DEFAULT_TN_PRIVATE_KEY)),
-        helper_contract_name=helper_contract_id,
     )
     deploy_helper_contract(tn_block, helper_contract_id)
     return tn_block

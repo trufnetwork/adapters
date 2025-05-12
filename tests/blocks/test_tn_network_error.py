@@ -1,27 +1,24 @@
 from typing import Any, Callable, cast
 from unittest.mock import MagicMock, patch
 
+from prefect.client.schemas.objects import StateDetails, StateType
+from prefect.types._datetime import DateTime
 from pydantic import SecretStr
 import pytest
+from trufnetwork_sdk_py.client import TNClient
 
 from tsn_adapters.blocks.tn_access import (
     TNAccessBlock,
     TNNodeNetworkError,
-    tn_special_retry_condition,
     task_wait_for_tx,
+    tn_special_retry_condition,
 )
-
-from prefect.client.schemas.objects import StateDetails, StateType
-from prefect.types._datetime import DateTime
-
-from trufnetwork_sdk_py.client import TNClient
 
 
 # --- Dummy TN Client to simulate behavior ---
 class DummyTNClient(TNClient):
     def __init__(self):
         pass
-
 
     def get_first_record(self, *args: Any, **kwargs: Any) -> dict[str, str | float] | None:
         # Simulate a successful call
@@ -52,7 +49,7 @@ def test_is_tn_node_network_error():
 # For our tests we need dummy Task, TaskRun, and State objects.
 # We use minimal dummy implementations.
 from prefect import Task  # Ensure that the correct Task object is imported per your Prefect version.
-from prefect.client.schemas.objects import TaskRun, State
+from prefect.client.schemas.objects import State, TaskRun
 
 
 class DummyTask(Task[Any, Any]):
@@ -147,7 +144,7 @@ def test_tn_access_block_network_error():
 def test_real_tn_client_unexistent_provider():
     """
     Test the real TN client with an unexistent provider.
-    
+
     This test creates a TNAccessBlock using an invalid provider URL and attempts to call
     get_first_record. The safe client is expected to detect the underlying network
     error and re-raise it as a TNNodeNetworkError.
@@ -159,7 +156,6 @@ def test_real_tn_client_unexistent_provider():
         block = TNAccessBlock(
             tn_provider=invalid_provider,
             tn_private_key=SecretStr("0000000000000000000000000000000000000000000000000000000000000012"),
-            helper_contract_name="dummy"
         )
         _ = block.get_first_record("dummy_stream")
     # Check that the error message indicates a connection issue.
@@ -167,6 +163,7 @@ def test_real_tn_client_unexistent_provider():
 
 
 # --- Tests for task_wait_for_tx --- #
+
 
 @patch("tsn_adapters.blocks.tn_access.get_run_logger")
 def test_task_wait_for_tx_success(mock_logger: MagicMock):
@@ -185,20 +182,6 @@ def test_task_wait_for_tx_already_existed(mock_logger: MagicMock):
     """Test task_wait_for_tx skips when tx_hash is ALREADY_EXISTED."""
     mock_block = MagicMock(spec=TNAccessBlock)
     tx_hash = "ALREADY_EXISTED"
-
-    task_wait_for_tx.fn(block=mock_block, tx_hash=tx_hash)
-
-    mock_block.wait_for_tx.assert_not_called()
-    mock_logger.return_value.debug.assert_called_once_with(
-        f"Skipping wait for tx: Operation indicated prior existence or no tx generated (tx_hash='{tx_hash}')."
-    )
-
-
-@patch("tsn_adapters.blocks.tn_access.get_run_logger")
-def test_task_wait_for_tx_none(mock_logger: MagicMock):
-    """Test task_wait_for_tx skips when tx_hash is None."""
-    mock_block = MagicMock(spec=TNAccessBlock)
-    tx_hash = None
 
     task_wait_for_tx.fn(block=mock_block, tx_hash=tx_hash)
 

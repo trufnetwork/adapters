@@ -1,5 +1,5 @@
+from collections.abc import Generator
 from datetime import datetime, timezone
-from typing import Generator
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -16,7 +16,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourceDataModel,
     PrimitiveSourcesDescriptorBlock,
 )
-from tsn_adapters.blocks.shared_types import StreamLocatorModel
+from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel
 from tsn_adapters.flows.stream_deploy_flow import (
     deploy_streams_flow,
     mark_batch_deployed_task,
@@ -99,7 +99,7 @@ def tn_access_block() -> Generator[FakeTNAccessBlock, None, None]:
     """Fixture that provides a FakeTNAccessBlock with no existing streams."""
     tn_access_block = FakeTNAccessBlock(existing_streams=set())
     yield tn_access_block
-    tn_access_block.reset() 
+    tn_access_block.reset()
 
 
 @pytest.fixture
@@ -139,7 +139,7 @@ def test_deploy_streams_flow_all_new(
     # Verify the correct stream definitions were passed to batch_deploy_streams
     deployed_definitions = the_client.deployed_stream_definitions_history
     deployed_ids_from_mock = {defn["stream_id"] for defn in deployed_definitions}
-    
+
     assert len(deployed_definitions) == num_expected_streams
     assert deployed_ids_from_mock == expected_stream_ids
     # Check stream type (assuming all are primitive)
@@ -204,7 +204,7 @@ def create_mock_filter_future(
 
 
 @pytest.mark.usefixtures("prefect_test_fixture")
-@pytest.mark.parametrize("primitive_descriptor", [5], indirect=True) # Test with 5 streams
+@pytest.mark.parametrize("primitive_descriptor", [5], indirect=True)  # Test with 5 streams
 def test_deploy_streams_flow_some_exist_tn(
     tn_access_block: FakeTNAccessBlock, primitive_descriptor: TestPrimitiveSourcesDescriptor
 ) -> None:
@@ -212,7 +212,7 @@ def test_deploy_streams_flow_some_exist_tn(
     # Setup: streams 1 and 3 already exist on TN
     initial_existing_streams = {"stream_1", "stream_3"}
     tn_access_block.set_deployed_streams(initial_existing_streams)
-    
+
     test_client = tn_access_block.client
     assert isinstance(test_client, FakeInternalTNClient)
     assert test_client.existing_streams == initial_existing_streams
@@ -236,34 +236,35 @@ def test_deploy_streams_flow_some_exist_tn(
 
     # Verify the final state of existing streams in the mock TN client
     final_existing_streams = initial_existing_streams.union(expected_to_deploy_ids)
-    
+
     test_client_final = tn_access_block.client
     assert isinstance(test_client_final, FakeInternalTNClient)
     assert test_client_final.existing_streams == final_existing_streams
 
 
 @pytest.mark.usefixtures("prefect_test_fixture")
-@pytest.mark.parametrize("primitive_descriptor", [5], indirect=True) # Test with 5 streams
-@pytest.mark.parametrize("deployment_state_block", [{"stream_0", "stream_4"}], indirect=True) # Streams 0 and 4 already in state
+@pytest.mark.parametrize("primitive_descriptor", [5], indirect=True)  # Test with 5 streams
+@pytest.mark.parametrize(
+    "deployment_state_block", [{"stream_0", "stream_4"}], indirect=True
+)  # Streams 0 and 4 already in state
 def test_deploy_streams_flow_some_in_state_block(
     tn_access_block: FakeTNAccessBlock,
     primitive_descriptor: TestPrimitiveSourcesDescriptor,
     deployment_state_block: TestDeploymentStateBlock,
 ) -> None:
     """Test streams marked in DeploymentStateBlock are skipped before checking TN.
-       Also test that TN existing streams not in state block are skipped later.
+    Also test that TN existing streams not in state block are skipped later.
     """
-    # Setup: 
+    # Setup:
     # - stream_0, stream_4 in state block
     # - stream_2 already exists on TN (but not in state block)
     initial_existing_streams_tn = {"stream_2"}
     tn_access_block.set_deployed_streams(initial_existing_streams_tn)
-    
-    
-    expected_to_deploy_ids = {"stream_1", "stream_3"} # Only these are not in state and not on TN initially
+
+    expected_to_deploy_ids = {"stream_1", "stream_3"}  # Only these are not in state and not on TN initially
     expected_skipped_by_state = {"stream_0", "stream_4"}
     expected_skipped_by_tn_check = {"stream_2"}
-    expected_total_skipped = len(expected_skipped_by_state) + len(expected_skipped_by_tn_check) # 2 + 1 = 3
+    expected_total_skipped = len(expected_skipped_by_state) + len(expected_skipped_by_tn_check)  # 2 + 1 = 3
 
     # Run the flow WITH the deployment state block
     results = deploy_streams_flow(
@@ -283,7 +284,7 @@ def test_deploy_streams_flow_some_in_state_block(
 
     # Verify the final state of existing streams in the mock TN client
     final_existing_streams_state = initial_existing_streams_tn.union(expected_to_deploy_ids)
-    
+
     test_client_final_state_check = tn_access_block.client
     assert isinstance(test_client_final_state_check, FakeInternalTNClient)
     assert test_client_final_state_check.existing_streams == final_existing_streams_state

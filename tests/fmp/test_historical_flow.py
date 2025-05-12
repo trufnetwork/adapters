@@ -383,7 +383,7 @@ class TestDataProcessing:
         assert_all_records_for_stream(tn_df, stream_id)
 
         # expect first date to be 1704067200, which is a valid unix timestamp (seconds)
-        expected_date = "1704067200"
+        expected_date = 1704067200
         assert tn_df["date"][0] == expected_date, f"Date should be {expected_date}, got {tn_df['date'][0]}"
 
         # Verify date conversion to UNIX timestamps
@@ -473,7 +473,7 @@ class TestHistoricalFlowAdvanced:
         sequence = SequenceTracker()
 
         class TimingFMPBlock(FakeFMPBlock):
-            def __init__(self, sequence_tracker: SequenceTracker, *args, **kwargs):
+            def __init__(self, sequence_tracker: SequenceTracker, *args: Any, **kwargs: Any):
                 super().__init__(*args, **kwargs)
                 self.sequence = sequence_tracker
 

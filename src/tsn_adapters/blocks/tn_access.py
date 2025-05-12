@@ -57,34 +57,6 @@ def convert_to_typed_df(df: pd.DataFrame, model_type: type[T]) -> DataFrame[T]:
     return DataFrame[model_type](df)
 
 
-def process_stream_check_futures(futures: list[tuple[Any, Any]], logger: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Process futures from stream check operations and separate into initialized and uninitialized.
-
-    Args:
-        futures: List of (future, row) tuples where future.result() returns a boolean
-        logger: Logger instance for reporting errors
-
-    Returns:
-        Tuple of (initialized_streams, uninitialized_streams) DataFrames
-    """
-    initialized_streams = create_empty_df(["data_provider", "stream_id"])
-    uninitialized_streams = create_empty_df(["data_provider", "stream_id"])
-
-    for future, row in futures:
-        try:
-            initialized = future.result()
-            if initialized:
-                initialized_streams = append_to_df(initialized_streams, row)
-            else:
-                uninitialized_streams = append_to_df(uninitialized_streams, row)
-        except Exception as e:
-            logger.warning(f"Error checking if stream {row['stream_id']} is initialized: {e!s}")
-            uninitialized_streams = append_to_df(uninitialized_streams, row)
-
-    return initialized_streams, uninitialized_streams
-
-
 def extract_stream_locators(records: DataFrame[TnDataRowModel]) -> DataFrame[StreamLocatorModel]:
     """Extract unique stream locators from records DataFrame."""
     unique_stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
@@ -99,14 +71,6 @@ def create_empty_stream_locator_df() -> DataFrame[StreamLocatorModel]:
 def get_stream_locator_set(df: pd.DataFrame) -> set[tuple[str, str]]:
     """Convert a DataFrame with data_provider and stream_id to a set of tuples."""
     return {(row["data_provider"] or "", row["stream_id"]) for _, row in df.iterrows()}
-
-
-def diff_stream_locator_sets(
-    all_streams: set[tuple[str, str]], initialized_streams: set[tuple[str, str]]
-) -> list[dict[str, str]]:
-    """Get the difference between two sets of stream locators and convert to a list of dicts."""
-    uninitialized_set = all_streams - initialized_streams
-    return [{"data_provider": dp, "stream_id": sid} for dp, sid in uninitialized_set]
 
 
 # --- Constants ---
@@ -131,8 +95,6 @@ def handle_tn_errors(func: F) -> F:
                 raise MetadataProcedureNotFoundError.from_error(e)
             if StreamAlreadyExistsError.is_stream_already_exists_error(e):
                 raise StreamAlreadyExistsError.from_error(e)
-            if StreamAlreadyInitializedError.is_stream_already_initialized_error(e):
-                raise StreamAlreadyInitializedError.from_error(e)
             raise
 
     return cast(F, wrapper)
@@ -163,7 +125,7 @@ def tn_special_retry_condition(max_other_error_retries: int) -> Any:
         except (TNNodeNetworkError, TNDbTimeoutError):
             # Always retry on network and DB timeout errors.
             return True
-        except (MetadataProcedureNotFoundError, StreamAlreadyExistsError, StreamAlreadyInitializedError):
+        except (MetadataProcedureNotFoundError, StreamAlreadyExistsError):
             # This won't change with retries.
             return False
         except Exception:
@@ -291,41 +253,6 @@ class StreamAlreadyExistsError(Exception):
             return False
 
 
-class StreamAlreadyInitializedError(Exception):
-    """Custom exception raised when attempting to initialize a stream that is already initialized."""
-
-    def __init__(self, stream_id: str):
-        self.stream_id = stream_id
-        super().__init__(f"Stream '{stream_id}' is already initialized.")
-
-    @classmethod
-    def from_error(cls, error: Exception) -> "StreamAlreadyInitializedError":
-        """
-        Convert a generic exception to StreamAlreadyInitializedError if the error message matches.
-        """
-        if isinstance(error, StreamAlreadyInitializedError):
-            return error
-        msg = str(error).lower()
-        if isinstance(error, RuntimeError) and ("already initialized" in msg):
-            import re
-
-            match = re.search(r"stream '([^']+)' is already initialized", str(error))
-            stream_id = match.group(1) if match else "unknown"
-            return cls(stream_id)
-        raise error
-
-    @classmethod
-    def is_stream_already_initialized_error(cls, error: Exception) -> bool:
-        """
-        Check if the given exception is a StreamAlreadyInitializedError or matches its error pattern.
-        """
-        try:
-            cls.from_error(error)
-            return True
-        except Exception:
-            return False
-
-
 class TNAccessBlock(Block):
     """Prefect Block for managing TSN access credentials.
 
@@ -385,10 +312,7 @@ class TNAccessBlock(Block):
 
     @handle_tn_errors
     def get_stream_type(self, data_provider: str, stream_id: str) -> str:
-        """Check if a stream is initialized by getting its stream type.
-
-        This method is used to verify both stream existence and initialization status.
-        A successful response indicates the stream exists and is initialized.
+        """Check stream type.
 
         Args:
             data_provider: The data provider of the stream
@@ -712,9 +636,11 @@ def task_read_records(
         date_to=date_to,
     )
 
+
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=2, retry_condition_fn=tn_special_retry_condition(3))
 def task_wait_for_tx(block: TNAccessBlock, tx_hash: str) -> None:
     return block.wait_for_tx(tx_hash)
+
 
 if __name__ == "__main__":
     TNAccessBlock.register_type_and_schema()
