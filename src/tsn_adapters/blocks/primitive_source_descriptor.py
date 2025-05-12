@@ -121,7 +121,7 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
                 encoding="utf-8",
                 dtype={"stream_id": str, "source_id": str, "source_type": str},
                 keep_default_na=False,
-                na_values=[],
+                na_values=["\\\\N"],
             )
             return DataFrame[PrimitiveSourceDataModel](df)
         except Exception as e:
@@ -131,7 +131,9 @@ class S3SourceDescriptor(WritableSourceDescriptorBlock):
 
     def set_sources(self, descriptor: DataFrame[PrimitiveSourceDataModel]):
         with BytesIO() as buffer:
-            descriptor.to_csv(buffer, index=False, encoding="utf-8", compression="zip")
+            descriptor.to_csv(
+                buffer, index=False, encoding="utf-8", compression="zip", na_rep="\\\\N"
+            )
             buffer.seek(0)
             self.s3_bucket.write_path(
                 path=self.file_path,

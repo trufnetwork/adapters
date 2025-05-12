@@ -376,7 +376,7 @@ class TNAccessBlock(Block):
             raise self.Error(f"Failed to query TN for {stream_id}: {e}") from e
 
     @handle_tn_errors
-    def read_all_records(self, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
+    def read_all_records(self, stream_id: str, data_provider: Optional[str] = None) -> DataFrame[TnRecordModel]:
         """Read all records from TSN"""
         return self.read_records(stream_id, data_provider, date_from=date_string_to_unix("1000-01-01"))
 
