@@ -165,7 +165,8 @@ def _verify_tn_records(
         logger.debug(f"[{phase_name}] Verifying records for {source_id} (stream: {stream_id})...")
         try:
             # Read records (returns DataFrame[TnRecordModel])
-            tn_records_df: DataFrame[TnRecordModel] = tn_block.read_records(stream_id=stream_id)
+            # Read all records (returns generic pd.DataFrame, schema checked later)
+            tn_records_df = tn_block.read_all_records(stream_id=stream_id)
 
             # Prepare expected DataFrame
             expected_df = pd.DataFrame(expected_data, columns=["date", "value"])
