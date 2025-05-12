@@ -1,19 +1,17 @@
-from typing import Any, Callable, cast
+from typing import Any, Callable
 from unittest.mock import MagicMock, patch
 
+from prefect.client.schemas.objects import StateDetails, StateType
+from prefect.types._datetime import DateTime
 from pydantic import SecretStr
 import pytest
 
 from tsn_adapters.blocks.tn_access import (
     TNAccessBlock,
     TNNodeNetworkError,
-    tn_special_retry_condition,
     task_wait_for_tx,
+    tn_special_retry_condition,
 )
-
-from prefect.client.schemas.objects import StateDetails, StateType
-from prefect.types._datetime import DateTime
-
 from trufnetwork_sdk_py.client import TNClient
 
 
@@ -21,7 +19,6 @@ from trufnetwork_sdk_py.client import TNClient
 class DummyTNClient(TNClient):
     def __init__(self):
         pass
-
 
     def get_first_record(self, *args: Any, **kwargs: Any) -> dict[str, str | float] | None:
         # Simulate a successful call
@@ -52,7 +49,7 @@ def test_is_tn_node_network_error():
 # For our tests we need dummy Task, TaskRun, and State objects.
 # We use minimal dummy implementations.
 from prefect import Task  # Ensure that the correct Task object is imported per your Prefect version.
-from prefect.client.schemas.objects import TaskRun, State
+from prefect.client.schemas.objects import State, TaskRun
 
 
 class DummyTask(Task[Any, Any]):
@@ -76,7 +73,10 @@ class DummyState(State[Any]):
         )
         self._result_func = result_func
 
-    def result(self, raise_on_failure: bool = True, fetch: bool = True, retry_result_failure: bool = True) -> Any:
+    def result(self, raise_on_failure: bool = True, retry_result_failure: bool = True) -> Any:
+        """
+        Dummy result implementation matching base State.result signature.
+        """
         return self._result_func()
 
 
@@ -126,28 +126,34 @@ def test_retry_condition_success_no_retry():
     assert condition(dummy_task, dummy_task_run, dummy_state) is False
 
 
-# --- Test for a TNAccessBlock when the provider really doesn't exist ---
-# Here we subclass TNAccessBlock to override its client with our dummy client.
-class DummyTNAccessBlock(TNAccessBlock):
-    @property
-    def client(self) -> TNClient:
-        # Always return our DummyTNClient that simulates a network error.
-        return DummyTNClient()
+# --- Test TNAccessBlock error handling on client initialization ---
+def test_tn_access_block_network_error_via_init():
+    """Test that @handle_tn_errors on client property catches init errors."""
+    # Simulate the specific network error during TNClient initialization
+    network_error = RuntimeError(
+        "http post failed: dial tcp 1.2.3.4:8484: connect: connection refused"
+    )
+    # Patch the __init__ method of the real TNClient
+    with patch("trufnetwork_sdk_py.client.TNClient.__init__", side_effect=network_error) as mock_init:
+        # Instantiate the real block
+        block = TNAccessBlock(
+            tn_provider="nonexistent", tn_private_key=SecretStr("dummy")
+        )
+        # Accessing the client property triggers initialization, which is patched to fail
+        with pytest.raises(TNNodeNetworkError) as excinfo:
+            _ = block.client  # Trigger the client property getter
 
-
-def test_tn_access_block_network_error():
-    block = DummyTNAccessBlock(tn_provider="nonexistent", tn_private_key=SecretStr("dummy"))
-    # When invoking any client method via safe_client, expect TNNodeNetworkError.
-    with pytest.raises(TNNodeNetworkError) as excinfo:
-        cast(DummyTNClient, block.client).get_network_error()
-    assert "http" in str(excinfo.value) or "connect" in str(excinfo.value)
+        # Assert that the decorator converted the RuntimeError to TNNodeNetworkError
+        assert "http post failed" in str(excinfo.value)
+        # Check that the patched __init__ was called during property access
+        mock_init.assert_called_once()
 
 
 @pytest.mark.integration
-def test_real_tn_client_unexistent_provider():
+def test_real_tn_client_unexistent_provider(prefect_test_fixture: Any):
     """
     Test the real TN client with an unexistent provider.
-    
+
     This test creates a TNAccessBlock using an invalid provider URL and attempts to call
     get_first_record. The safe client is expected to detect the underlying network
     error and re-raise it as a TNNodeNetworkError.
@@ -159,7 +165,6 @@ def test_real_tn_client_unexistent_provider():
         block = TNAccessBlock(
             tn_provider=invalid_provider,
             tn_private_key=SecretStr("0000000000000000000000000000000000000000000000000000000000000012"),
-            helper_contract_name="dummy"
         )
         _ = block.get_first_record("dummy_stream")
     # Check that the error message indicates a connection issue.
@@ -168,8 +173,7 @@ def test_real_tn_client_unexistent_provider():
 
 # --- Tests for task_wait_for_tx --- #
 
-@patch("tsn_adapters.blocks.tn_access.get_run_logger")
-def test_task_wait_for_tx_success(mock_logger: MagicMock):
+def test_task_wait_for_tx_success():
     """Test task_wait_for_tx calls block.wait_for_tx for a valid hash."""
     mock_block = MagicMock(spec=TNAccessBlock)
     tx_hash = "0x123abc"
@@ -177,32 +181,3 @@ def test_task_wait_for_tx_success(mock_logger: MagicMock):
     task_wait_for_tx.fn(block=mock_block, tx_hash=tx_hash)
 
     mock_block.wait_for_tx.assert_called_once_with(tx_hash)
-    mock_logger.return_value.debug.assert_any_call(f"Waiting for transaction: {tx_hash}")
-
-
-@patch("tsn_adapters.blocks.tn_access.get_run_logger")
-def test_task_wait_for_tx_already_existed(mock_logger: MagicMock):
-    """Test task_wait_for_tx skips when tx_hash is ALREADY_EXISTED."""
-    mock_block = MagicMock(spec=TNAccessBlock)
-    tx_hash = "ALREADY_EXISTED"
-
-    task_wait_for_tx.fn(block=mock_block, tx_hash=tx_hash)
-
-    mock_block.wait_for_tx.assert_not_called()
-    mock_logger.return_value.debug.assert_called_once_with(
-        f"Skipping wait for tx: Operation indicated prior existence or no tx generated (tx_hash='{tx_hash}')."
-    )
-
-
-@patch("tsn_adapters.blocks.tn_access.get_run_logger")
-def test_task_wait_for_tx_none(mock_logger: MagicMock):
-    """Test task_wait_for_tx skips when tx_hash is None."""
-    mock_block = MagicMock(spec=TNAccessBlock)
-    tx_hash = None
-
-    task_wait_for_tx.fn(block=mock_block, tx_hash=tx_hash)
-
-    mock_block.wait_for_tx.assert_not_called()
-    mock_logger.return_value.debug.assert_called_once_with(
-        f"Skipping wait for tx: Operation indicated prior existence or no tx generated (tx_hash='{tx_hash}')."
-    )

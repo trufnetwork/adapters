@@ -311,9 +311,9 @@ async def test_transform_product_data_full_success(
     # Verify content and types
     assert result_df["stream_id"].tolist() == ["stream-1", "stream-2", "stream-3"]
     # Check content is the string representation of the timestamp
-    assert result_df["date"].tolist() == [str(expected_timestamp)] * 3
+    assert result_df["date"].tolist() == [expected_timestamp] * 3
     # Check the dtype is object (as pandas often represents strings)
-    assert result_df["date"].dtype == "object"
+    assert result_df["date"].dtype == "int64"
     assert result_df["value"].tolist() == ["10.0", "20.0", "30.0"]
     assert result_df["value"].dtype == "object"  # Pandas uses object for strings
     # Verify data_provider was added and is None/NaN

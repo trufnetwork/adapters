@@ -14,7 +14,6 @@ from unittest.mock import (
     patch,
 )
 
-import boto3  # type: ignore
 from moto import mock_aws
 from mypy_boto3_s3 import S3Client
 import pandas as pd
@@ -22,16 +21,20 @@ from pandera.typing import DataFrame
 from prefect.exceptions import UpstreamTaskError
 from prefect_aws import S3Bucket  # type: ignore
 import pytest
+from tests.utils.fake_tn_access import FakeTNAccessBlock  # FakeTNAccessBlock is used
 
 from tsn_adapters.blocks.deployment_state import DeploymentStateBlock
 from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourceDataModel,
     PrimitiveSourcesDescriptorBlock,
 )
-from tsn_adapters.blocks.tn_access import SplitInsertResults, TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.tasks.insert import SplitInsertResults
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
-from tsn_adapters.tasks.argentina.flows.insert_products_flow import DeploymentCheckError, insert_argentina_products_flow
+from tsn_adapters.tasks.argentina.flows.insert_products_flow import (
+    DeploymentCheckError,
+    insert_argentina_products_flow,
+)
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.tasks.date_processing_tasks import DailyAverageLoadingError, MappingIntegrityError
 from tsn_adapters.tasks.argentina.tasks.descriptor_tasks import DescriptorError
@@ -79,8 +82,8 @@ def mock_s3_block() -> MagicMock:
 
 
 @pytest.fixture
-def mock_tn_block() -> MagicMock:
-    return MagicMock(spec=TNAccessBlock)
+def mock_tn_block() -> FakeTNAccessBlock:
+    return FakeTNAccessBlock()
 
 
 @pytest.fixture
@@ -167,7 +170,7 @@ async def test_insert_flow_successful_run(
     prefect_test_fixture: Any,
     mocked_flow_context: dict[str, MagicMock],
     mock_s3_block: MagicMock,
-    mock_tn_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
     mock_descriptor_block: MagicMock,
     mock_deployment_state_block: MagicMock,
     sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
@@ -198,6 +201,10 @@ async def test_insert_flow_successful_run(
     mocks["load_daily"].return_value = sample_daily_avg_df_date1
     mocks["transform"].return_value = sample_transformed_df_date1
 
+    # Ensure the FakeTNAccessBlock knows about the streams that should exist on TN
+    # for the pre-insertion check.
+    mock_tn_block.set_deployed_streams(set(sample_descriptor_df["stream_id"].tolist()))
+
     # Act
     await insert_argentina_products_flow(
         s3_block=mock_s3_block,
@@ -221,15 +228,17 @@ async def test_insert_flow_successful_run(
     call_args, _ = mock_deployment_state_block.check_multiple_streams.call_args  # Ignore kwargs
     assert call_args[0] == required_streams
 
-    mocks["transform"].assert_called_once_with(
-        daily_avg_df=sample_daily_avg_df_date1,
-        descriptor_df=sample_descriptor_df,
-        date_str=date_to_process,
-    )
+    transform_call_args = mocks["transform"].call_args[1]
+    assert transform_call_args["daily_avg_df"].equals(sample_daily_avg_df_date1)
+    assert transform_call_args["descriptor_df"].equals(sample_descriptor_df)
+    assert transform_call_args["date_str"] == date_to_process
 
-    mocks["insert"].assert_called_once_with(
-        block=mock_tn_block, records=sample_transformed_df_date1, max_batch_size=batch_size, wait=True, return_state=False
-    )
+    insert_call_args = mocks["insert"].call_args[1]
+    assert insert_call_args["block"] == mock_tn_block
+    assert insert_call_args["records"].equals(sample_transformed_df_date1)
+    assert insert_call_args["max_batch_size"] == batch_size
+    assert insert_call_args["wait"] is True
+
     mocks["var_aset"].assert_called_once_with(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_to_process, overwrite=True)
     mocks["create_artifact"].assert_called_once()
 
@@ -257,7 +266,7 @@ async def test_insert_flow_basic_scenarios(
     prefect_test_fixture: Any,
     mocked_flow_context: dict[str, MagicMock],
     mock_s3_block: MagicMock,
-    mock_tn_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
     mock_descriptor_block: MagicMock,
     mock_deployment_state_block: MagicMock,
     sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
@@ -286,6 +295,10 @@ async def test_insert_flow_basic_scenarios(
 
     mocks["load_daily"].return_value = daily_avg_df
     mocks["transform"].return_value = transformed_df
+
+    # Ensure the FakeTNAccessBlock knows about the streams that should exist on TN
+    # for the pre-insertion check.
+    mock_tn_block.set_deployed_streams(set(desc_df["stream_id"].tolist()))
 
     # Act
     await insert_argentina_products_flow(
@@ -333,7 +346,7 @@ async def test_insert_flow_fatal_error_load_descriptor(
     prefect_test_fixture: Any,
     mocked_flow_context: dict[str, MagicMock],
     mock_s3_block: MagicMock,
-    mock_tn_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
     mock_descriptor_block: MagicMock,
     mock_deployment_state_block: MagicMock,
 ):
@@ -359,7 +372,7 @@ async def test_insert_flow_fatal_error_load_daily(
     prefect_test_fixture: Any,
     mocked_flow_context: dict[str, MagicMock],
     mock_s3_block: MagicMock,
-    mock_tn_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
     mock_descriptor_block: MagicMock,
     mock_deployment_state_block: MagicMock,
     sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
@@ -472,6 +485,9 @@ async def test_insert_flow_fatal_error_insert(
     mocks["transform"].return_value = sample_transformed_df_date1
     mocks["insert"].side_effect = test_exception
 
+    # Ensure the FakeTNAccessBlock knows about the streams for the pre-insertion check
+    mock_tn_block.set_deployed_streams(set(sample_descriptor_df["stream_id"].tolist()))
+
     with pytest.raises(UpstreamTaskError) as exc_info:
         await insert_argentina_products_flow(
             s3_block=mock_s3_block,
@@ -522,6 +538,9 @@ async def test_insert_flow_fatal_error_save_state(
         failed_reasons=[]
     )  # Insertion succeeds
     mocks["var_aset"].side_effect = test_exception
+
+    # Ensure the FakeTNAccessBlock knows about the streams for the pre-insertion check
+    mock_tn_block.set_deployed_streams(set(sample_descriptor_df["stream_id"].tolist()))
 
     with pytest.raises(OSError) as exc_info:
         _ = await insert_argentina_products_flow(
@@ -643,6 +662,9 @@ async def test_insert_flow_reporting(
         failed_records=pd.DataFrame(), # type: ignore
         failed_reasons=[]
     )  # Simulate successful insert
+
+    # Ensure the FakeTNAccessBlock knows about the streams for the pre-insertion check
+    mock_tn_block.set_deployed_streams(set(sample_descriptor_df["stream_id"].tolist()))
 
     await insert_argentina_products_flow(
         s3_block=mock_s3_block,

@@ -1,35 +1,33 @@
-import decimal
-from math import ceil
-import pandas as pd
-import trufnetwork_sdk_c_bindings.exports as truf_sdk
-import trufnetwork_sdk_py.client as tn_client
-
 from datetime import datetime, timezone
+import decimal
 from functools import wraps
+from math import ceil
 from typing import (
     Any,
     Callable,
-    List,
     Optional,
     TypedDict,
     TypeVar,
     Union,
     cast,
 )
-from typing_extensions import ParamSpec
+
+import pandas as pd
 from pandera.typing import DataFrame
 from prefect import Task, get_run_logger, task
 from prefect.blocks.core import Block
 from prefect.client.schemas.objects import State, TaskRun
 from prefect.concurrency.sync import concurrency, rate_limit
-from prefect.states import Completed
-from pydantic import ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, SecretStr
+import trufnetwork_sdk_c_bindings.exports as truf_sdk
+import trufnetwork_sdk_py.client as tn_client
+from typing_extensions import ParamSpec
 
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
-from tsn_adapters.utils.unix import check_unix_timestamp
 from tsn_adapters.utils.tn_record import create_record_batches
+from tsn_adapters.utils.unix import check_unix_timestamp
 
 # --- Type Variables ---
 T = TypeVar("T")  # Generic type for DataFrame models
@@ -59,34 +57,6 @@ def convert_to_typed_df(df: pd.DataFrame, model_type: type[T]) -> DataFrame[T]:
     return DataFrame[model_type](df)
 
 
-def process_stream_check_futures(futures: list[tuple[Any, Any]], logger: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Process futures from stream check operations and separate into initialized and uninitialized.
-
-    Args:
-        futures: List of (future, row) tuples where future.result() returns a boolean
-        logger: Logger instance for reporting errors
-
-    Returns:
-        Tuple of (initialized_streams, uninitialized_streams) DataFrames
-    """
-    initialized_streams = create_empty_df(["data_provider", "stream_id"])
-    uninitialized_streams = create_empty_df(["data_provider", "stream_id"])
-
-    for future, row in futures:
-        try:
-            initialized = future.result()
-            if initialized:
-                initialized_streams = append_to_df(initialized_streams, row)
-            else:
-                uninitialized_streams = append_to_df(uninitialized_streams, row)
-        except Exception as e:
-            logger.warning(f"Error checking if stream {row['stream_id']} is initialized: {e!s}")
-            uninitialized_streams = append_to_df(uninitialized_streams, row)
-
-    return initialized_streams, uninitialized_streams
-
-
 def extract_stream_locators(records: DataFrame[TnDataRowModel]) -> DataFrame[StreamLocatorModel]:
     """Extract unique stream locators from records DataFrame."""
     unique_stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
@@ -101,14 +71,6 @@ def create_empty_stream_locator_df() -> DataFrame[StreamLocatorModel]:
 def get_stream_locator_set(df: pd.DataFrame) -> set[tuple[str, str]]:
     """Convert a DataFrame with data_provider and stream_id to a set of tuples."""
     return {(row["data_provider"] or "", row["stream_id"]) for _, row in df.iterrows()}
-
-
-def diff_stream_locator_sets(
-    all_streams: set[tuple[str, str]], initialized_streams: set[tuple[str, str]]
-) -> list[dict[str, str]]:
-    """Get the difference between two sets of stream locators and convert to a list of dicts."""
-    uninitialized_set = all_streams - initialized_streams
-    return [{"data_provider": dp, "stream_id": sid} for dp, sid in uninitialized_set]
 
 
 # --- Constants ---
@@ -133,14 +95,14 @@ def handle_tn_errors(func: F) -> F:
                 raise MetadataProcedureNotFoundError.from_error(e)
             if StreamAlreadyExistsError.is_stream_already_exists_error(e):
                 raise StreamAlreadyExistsError.from_error(e)
-            if StreamAlreadyInitializedError.is_stream_already_initialized_error(e):
-                raise StreamAlreadyInitializedError.from_error(e)
             raise
 
     return cast(F, wrapper)
 
+
 P = ParamSpec("P")
 R = TypeVar("R")
+
 
 def tn_special_retry_condition(max_other_error_retries: int) -> Any:
     """
@@ -163,7 +125,7 @@ def tn_special_retry_condition(max_other_error_retries: int) -> Any:
         except (TNNodeNetworkError, TNDbTimeoutError):
             # Always retry on network and DB timeout errors.
             return True
-        except (MetadataProcedureNotFoundError, StreamAlreadyExistsError, StreamAlreadyInitializedError):
+        except (MetadataProcedureNotFoundError, StreamAlreadyExistsError):
             # This won't change with retries.
             return False
         except Exception:
@@ -174,14 +136,6 @@ def tn_special_retry_condition(max_other_error_retries: int) -> Any:
         return False
 
     return _retry_condition
-
-
-class SplitInsertResults(TypedDict):
-    """Results of batch insertions."""
-
-    success_tx_hashes: list[str]
-    failed_records: DataFrame[TnDataRowModel]
-    failed_reasons: list[str]
 
 
 class FilterStreamsResults(TypedDict):
@@ -258,6 +212,7 @@ class MetadataProcedureNotFoundError(Exception):
 
 class StreamAlreadyExistsError(Exception):
     """Custom exception raised when attempting to deploy a stream that already exists."""
+
     def __init__(self, stream_id: str):
         self.stream_id = stream_id
         super().__init__(f"Stream '{stream_id}' already exists.")
@@ -271,16 +226,16 @@ class StreamAlreadyExistsError(Exception):
             return error
         msg = str(error).lower()
         import re
+
         # Match "transaction failed: dataset exists: <stream_id>"
         match = re.search(r"dataset exists: ([a-z0-9]+)", msg)
         if match:
             stream_id = match.group(1)
             return cls(stream_id)
-        if (
-            isinstance(error, RuntimeError) and ("dataset exists" in msg or "already exists" in msg)
-        ):
+        if isinstance(error, RuntimeError) and ("dataset exists" in msg or "already exists" in msg):
             # Try to extract stream_id if possible, else use a placeholder
             import re
+
             match = re.search(r"stream '([^']+)' already exists", str(error))
             stream_id = match.group(1) if match else "unknown"
             return cls(stream_id)
@@ -290,41 +245,6 @@ class StreamAlreadyExistsError(Exception):
     def is_stream_already_exists_error(cls, error: Exception) -> bool:
         """
         Check if the given exception is a StreamAlreadyExistsError or matches its error pattern.
-        """
-        try:
-            cls.from_error(error)
-            return True
-        except Exception:
-            return False
-
-
-class StreamAlreadyInitializedError(Exception):
-    """Custom exception raised when attempting to initialize a stream that is already initialized."""
-    def __init__(self, stream_id: str):
-        self.stream_id = stream_id
-        super().__init__(f"Stream '{stream_id}' is already initialized.")
-
-    @classmethod
-    def from_error(cls, error: Exception) -> "StreamAlreadyInitializedError":
-        """
-        Convert a generic exception to StreamAlreadyInitializedError if the error message matches.
-        """
-        if isinstance(error, StreamAlreadyInitializedError):
-            return error
-        msg = str(error).lower()
-        if (
-            isinstance(error, RuntimeError) and ("already initialized" in msg)
-        ):
-            import re
-            match = re.search(r"stream '([^']+)' is already initialized", str(error))
-            stream_id = match.group(1) if match else "unknown"
-            return cls(stream_id)
-        raise error
-
-    @classmethod
-    def is_stream_already_initialized_error(cls, error: Exception) -> bool:
-        """
-        Check if the given exception is a StreamAlreadyInitializedError or matches its error pattern.
         """
         try:
             cls.from_error(error)
@@ -362,11 +282,6 @@ class TNAccessBlock(Block):
 
     tn_provider: str
     tn_private_key: SecretStr
-    helper_contract_name: str = Field(default="", description="Name of the helper contract. Name != ID.")
-    helper_contract_deployer: Optional[str] = Field(
-        default=None,
-        description="Address of the deployer of the helper contract. If not provided, will use the current wallet.",
-    )
     model_config = ConfigDict(ignored_types=(Task,))
 
     @property
@@ -386,16 +301,6 @@ class TNAccessBlock(Block):
         return self._client
 
     @property
-    def helper_contract_stream_name(self):
-        if not self.helper_contract_name:
-            raise self.Error("Helper contract name is not set")
-        return self.helper_contract_name
-
-    @property
-    def helper_contract_provider(self):
-        return self.helper_contract_deployer or self.client.get_current_account()
-
-    @property
     def logger(self):
         return get_logger_safe(__name__)
 
@@ -407,10 +312,7 @@ class TNAccessBlock(Block):
 
     @handle_tn_errors
     def get_stream_type(self, data_provider: str, stream_id: str) -> str:
-        """Check if a stream is initialized by getting its stream type.
-
-        This method is used to verify both stream existence and initialization status.
-        A successful response indicates the stream exists and is initialized.
+        """Check stream type.
 
         Args:
             data_provider: The data provider of the stream
@@ -436,9 +338,7 @@ class TNAccessBlock(Block):
         raise NotImplementedError("is_allowed_to_write is not implemented")
 
     @handle_tn_errors
-    def get_earliest_date(
-        self, stream_id: str, data_provider: Optional[str] = None
-    ) -> Optional[datetime]:
+    def get_earliest_date(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[datetime]:
         """
         Get the earliest date available for a stream.
 
@@ -476,14 +376,12 @@ class TNAccessBlock(Block):
             raise self.Error(f"Failed to query TN for {stream_id}: {e}") from e
 
     @handle_tn_errors
-    def read_all_records(self, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
+    def read_all_records(self, stream_id: str, data_provider: Optional[str] = None) -> DataFrame[TnRecordModel]:
         """Read all records from TSN"""
         return self.read_records(stream_id, data_provider, date_from=date_string_to_unix("1000-01-01"))
 
     @handle_tn_errors
-    def get_first_record(
-        self, stream_id: str, data_provider: Optional[str] = None
-    ) -> Optional[TnRecord]:
+    def get_first_record(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[TnRecord]:
         with concurrency("tn-read", occupy=1):
             result = self.client.get_first_record(stream_id, data_provider)
 
@@ -522,7 +420,7 @@ class TNAccessBlock(Block):
         except Exception as e:
             msg = str(e).lower()
             # If no records exist, return an empty typed DataFrame instead of erroring
-            self.logger.info(f"msg is", msg)
+            self.logger.info(f"msg is {msg}")
             if "record not found" in msg:
                 self.logger.warning(
                     f"No records found for stream '{stream_id}' "
@@ -545,11 +443,8 @@ class TNAccessBlock(Block):
 
     @handle_tn_errors
     def insert_tn_records(
-        self,
-        stream_id: str,
-        records: DataFrame[TnRecordModel],
-        records_per_batch: int = 300
-    ) -> Optional[List[str]]:
+        self, stream_id: str, records: DataFrame[TnRecordModel], records_per_batch: int = 300
+    ) -> Optional[list[str]]:
         logging = get_run_logger()
 
         if len(records) == 0:
@@ -577,7 +472,7 @@ class TNAccessBlock(Block):
     def batch_insert_tn_records(
         self,
         records: DataFrame[TnDataRowModel],
-    ) -> Optional[List[str]]:
+    ) -> Optional[list[str]]:
         """Batch insert records into multiple streams.
 
         Args:
@@ -597,7 +492,7 @@ class TNAccessBlock(Block):
                 (records["stream_id"] == row["stream_id"])
                 & (records["data_provider"].fillna("") == (row["data_provider"] or ""))
             ]
-            
+
             inputs = [
                 tn_client.Record(date=int(record["date"]), value=float(record["value"]))
                 for record in stream_records.to_dict(orient="records")
@@ -606,11 +501,8 @@ class TNAccessBlock(Block):
             # check that all dates are unix timestamps
             if not all(check_unix_timestamp(int(record["date"])) for record in inputs):
                 raise ValueError("All dates must be unix timestamps")
-    
-            batches.append(tn_client.RecordBatch(
-                stream_id=row["stream_id"],
-                inputs=inputs
-            ))
+
+            batches.append(tn_client.RecordBatch(stream_id=row["stream_id"], inputs=inputs))
 
         if not batches:
             return None
@@ -658,51 +550,72 @@ class TNAccessBlock(Block):
         ]
 
     @handle_tn_errors
-    def batch_deploy_streams(
-        self,
-        definitions: list[dict[str, str]],
-        wait: bool = True,
-    ) -> str | None:
+    def batch_deploy_streams(self, definitions: list[tn_client.StreamDefinitionInput], wait: bool = True) -> str:
         """
-        Batch‐deploy streams via TNClient, skipping any that already exist.
-        `definitions` is a list of {"stream_id": str, "stream_type": str}.
+        Deploy multiple streams using the batch SDK function.
+
+        Args:
+            definitions: A list of stream definitions, where each definition is a
+                         `tn_client.StreamDefinitionInput` typed dict.
+            wait: If True, wait for the transaction to be confirmed.
+
+        Returns:
+            The transaction hash of the batch deployment.
         """
-        # build locators for existence check
-        locators = [
-            {"stream_id": d["stream_id"], "data_provider": self.current_account}
-            for d in definitions
-        ]
-        # only those not yet deployed
-        missing = self.client.batch_filter_streams_by_existence(locators, return_existing=False)
-        if not missing:
-            self.logger.info("All streams already exist; skipping batch deployment.")
-            return None
-
-        # filter definitions down to just the missing ones
-        to_deploy = [
-            {"stream_id": loc["stream_id"],
-             "stream_type": next(d["stream_type"]
-                                 for d in definitions
-                                 if d["stream_id"] == loc["stream_id"])}
-            for loc in missing
-        ]
-
-        tx_hash = self.client.batch_deploy_streams(to_deploy, wait)
-        self.logger.debug(f"Batch deployed streams (tx={tx_hash})")
+        self.logger.debug(f"Batch deploying {len(definitions)} streams (wait: {wait}).")
+        # Assuming a concurrency limit name, replace 'tn_write_operations' if a different one is used
+        # or if no specific limit is needed here beyond what the SDK/network handles.
+        # For consistency with batch_insert_tn_records, let's assume a general write limit.
+        with concurrency(
+            "tn-write", timeout_seconds=300
+        ):  # timeout needs to be set based on typical network conditions for batch deployment
+            tx_hash = self.client.batch_deploy_streams(definitions=definitions, wait=wait)
+        self.logger.info(
+            f"Batch deployment transaction submitted for {len(definitions)} streams: {tx_hash} (wait: {wait})"
+        )
         return tx_hash
+
+    @handle_tn_errors
+    def batch_filter_streams_by_existence(
+        self, locators: list[tn_client.StreamLocatorInput], return_existing: bool
+    ) -> list[tn_client.StreamLocatorInput]:
+        """
+        Filter a list of streams based on their existence using the batch SDK function.
+
+        Args:
+            locators: A list of stream locators, where each locator is a
+                      `tn_client.StreamLocatorInput` typed dict.
+            return_existing: If True, returns streams that exist.
+                             If False, returns streams that do not exist.
+
+        Returns:
+            A list of `tn_client.StreamLocatorInput` for streams that match the filter criteria.
+        """
+        self.logger.debug(f"Batch filtering {len(locators)} streams by existence (return_existing: {return_existing}).")
+        # Assuming read operations might have a different or no specific concurrency limit
+        # If TN operations are generally limited, apply a relevant concurrency scope.
+        # For now, let's assume this is a lighter operation not needing the same write lock.
+        # If issues arise, a 'tn-read' concurrency scope could be added.
+        filtered_locators = self.client.batch_filter_streams_by_existence(
+            locators=locators, return_existing=return_existing
+        )
+        self.logger.info(f"Batch filter by existence complete. Found {len(filtered_locators)} matching streams.")
+        return filtered_locators
+
 
 # --- Top Level Task Functions ---
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_all_records(block: TNAccessBlock, stream_id: str, data_provider: Optional[str] = None) -> pd.DataFrame:
     return block.read_all_records(stream_id, data_provider)
 
+
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_records(
-        block: TNAccessBlock,
-        stream_id: str,
-        data_provider: Optional[str] = None,
-        date_from: Union[int, None] = None,
-        date_to: Union[int, None] = None,
+    block: TNAccessBlock,
+    stream_id: str,
+    data_provider: Optional[str] = None,
+    date_from: Union[int, None] = None,
+    date_to: Union[int, None] = None,
 ) -> DataFrame[TnRecordModel]:
     """Read records from TSN with support for both ISO dates and Unix timestamps.
 
@@ -723,184 +636,10 @@ def task_read_records(
         date_to=date_to,
     )
 
-@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
-def task_insert_tn_records(
-    block: TNAccessBlock,
-    stream_id: str,
-    records: DataFrame[TnRecordModel],
-) -> Optional[List[str]]:
-    return block.insert_tn_records(stream_id, records)
-
-@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
-def task_split_and_insert_records(
-    block: TNAccessBlock,
-    records: DataFrame[TnDataRowModel],
-    max_batch_size: int = 25000,
-    wait: bool = True,
-) -> SplitInsertResults:
-    """
-    Split records into batches and insert them into TN.
-
-    Args:
-        block: The TNAccessBlock instance
-        records: The records to insert
-        max_batch_size: Maximum number of records per batch
-        wait: Whether to wait for the transaction to be mined
-
-    Returns:
-        SplitInsertResults if successful, None if no records to insert
-    """
-    logger = get_logger_safe(__name__)
-    failed_reasons: list[str] = []
-
-    # fill empty data provider with current account
-    records["data_provider"] = records["data_provider"].fillna(block.current_account)
-    split_records = block.split_records(records, max_batch_size)
-    if len(split_records) == 0:
-        logger.warning("No records to insert")
-        failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
-        return SplitInsertResults(
-            success_tx_hashes=[], failed_records=failed_records_typed, failed_reasons=failed_reasons
-        )
-
-    tx_hashes: list[str] | None = []
-    failed_records: list[DataFrame[TnDataRowModel]] = []
-    for batch in split_records:
-        try:
-            tx_hashes = task_batch_insert_tn_records(
-                block=block,
-                records=batch,
-                wait=wait,
-            )
-        except Exception as e:
-            failed_records.append(batch)
-            failed_reasons.append(str(e))
-
-    if len(failed_records) > 0:
-        failed_records_typed = DataFrame[TnDataRowModel](pd.concat(failed_records))
-    else:
-        failed_records_typed = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
-
-    return SplitInsertResults(
-        success_tx_hashes=(tx_hashes or []), failed_records=failed_records_typed, failed_reasons=failed_reasons
-    )
-
-
-def hash_record_stream_id(records: DataFrame[TnDataRowModel]) -> str:
-    """Hash records to check for duplicates"""
-    unique_stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
-    unique_stream_locators.sort_values(by=["data_provider", "stream_id"], inplace=True)
-    intval = pd.util.hash_pandas_object(unique_stream_locators).sum()
-    return str(intval)
-
-
-@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
-def _task_only_batch_insert_records(
-    block: TNAccessBlock,
-    records: DataFrame[TnDataRowModel],
-) -> Optional[List[str]]:
-    """Insert records into TSN without waiting for transaction confirmation"""
-    return block.batch_insert_tn_records(records=records)
-
-
-# we don't use retries here because their individual tasks already have retries
-@task
-def task_batch_insert_tn_records(
-    block: TNAccessBlock,
-    records: DataFrame[TnDataRowModel],
-    wait: bool = False,
-) -> Optional[List[str]]:
-    """Batch insert records into multiple streams
-
-    Args:
-        block: The TNAccessBlock instance
-        records: DataFrame containing records with stream_id column
-        wait: Whether to wait for transactions to complete
-        has_external_created_at: If True, insert with external created_at timestamps
-
-    Returns:
-        Transaction hash if successful, None otherwise
-    """
-    logging = get_run_logger()
-
-    logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
-
-    # we use task so it may retry on network or nonce errors
-    tx_hashes = _task_only_batch_insert_records(
-        block=block, records=records
-    )
-
-    if wait and tx_hashes is not None:
-        # we need to use task so it may retry on network errors
-        for tx_hash in tx_hashes:
-            task_wait_for_tx(block=block, tx_hash=tx_hash)
-
-    return tx_hashes
-
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=2, retry_condition_fn=tn_special_retry_condition(3))
 def task_wait_for_tx(block: TNAccessBlock, tx_hash: str) -> None:
     return block.wait_for_tx(tx_hash)
-
-
-@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
-def task_insert_and_wait_for_tx(
-    block: TNAccessBlock,
-    stream_id: str,
-    records: DataFrame[TnRecordModel],
-    data_provider: Optional[str] = None,
-):
-    """Insert records into TSN and wait for transaction confirmation"""
-    logging = get_run_logger()
-
-    logging.info(f"Inserting {len(records)} records into stream {stream_id}")
-    insertion = task_insert_tn_records(
-        block=block, stream_id=stream_id, records=records, data_provider=data_provider
-    )
-
-    if insertion.result() is None:
-        return Completed(message="No records to insert")
-
-    try:
-        task_wait_for_tx(block=block, tx_hash=insertion)
-    except Exception as e:
-        if "duplicate key value violates unique constraint" in str(e):
-            logging.warning(f"Continuing after duplicate key value violation: {e}")
-        else:
-            raise e
-
-    return insertion
-
-
-@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
-def task_destroy_stream(block: TNAccessBlock, stream_id: str, wait: bool = True) -> str:
-    """Task to destroy a stream with the given stream ID.
-
-    Args:
-        block: The TNAccessBlock instance
-        stream_id: The ID of the stream to destroy
-        wait: If True, wait for the transaction to be confirmed
-
-    Returns:
-        The transaction hash
-    """
-    return block.destroy_stream(stream_id, wait)
-
-@task(
-    retries=UNUSED_INFINITY_RETRIES,
-    retry_delay_seconds=10,
-    retry_condition_fn=tn_special_retry_condition(5),
-    tags=["tn", "tn-write"],
-)
-def task_batch_deploy_streams_block(
-    block: TNAccessBlock,
-    definitions: list[dict[str, str]],
-    wait: bool = True,
-) -> str | None:
-    """
-    Prefect task wrapper around TNAccessBlock.batch_deploy_streams.
-    """
-    return block.batch_deploy_streams(definitions, wait)
 
 
 if __name__ == "__main__":

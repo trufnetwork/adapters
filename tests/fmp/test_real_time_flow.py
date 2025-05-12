@@ -6,21 +6,22 @@ integration tests for the complete flow, using mock objects to avoid
 actual network calls.
 """
 
+from datetime import timedelta
 from typing import Any, Union
 
 import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import SecretStr
 import pytest
-from trufnetwork_sdk_py.client import TNClient
+from tests.utils.fake_tn_access import FakeTNAccessBlock
 
 from tsn_adapters.blocks.fmp import BatchQuoteShort, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import (
     PrimitiveSourceDataModel,
     PrimitiveSourcesDescriptorBlock,
 )
-from tsn_adapters.blocks.tn_access import TNAccessBlock
-from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel
+from tsn_adapters.blocks.tn_access import convert_to_typed_df
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.flows.fmp.real_time_flow import (
     batch_symbols,
     combine_batch_results,
@@ -92,52 +93,6 @@ class FakePrimitiveSourcesDescriptorBlock(PrimitiveSourcesDescriptorBlock):
         return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(data))
 
 
-class FakeTNAccessBlock(TNAccessBlock):
-    """Mock TN access block for testing."""
-
-    def __init__(self):
-        """Initialize with test configuration."""
-        super().__init__(
-            tn_provider="fake",
-            tn_private_key=SecretStr("fake_key"),
-            helper_contract_name="",
-            helper_contract_deployer=None,
-        )
-        self.inserted_records: list[DataFrame[TnDataRowModel]] = []
-
-    def batch_insert_tn_records(
-        self,
-        records: DataFrame[TnDataRowModel],
-    ) -> list[str] | None:
-        """Store records for verification."""
-        self.inserted_records.append(records)
-        return None
-    
-    def filter_initialized_streams(
-        self, stream_ids: list[str], data_providers: list[str]
-    ) -> DataFrame[StreamLocatorModel]:
-        """Mock filtering batch initialized streams."""
-        return DataFrame[StreamLocatorModel](
-            pd.DataFrame(stream_ids, data_providers, columns=["stream_id", "data_provider"])
-        )
-
-    def wait_for_tx(self, tx_hash: str) -> None:
-        """Mock waiting for transaction - do nothing."""
-        pass  # Skip actual transaction waiting in tests
-
-    def get_stream_type(self, data_provider: str, stream_id: str) -> str:
-        """Mock stream type check."""
-        return "primitive" if stream_id.startswith("stream_") else "unknown"
-
-    def stream_exists(self, data_provider: str, stream_id: str) -> bool:
-        """Mock stream existence check."""
-        return stream_id.startswith("stream_")
-
-    def get_client(self) -> TNClient:
-        """Mock to prevent real client creation."""
-        raise RuntimeError("Access to real TNClient is not allowed in tests.")
-
-
 class ErrorFMPBlock(FMPBlock):
     """Mock FMPBlock that simulates API errors."""
 
@@ -184,8 +139,14 @@ class TestRealTimeFlow:
         fmp_block = FakeFMPBlock(api_key=SecretStr("fake"))
         psd_block = FakePrimitiveSourcesDescriptorBlock()
         tn_block = FakeTNAccessBlock()
+        tn_block.set_deployed_streams({"stream_aapl", "stream_googl", "stream_msft"})
 
-        real_time_flow(fmp_block=fmp_block, psd_block=psd_block, tn_block=tn_block, tickers_per_request=1)
+        real_time_flow(
+            fmp_block=fmp_block,
+            psd_block=psd_block,
+            tn_block=tn_block,
+            tickers_per_request=1,
+        )
 
         # Verify that data was processed and inserted
         assert len(tn_block.inserted_records) > 0
@@ -203,16 +164,19 @@ class TestRealTimeFlow:
         # Also verify the flow-level error handling with minimal setup
         psd_block = FakePrimitiveSourcesDescriptorBlock()
         tn_block = FakeTNAccessBlock()
+        # Streams need to be 'deployed' in the fake for the flow to attempt processing
+        tn_block.set_deployed_streams({"stream_aapl"})
 
-        # The flow should fail due to API error
-        with pytest.raises(RuntimeError, match="API Error"):
-            real_time_flow(
-                fmp_block=error_fmp_block,
-                psd_block=psd_block,
-                tn_block=tn_block,
-                tickers_per_request=1,
-                fetch_task=fetch_quotes_for_batch.with_options(retries=0),
-            )
+        # The flow should capture the error and return a failed result
+        result = real_time_flow(
+            fmp_block=error_fmp_block,
+            psd_block=psd_block,
+            tn_block=tn_block,
+            tickers_per_request=1,
+            fetch_task=fetch_quotes_for_batch.with_options(retries=0),
+        )
+        assert result["success"] is False
+        assert "API Error" in result["errors"][0]
 
 
 class TestProcessDataAndDescriptor:
@@ -223,13 +187,13 @@ class TestProcessDataAndDescriptor:
     ):
         """Test processing quote data into TN format."""
         # Convert descriptor_df to plain pandas DataFrame as expected by process_data
-        descriptor_df = pd.DataFrame(sample_descriptor_df)
+        descriptor_df = convert_to_typed_df(pd.DataFrame(sample_descriptor_df), PrimitiveSourceDataModel)
 
-        result = process_data(quotes_df=sample_quotes_df, descriptor_df=descriptor_df)  # type: ignore
+        result = process_data(quotes_df=sample_quotes_df, descriptor_df=descriptor_df)
 
-        assert_tn_data_schema(result.result())
-        assert len(result.result()) == len(sample_quotes_df)
-        assert "stream_aapl" in result.result()["stream_id"].values
+        assert_tn_data_schema(result)
+        assert len(result) == len(sample_quotes_df)
+        assert "stream_aapl" in result["stream_id"].values
 
     def test_process_data_with_none(self, sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]):
         """Test that process_data raises RuntimeError with detailed error messages when quotes_df is None."""
@@ -339,7 +303,7 @@ class TestQuoteConversion:
         assert_tn_data_schema(result)
         assert len(result) == expected_length
         if expected_length:
-            assert all(result["date"] == str(fixed_timestamp))
+            assert all(result["date"] == fixed_timestamp)
 
 
 class TestNullPriceHandling:
@@ -362,12 +326,12 @@ class TestNullPriceHandling:
         # Verify that quotes contains all symbols including null prices
         assert len(quotes) == 3
         assert quotes["symbol"].tolist() == ["AAPL", "GOOGL", "MSFT"]
-        
+
         # Check prices directly from the DataFrame
         assert quotes.iloc[0]["price"] == 150.0  # First price
         assert quotes["price"].isna().iloc[1]  # Second price should be null
         assert quotes.iloc[2]["price"] == 300.0  # Third price
-        
+
         assert quotes["volume"].tolist() == [1000000, 500000, 750000]
 
     @pytest.mark.usefixtures("prefect_test_fixture")
@@ -383,6 +347,7 @@ class TestNullPriceHandling:
         block = NullPriceFMPBlock()
         psd_block = FakePrimitiveSourcesDescriptorBlock()
         tn_block = FakeTNAccessBlock()
+        tn_block.set_deployed_streams({"stream_aapl", "stream_googl", "stream_msft"})
 
         result = real_time_flow(
             fmp_block=block,
@@ -424,6 +389,8 @@ class TestNullPriceHandling:
         block = AllNullPricesFMPBlock(api_key=SecretStr("fake"))
         psd_block = FakePrimitiveSourcesDescriptorBlock()
         tn_block = FakeTNAccessBlock()
+        # Need to set deployed streams for filter to pass even if no data is inserted
+        tn_block.set_deployed_streams({"stream_aapl", "stream_googl", "stream_msft"})
 
         result = real_time_flow(
             fmp_block=block,

@@ -1,8 +1,6 @@
 import logging
 import os
 from collections.abc import Generator
-from unittest.mock import patch
-
 from mypy_boto3_s3 import S3Client
 
 import pandas as pd

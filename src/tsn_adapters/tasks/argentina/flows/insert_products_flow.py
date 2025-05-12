@@ -13,8 +13,11 @@ from prefect_aws import S3Bucket
 
 from tsn_adapters.blocks.deployment_state import DeploymentStateBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_split_and_insert_records, task_filter_initialized_streams
+from tsn_adapters.blocks.tn_access import TNAccessBlock, extract_stream_locators
+from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.tn import task_batch_filter_streams_by_existence
+import trufnetwork_sdk_py.client as tn_client
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames  # Import config
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
@@ -103,8 +106,13 @@ async def insert_argentina_products_flow(
             logger.info("No new dates to process based on insertion/aggregation state variables. Flow finished.")
             # Create artifact even if no dates processed
             # Fetch current state variables for reporting
-            last_agg_date = variables.Variable.get(ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE)
-            last_ins_date = variables.Variable.get(ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE)
+            last_agg_date = variables.Variable.get(
+                ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE,
+                default=ArgentinaFlowVariableNames.DEFAULT_DATE,
+            )
+            last_ins_date = variables.Variable.get(
+                ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE
+            )
             summary_md = f"""# Argentina Product Insertion Summary
 
 No new dates available to process.
@@ -133,7 +141,9 @@ State is managed by Prefect Variables.
     # --- Loop, Load/Transform, Insert, Save State, Report ---
     processed_dates_count = 0
     total_records_transformed = 0
-    last_processed_date_str = ArgentinaFlowVariableNames.DEFAULT_DATE  # Variable to track the last successfully processed date
+    last_processed_date_str = (
+        ArgentinaFlowVariableNames.DEFAULT_DATE
+    )  # Variable to track the last successfully processed date
     first_processed_date_str = dates_to_process[0]
 
     for date_str in dates_to_process:
@@ -146,8 +156,10 @@ State is managed by Prefect Variables.
 
             if daily_avg_df.empty:
                 # This might indicate an issue if a date was determined but has no data
-                logger.warning(f"No daily averages found for determined date {date_str}. Skipping, but check source data.")
-                continue # Continue to next date, but log warning
+                logger.warning(
+                    f"No daily averages found for determined date {date_str}. Skipping, but check source data."
+                )
+                continue  # Continue to next date, but log warning
 
             # --- Deployment Status Check (Moved Before Transformation/Insertion) ---
             # Get unique product IDs for this date
@@ -162,7 +174,7 @@ State is managed by Prefect Variables.
                 logger.error(
                     f"Skipping date {date_str}: No stream IDs found in descriptor for product IDs present in daily data. Product IDs sample: {list(product_ids_for_date)[:10]}..."
                 )
-                continue # Skip this date if crucial mappings are missing
+                continue  # Skip this date if crucial mappings are missing
 
             # Check if all required streams are deployed
             try:
@@ -190,7 +202,7 @@ State is managed by Prefect Variables.
             except Exception as e_state:
                 error_msg = f"Halting flow: Failed to check deployment status for date {date_str}: {e_state}."
                 logger.error(error_msg, exc_info=True)
-                raise DeploymentCheckError(error_msg) from e_state # Re-raise to stop flow
+                raise DeploymentCheckError(error_msg) from e_state  # Re-raise to stop flow
             # --- End Deployment Status Check ---
 
             # Step 10b: Transform the loaded data (Only if deployment check passed)
@@ -205,39 +217,66 @@ State is managed by Prefect Variables.
             total_records_transformed += num_transformed
             logger.info(f"Transformed {num_transformed} records for date {date_str}.")
 
-            # Step 11: Pre-Insertion Filtering and Insert Transformed Data to TN
+            # Step 11: Pre-insertion Existence Check & Insert Transformed Data to TN 
             if not transformed_data.empty:
-                # Batch filtering of streams and fail fast on first uninitialized stream
-                logger.info(f"Filtering {len(transformed_data)} transformed records for date {date_str} in batches of size {max_filter_size}...")
-                total_records = len(transformed_data)
-                for start in range(0, total_records, max_filter_size):
-                    batch = transformed_data.iloc[start : start + max_filter_size]
-                    batch_result = task_filter_initialized_streams(
-                        block=tn_block,
-                        records=batch,
-                        max_filter_size=max_filter_size,
+                
+                # === Pre-insertion Stream Existence Check ===
+                logger.info(f"Performing pre-insertion existence check for streams in date {date_str} data.")
+                required_locators_df = extract_stream_locators(transformed_data)
+                required_locators_list: list[tn_client.StreamLocatorInput] = [
+                    tn_client.StreamLocatorInput(stream_id=str(row["stream_id"]), data_provider=str(row["data_provider"]))
+                    for _, row in required_locators_df.iterrows()
+                ]
+                required_locators_set = {
+                    (str(loc["data_provider"]), str(loc["stream_id"])) 
+                    for loc in required_locators_list
+                }
+
+                if not required_locators_list:
+                    logger.warning(f"No stream locators found in transformed data for {date_str}. Skipping insertion.")
+                    continue
+                
+                try:
+                    # Check which of the required streams actually exist
+                    logger.debug(f"Checking for non-existent streams among {len(required_locators_list)} required locators...")
+                    missing_locators_result = task_batch_filter_streams_by_existence(
+                        block=tn_block, 
+                        locators=required_locators_list, 
+                        return_existing=False # Ask for non-existent ones
                     )
-                    uninitialized_streams = batch_result["uninitialized_streams"]
-                    if not uninitialized_streams.empty:
-                        uninit_list = uninitialized_streams["stream_id"].tolist()[:20]
+                    
+                    # The result is now the list of streams that DO NOT exist
+                    if missing_locators_result:
+                        missing_list_sample = [
+                            (loc.get("data_provider", "N/A"), loc.get("stream_id", "N/A")) 
+                            for loc in missing_locators_result[:20]
+                        ]
                         error_msg = (
-                            f"Halting flow: Date {date_str} cannot be processed because the following streams "
-                            f"are not initialized: {uninit_list}..."
+                            f"Halting flow: Date {date_str} cannot be processed because the following required streams "
+                            f"do not exist on TN (or check failed): {missing_list_sample}..."
                         )
                         logger.error(error_msg)
-                        raise DeploymentCheckError(error_msg)
-                # All streams are initialized
-                logger.info(f"All streams are initialized for date {date_str}. Proceeding to insertion.")
-                # Proceed to insertion without additional filtering
-                logger.info(f"Submitting {num_transformed} transformed records for date {date_str} to TN insertion task...")
+                        raise DeploymentCheckError(error_msg) 
+                    else:
+                        # If the result is empty, all required streams exist
+                        logger.info(f"All {len(required_locators_set)} required streams exist for date {date_str}. Proceeding to insertion.")
+                        
+                except Exception as e_exist:
+                    error_msg = f"Halting flow: Failed during pre-insertion stream existence check for date {date_str}: {e_exist}."
+                    logger.error(error_msg, exc_info=True)
+                    raise DeploymentCheckError(error_msg) from e_exist
+                # === End Pre-insertion Stream Existence Check ===
+
+                # Proceed to insertion only if the check passed
+                logger.info(
+                    f"Submitting {num_transformed} transformed records for date {date_str} to TN insertion task..."
+                )
                 results = task_split_and_insert_records(
                     block=tn_block,
                     records=transformed_data,
                     max_batch_size=batch_size,
-                    wait=True,
-                    return_state=False,
-                    max_filter_size=max_filter_size,
-                    filter_deployed_streams=False,
+                    wait=True, 
+                    filter_deployed_streams=False, # Disable internal filter
                 )
                 if results["failed_records"].empty:
                     logger.info(f"Successfully submitted records for date {date_str} to TN insertion task.")
@@ -261,7 +300,9 @@ State is managed by Prefect Variables.
             await variables.Variable.aset(
                 ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, last_processed_date_str, overwrite=True
             )
-            logger.info(f"Updated {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE} to {last_processed_date_str}")
+            logger.info(
+                f"Updated {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE} to {last_processed_date_str}"
+            )
 
         except DeploymentCheckError:
             # Logged sufficiently above, re-raise to halt the flow run
@@ -295,4 +336,6 @@ Successfully processed data and submitted for insertion.
         logger.info("Created final summary artifact.")
     else:
         # This case should ideally be covered by the early exit, but log just in case
-        logger.info("No dates were successfully processed in this run (loop may have been skipped or failed early). Check logs.")
+        logger.info(
+            "No dates were successfully processed in this run (loop may have been skipped or failed early). Check logs."
+        )

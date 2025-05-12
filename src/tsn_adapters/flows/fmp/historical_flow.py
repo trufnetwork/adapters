@@ -22,8 +22,9 @@ from prefect.tasks import task_input_hash
 
 from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
-from tsn_adapters.blocks.tn_access import TNAccessBlock, task_batch_insert_tn_records
+from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.tasks.insert import task_batch_insert_tn_records
 from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
 
@@ -162,7 +163,7 @@ def ensure_unix_timestamp(dt: Series[Any]) -> Series[int]:
     """
     # Convert to datetime if not already
     if not pd.api.types.is_datetime64_any_dtype(dt):
-        dt = pd.to_datetime(dt, utc=True)
+        dt = cast(Series[datetime.datetime], pd.to_datetime(dt, utc=True))
 
     # Get nanoseconds since epoch
     ns_timestamps = dt.astype("int64")
@@ -181,7 +182,7 @@ def ensure_unix_timestamp(dt: Series[Any]) -> Series[int]:
             f"min={second_timestamps.min()}, max={second_timestamps.max()}"
         )
 
-    return second_timestamps
+    return cast(Series[int], second_timestamps)
 
 
 @task(retries=3, retry_delay_seconds=10, cache_key_fn=task_input_hash)
@@ -243,16 +244,15 @@ def convert_eod_to_tn_df(
         return cast(DataFrame[TnDataRowModel], pd.DataFrame())
 
     try:
+        date_series = pd.to_datetime(eod_df["date"]).dt.tz_localize("UTC").dt.normalize()
+        
+        
         # Create the DataFrame with explicit types
         result_df = pd.DataFrame(
             {
                 "stream_id": pd.Series([stream_id] * len(eod_df), dtype=str),
                 # Convert ISO dates to UTC midnight timestamps
-                "date": ensure_unix_timestamp(
-                    pd.to_datetime(eod_df["date"])
-                    .dt.tz_localize("UTC")  # Explicitly set UTC timezone
-                    .dt.normalize()  # Ensure midnight in UTC
-                ),
+                "date": ensure_unix_timestamp(cast(Series[datetime.datetime], date_series)),
                 "value": eod_df["price"].astype(str),
             }
         )
@@ -369,7 +369,7 @@ def run_ticker_pipeline(
             for _, row_data in chunked_tickers.iterrows():
                 result_futures.append(
                     process_ticker.submit(
-                        row=row_data,
+                        row=cast(Series[Any], row_data),
                         fmp_block=fmp_block,
                         tn_block=tn_block,
                         min_fetch_date=min_fetch_date,
@@ -378,7 +378,7 @@ def run_ticker_pipeline(
                 )
 
             # Process results as they complete
-            for future in result_futures:
+            for idx, future in enumerate(result_futures):
                 result = future.result()
                 if is_ticker_success(result):
                     tn_df = convert_eod_to_tn_df(result.data, result.stream_id)
@@ -386,7 +386,7 @@ def run_ticker_pipeline(
                 elif is_ticker_error(result):
                     logger.warning(f"Skipping ticker {result.symbol} due to error: {result.error}")
                 else:
-                    logger.error(f"Unexpected result type for {row_data['source_id']}: {type(result)}")
+                    logger.error(f"Unexpected result type for {chunked_tickers.iloc[idx]['source_id']}: {type(result)}")
 
                     if len(records_to_insert) >= batch_size:
                         validated_df = DataFrame[TnDataRowModel](records_to_insert)
