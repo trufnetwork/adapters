@@ -1,12 +1,13 @@
-import logging
-import pytest
 from datetime import datetime
+import logging
 from unittest.mock import MagicMock
 
-from tsn_adapters.blocks.tn_access import StreamAlreadyExistsError, TNAccessBlock
+import pytest
+from trufnetwork_sdk_py import StreamDefinitionInput
 from trufnetwork_sdk_py.utils import generate_stream_id
-from tsn_adapters.common.trufnetwork.tn import task_deploy_primitive
-import trufnetwork_sdk_c_bindings.exports as truf_sdk
+
+from tsn_adapters.blocks.tn_access import StreamAlreadyExistsError, TNAccessBlock
+from tsn_adapters.common.trufnetwork.tn import task_batch_deploy_streams, task_deploy_primitive
 
 
 @pytest.fixture
@@ -57,7 +58,7 @@ def test_task_deploy_primitive_success():
     mock_block.deploy_stream.assert_called_once_with(
         stream_id="test_stream_success",
         wait=True, # Default value
-        stream_type=truf_sdk.StreamTypePrimitive
+        stream_type="primitive"
     )
     assert result == "dummy_tx_hash"
 
@@ -91,4 +92,48 @@ def test_task_deploy_primitive_other_error(caplog: pytest.LogCaptureFixture):
     mock_block.deploy_stream.assert_called_once()
     assert "Error deploying stream test_stream_other_error: Some other deployment error" in caplog.text
 
-# --- Existing integration tests below --- # 
+def test_task_batch_deploy_streams_block_success():
+    """Test the Prefect task wrapper around TNAccessBlock.batch_deploy_streams."""
+    mock_block = MagicMock(spec=TNAccessBlock)
+    definitions = [StreamDefinitionInput(stream_id="s", stream_type="primitive")]
+    mock_block.batch_deploy_streams.return_value = "block_batch_tx"
+
+    result = task_batch_deploy_streams.fn(
+        block=mock_block, definitions=definitions, wait=True
+    )
+
+    _, kwargs = mock_block.batch_deploy_streams.call_args
+    assert kwargs["wait"] == True
+    assert kwargs["definitions"] == definitions
+    assert result == "block_batch_tx"
+
+def test_task_batch_deploy_streams_block_default_wait():
+    """
+    When no `wait` argument is provided, it should default to True.
+    """
+    mock_block = MagicMock(spec=TNAccessBlock)
+    definitions = [StreamDefinitionInput(stream_id="y", stream_type="composed")]
+
+    # call without explicit wait
+    task_batch_deploy_streams.fn(block=mock_block, definitions=definitions)
+
+    _, kwargs = mock_block.batch_deploy_streams.call_args
+    assert kwargs["wait"] == True
+    assert kwargs["definitions"] == definitions
+
+def test_task_batch_deploy_streams_block_propagates_error():
+    """
+    If TNAccessBlock.batch_deploy_streams raises, the task should not swallow it.
+    """
+    mock_block = MagicMock(spec=TNAccessBlock)
+    definitions = [StreamDefinitionInput(stream_id="err", stream_type="primitive")]
+    mock_block.batch_deploy_streams.side_effect = StreamAlreadyExistsError("err")
+
+    with pytest.raises(StreamAlreadyExistsError) as exc:
+        task_batch_deploy_streams.fn(
+            block=mock_block, definitions=definitions, wait=True
+        )
+
+    # ensure it bubbled up
+    assert exc.value.stream_id == "err"
+    mock_block.batch_deploy_streams.assert_called_once()
