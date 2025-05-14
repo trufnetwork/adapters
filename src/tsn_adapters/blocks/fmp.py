@@ -173,8 +173,8 @@ class CommodityQuote(DataFrameModel):
     """
     symbol: Series[str]
     price: Series[pd.Float64Dtype]
-    change: Series[pd.Float64Dtype]
-    volume: Series[pd.Int64Dtype]
+    change: Series[pd.Float64Dtype] = Field(nullable=True)
+    volume: Series[pd.Int64Dtype] = Field(nullable=True)
 
     class Config(DataFrameModel.Config):
         strict = "filter"
