@@ -168,8 +168,7 @@ class IndexConstituent(DataFrameModel):
 
 class CommodityInfo(DataFrameModel):
     """
-    Schema for commodity list items from FMP API endpoint /stable/commodity-list.
-    https://site.financialmodelingprep.com/developer/docs/stable#commodities-list (section) -> /stable/commodity-list (endpoint)
+    https://site.financialmodelingprep.com/developer/docs/stable/commodities-list 
     """
     symbol: Series[str]
     name: Series[str]
