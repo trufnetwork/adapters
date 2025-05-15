@@ -28,6 +28,7 @@ from typing_extensions import ParamSpec
 from tsn_adapters.blocks.shared_types import DivideAndConquerResult
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel, TnRecord, TnRecordModel
 from tsn_adapters.utils.date_type import ShortIso8601Date
+from tsn_adapters.utils.deroutine import force_sync
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.unix import check_unix_timestamp
 
@@ -340,6 +341,16 @@ class TNAccessBlock(Block):
     authenticating with TSN API in Prefect flows.
     """
 
+    @staticmethod
+    def _value_is_nonzero_str(val: str) -> bool:
+        """Return True if the decimal string val quantized to 18 decimals is non-zero."""
+        try:
+            d = decimal.Decimal(val)
+            q = d.quantize(decimal.Decimal("1e-18"), rounding=decimal.ROUND_DOWN)
+            return not q.is_zero()
+        except decimal.InvalidOperation:
+            raise ValueError(f"Could not parse '{val}' in 'value' column as Decimal.")
+
     class Error(Exception):
         """Base error class for TNAccessBlock errors."""
 
@@ -472,9 +483,6 @@ class TNAccessBlock(Block):
                 return None
 
             date_value = first_record.date
-            if date_value is None:
-                raise self.InvalidRecordFormatError(f"Invalid record format for {stream_id}: missing DateValue")
-
             if is_unix:
                 try:
                     timestamp = int(date_value)
@@ -599,10 +607,15 @@ class TNAccessBlock(Block):
         data_provider: Optional[str] = None,
         include_current_date: bool = True,
     ) -> Optional[str]:
-        logging = get_run_logger()
-
+        # Filter out records where value is zero
+        original_count = len(records)
+        mask = records["value"].apply(self._value_is_nonzero_str)
+        records = records[mask]
+        filtered_count = len(records)
+        if original_count > filtered_count:
+            self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values for stream {stream_id}.")
         if len(records) == 0:
-            logging.info(f"No records to insert for stream {stream_id}")
+            self.logger.info(f"No records to insert for stream {stream_id}.")
             return None
 
         if include_current_date:
@@ -617,11 +630,11 @@ class TNAccessBlock(Block):
 
         for col in ["date", "value"]:
             if col not in records.columns:
-                logging.error(f"Missing required column '{col}' in records DataFrame.")
+                self.logger.error(f"Missing required column '{col}' in records DataFrame for stream {stream_id}.")
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
-            logging.info(f"Inserting {len(records)} records into stream {stream_id}")
+            self.logger.info(f"Inserting {len(records)} records into stream {stream_id}")
             txHash = self.client.execute_procedure(
                 stream_id=stream_id,
                 procedure="insert_record",
@@ -629,7 +642,7 @@ class TNAccessBlock(Block):
                 wait=False,
                 data_provider=data_provider or "",
             )
-            logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
+            self.logger.debug(f"Inserted {len(records)} records into stream {stream_id}")
             return txHash
 
     @handle_tn_errors
@@ -639,18 +652,23 @@ class TNAccessBlock(Block):
         records: DataFrame[TnRecordModel],
         data_provider: Optional[str] = None,
     ) -> Optional[str]:
-        logging = get_run_logger()
-
+        # Filter out records where value is zero
+        original_count = len(records)
+        mask = records["value"].apply(self._value_is_nonzero_str)
+        records = records[mask]
+        filtered_count = len(records)
+        if original_count > filtered_count:
+            self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values for stream {stream_id}.")
         if len(records) == 0:
-            logging.info(f"No records to insert for stream {stream_id}")
+            self.logger.info(f"No records to insert for stream {stream_id}.")
             return None
 
-        logging.info(f"Inserting {len(records)} records into stream {stream_id}")
+        self.logger.info(f"Inserting {len(records)} records into stream {stream_id}")
         args = [[record["date"], str(record["value"])] for record in records.to_dict(orient="records")]
 
         for col in ["date", "value"]:
             if col not in records.columns:
-                logging.error(f"Missing required column '{col}' in records DataFrame.")
+                self.logger.error(f"Missing required column '{col}' in records DataFrame for stream {stream_id}.")
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
@@ -661,7 +679,7 @@ class TNAccessBlock(Block):
                 wait=False,
                 data_provider=data_provider or "",
             )
-            logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
+            self.logger.debug(f"Inserted {len(records)} records into stream {stream_id}")
 
         return txHash
 
@@ -728,7 +746,16 @@ class TNAccessBlock(Block):
         Returns:
             Transaction hash if successful, None otherwise
         """
+        if 'value' in records.columns and not records.empty:
+            original_count = len(records)
+            mask = records['value'].apply(self._value_is_nonzero_str)
+            records = records[mask]
+            filtered_count = len(records)
+            if original_count > filtered_count:
+                self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values from the batch.")
+        
         if len(records) == 0:
+            self.logger.info("No records to insert from the batch.")
             return None
 
         # Convert DataFrame to format expected by client
@@ -750,7 +777,7 @@ class TNAccessBlock(Block):
                     ],
                 }
                 # check that all dates are unix timestamps
-                if not all(check_unix_timestamp(record["date"]) for record in batch["inputs"]):
+                if not all(check_unix_timestamp(int(entry["date"])) for entry in batch["inputs"]):
                     raise ValueError("All dates must be unix timestamps")
             else:
                 batch = {
@@ -777,14 +804,14 @@ class TNAccessBlock(Block):
                 )
             elif is_unix:
                 results = self.client.batch_insert_records_unix(
-                    batches=batches,
+                    batches=cast(list[tn_client.UnixRecordBatch], batches),
                     helper_contract_stream_id=self.helper_contract_stream_name,
                     helper_contract_data_provider=self.helper_contract_provider,
                     wait=False,
                 )
             else:
                 results = self.client.batch_insert_records(
-                    batches=batches,
+                    batches=cast(list[tn_client.RecordBatch], batches),
                     helper_contract_stream_id=self.helper_contract_stream_name,
                     helper_contract_data_provider=self.helper_contract_provider,
                     wait=False,
@@ -1090,8 +1117,9 @@ def task_split_and_insert_records(
             has_external_created_at=has_external_created_at,
         )
         try:
-            tx_hash = tx_hash_state.result(raise_on_failure=True)
+            tx_hash = force_sync(tx_hash_state.result)(raise_on_failure=True)
             if tx_hash:
+                assert isinstance(tx_hash, str)
                 tx_hashes.append(tx_hash)
         except Exception as e:
             failed_records.append(batch)
