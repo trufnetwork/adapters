@@ -9,6 +9,7 @@ from pydantic import SecretStr
 import pytest
 
 from tsn_adapters.blocks.fmp import (
+    CommodityInfo,
     CommodityQuote,
     ExchangeQuote,
     FMPBlock,
@@ -78,6 +79,22 @@ def test_contract_get_cme_commodity_quotes(fmp_block: FMPBlock):
     # Expect at least one CME group commodity
     assert df["symbol"].str.contains("ZBUSD|LEUSX", regex=True).any(), \
         "Expected at least one CME group commodity like ZBUSD or LEUSX"
+
+
+@pytest.mark.integration
+def test_contract_get_commodity_list(fmp_block: FMPBlock):
+    """Contract test for get_commodity_list."""
+    df: DataFrame[CommodityInfo] = fmp_block.get_commodity_list()
+    assert not df.empty, "Expected commodity list to be non-empty"
+    # Structural checks for fields based on CommodityInfo schema
+    expected_cols = ["symbol", "name", "exchange", "tradeMonth", "currency"]
+    for col in expected_cols:
+        assert col in df.columns, f"Missing expected column {col} in commodity list"
+    # Expect at least one common commodity symbol (e.g., Gold or Crude Oil)
+    # Adjust these symbols if needed based on actual typical FMP response
+    assert df["symbol"].str.contains("GCUSD|CLUSD", regex=True).any(), \
+        "Expected at least one common commodity like GCUSD (Gold) or CLUSD (Crude Oil)"
+    print(f"Fetched {len(df)} commodities from the list.")
 
 
 @pytest.mark.integration
