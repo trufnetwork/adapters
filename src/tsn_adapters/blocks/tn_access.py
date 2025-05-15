@@ -14,7 +14,7 @@ from typing import (
 
 import pandas as pd
 from pandera.typing import DataFrame
-from prefect import Task, get_run_logger, task
+from prefect import Task, task
 from prefect.blocks.core import Block
 from prefect.client.schemas.objects import State, TaskRun
 from prefect.concurrency.sync import concurrency, rate_limit
@@ -260,6 +260,16 @@ class TNAccessBlock(Block):
     authenticating with TSN API in Prefect flows.
     """
 
+    @staticmethod
+    def _value_is_nonzero_str(val: str) -> bool:
+        """Return True if the decimal string val quantized to 18 decimals is non-zero."""
+        try:
+            d = decimal.Decimal(val)
+            q = d.quantize(decimal.Decimal("1e-18"), rounding=decimal.ROUND_DOWN)
+            return not q.is_zero()
+        except decimal.InvalidOperation:
+            raise ValueError(f"Could not parse '{val}' in 'value' column as Decimal.")
+
     class Error(Exception):
         """Base error class for TNAccessBlock errors."""
 
@@ -445,13 +455,20 @@ class TNAccessBlock(Block):
     def insert_tn_records(
         self, stream_id: str, records: DataFrame[TnRecordModel], records_per_batch: int = 300
     ) -> Optional[list[str]]:
-        logging = get_run_logger()
+        # Filter out records where value is zero
+        if 'value' in records.columns and not records.empty:
+            original_count = len(records)
+            mask = records['value'].apply(self._value_is_nonzero_str)
+            records = records[mask]
+            filtered_count = len(records)
+            if original_count > filtered_count:
+                self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values for stream {stream_id}.")
 
         if len(records) == 0:
-            logging.info(f"No records to insert for stream {stream_id}")
+            self.logger.info(f"No records to insert for stream {stream_id}.")
             return None
 
-        logging.info(f"Inserting {len(records)} records into stream {stream_id}")
+        self.logger.info(f"Inserting {len(records)} records into stream {stream_id}")
         records_dict = records.to_dict(orient="records")
 
         num_batches = ceil(len(records_dict) / records_per_batch)
@@ -459,12 +476,12 @@ class TNAccessBlock(Block):
 
         for col in ["date", "value"]:
             if col not in records.columns:
-                logging.error(f"Missing required column '{col}' in records DataFrame.")
+                self.logger.error(f"Missing required column '{col}' in records DataFrame for stream {stream_id}.")
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
             tx_hashes = self.client.batch_insert_records(batches)
-            logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
+            self.logger.debug(f"Inserted {len(records)} records into stream {stream_id}")
 
         return tx_hashes
 
@@ -481,7 +498,16 @@ class TNAccessBlock(Block):
         Returns:
             Transaction hash if successful, None otherwise
         """
+        if 'value' in records.columns and not records.empty:
+            original_count = len(records)
+            mask = records['value'].apply(self._value_is_nonzero_str)
+            records = records[mask]
+            filtered_count = len(records)
+            if original_count > filtered_count:
+                self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values from the batch.")
+        
         if len(records) == 0:
+            self.logger.info("No records to insert from the batch.")
             return None
 
         # Convert DataFrame to format expected by client

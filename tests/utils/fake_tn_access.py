@@ -243,4 +243,7 @@ class FakeTNAccessBlock(TNAccessBlock):
             self._internal_fake_client.reset()
         self._block_error_on.clear()
         self._init_calls.clear()
-        # No _inserted_records_df_history to clear here, it's on the client
+
+    def set_client(self, client: Any) -> None:
+        """Set the internal client for testing."""
+        self._client = client
