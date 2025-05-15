@@ -166,3 +166,7 @@ class FakeTNAccessBlock(TNAccessBlock):
         self._destroyed_streams.clear()
         self._deploy_calls.clear()
         self._init_calls.clear()
+
+    def set_client(self, client: Any) -> None:
+        """Set the internal client for testing."""
+        self._client = client
