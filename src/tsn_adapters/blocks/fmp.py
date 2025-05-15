@@ -166,6 +166,22 @@ class IndexConstituent(DataFrameModel):
         coerce = True
 
 
+class CommodityInfo(DataFrameModel):
+    """
+    Schema for commodity list items from FMP API endpoint /stable/commodity-list.
+    https://site.financialmodelingprep.com/developer/docs/stable#commodities-list (section) -> /stable/commodity-list (endpoint)
+    """
+    symbol: Series[str]
+    name: Series[str]
+    exchange: Series[str] = Field(nullable=True)
+    tradeMonth: Series[str] = Field(nullable=True)
+    currency: Series[str] = Field(nullable=True)
+
+    class Config(DataFrameModel.Config):
+        strict = "filter"
+        coerce = True
+
+
 class CommodityQuote(DataFrameModel):
     """
     Schema for commodity quotes from legacy FMP API endpoint /api/v3/quotes/commodity.
@@ -433,4 +449,16 @@ class FMPBlock(Block):
             endpoint=FMPEndpoint(FMPAPI.STABLE, "batch-commodity-quotes"),
             model_type=CommodityQuote,
             log_entity_name="CME commodity quotes",
+        )
+
+    def get_commodity_list(self) -> DataFrame[CommodityInfo]:
+        """
+        Fetch the list of available commodities from FMP.
+        https://site.financialmodelingprep.com/developer/docs/stable/commodities-list
+        Endpoint: /stable/commodities-list
+        """
+        return self._fetch_fmp_list_data(
+            endpoint=FMPEndpoint(FMPAPI.STABLE, "commodities-list"),
+            model_type=CommodityInfo,
+            log_entity_name="commodities list",
         )
