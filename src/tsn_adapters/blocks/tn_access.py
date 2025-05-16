@@ -140,8 +140,10 @@ def handle_tn_errors(func: F) -> F:
 
     return cast(F, wrapper)
 
+
 P = ParamSpec("P")
 R = TypeVar("R")
+
 
 def tn_special_retry_condition(max_other_error_retries: int) -> Any:
     """
@@ -259,6 +261,7 @@ class MetadataProcedureNotFoundError(Exception):
 
 class StreamAlreadyExistsError(Exception):
     """Custom exception raised when attempting to deploy a stream that already exists."""
+
     def __init__(self, stream_id: str):
         self.stream_id = stream_id
         super().__init__(f"Stream '{stream_id}' already exists.")
@@ -272,16 +275,16 @@ class StreamAlreadyExistsError(Exception):
             return error
         msg = str(error).lower()
         import re
+
         # Match "transaction failed: dataset exists: <stream_id>"
         match = re.search(r"dataset exists: ([a-z0-9]+)", msg)
         if match:
             stream_id = match.group(1)
             return cls(stream_id)
-        if (
-            isinstance(error, RuntimeError) and ("dataset exists" in msg or "already exists" in msg)
-        ):
+        if isinstance(error, RuntimeError) and ("dataset exists" in msg or "already exists" in msg):
             # Try to extract stream_id if possible, else use a placeholder
             import re
+
             match = re.search(r"stream '([^']+)' already exists", str(error))
             stream_id = match.group(1) if match else "unknown"
             return cls(stream_id)
@@ -301,6 +304,7 @@ class StreamAlreadyExistsError(Exception):
 
 class StreamAlreadyInitializedError(Exception):
     """Custom exception raised when attempting to initialize a stream that is already initialized."""
+
     def __init__(self, stream_id: str):
         self.stream_id = stream_id
         super().__init__(f"Stream '{stream_id}' is already initialized.")
@@ -313,10 +317,9 @@ class StreamAlreadyInitializedError(Exception):
         if isinstance(error, StreamAlreadyInitializedError):
             return error
         msg = str(error).lower()
-        if (
-            isinstance(error, RuntimeError) and ("already initialized" in msg)
-        ):
+        if isinstance(error, RuntimeError) and ("already initialized" in msg):
             import re
+
             match = re.search(r"stream '([^']+)' is already initialized", str(error))
             stream_id = match.group(1) if match else "unknown"
             return cls(stream_id)
@@ -459,7 +462,11 @@ class TNAccessBlock(Block):
 
     @handle_tn_errors
     def get_earliest_date(
-        self, stream_id: str, data_provider: Optional[str] = None, is_unix: bool = False
+        self,
+        stream_id: str,
+        data_provider: Optional[str] = None,
+        is_unix: bool = False,
+        after_date: Optional[datetime] = None,
     ) -> Optional[datetime]:
         """
         Get the earliest date available for a stream.
@@ -467,6 +474,8 @@ class TNAccessBlock(Block):
         Args:
             stream_id: ID of the stream to query
             data_provider: Optional data provider
+            is_unix: If True, return the earliest date in Unix timestamp format
+            after_date: Optional date to start the search after, inclusively
 
         Returns:
             The earliest date if found, otherwise None
@@ -478,7 +487,9 @@ class TNAccessBlock(Block):
             TNAccessBlock.Error: For other TN-related errors
         """
         try:
-            first_record = self.get_first_record(stream_id=stream_id, data_provider=data_provider, is_unix=is_unix)
+            first_record = self.get_first_record(
+                stream_id=stream_id, data_provider=data_provider, is_unix=is_unix, after_date=after_date
+            )
             if first_record is None:
                 return None
 
@@ -513,13 +524,22 @@ class TNAccessBlock(Block):
 
     @handle_tn_errors
     def get_first_record(
-        self, stream_id: str, data_provider: Optional[str] = None, is_unix: bool = False
+        self,
+        stream_id: str,
+        data_provider: Optional[str] = None,
+        is_unix: bool = False,
+        # after_date is inclusive, so if the first record is on the same day, it will be returned
+        after_date: Optional[datetime] = None,
     ) -> Optional[TnRecord]:
         with concurrency("tn-read", occupy=1):
             if is_unix:
-                result = self.client.get_first_record_unix(stream_id, data_provider)
+                # convert to unix timestamp (seconds since epoch)
+                after_date_unix = int(after_date.timestamp()) if after_date else None
+                result = self.client.get_first_record_unix(stream_id, data_provider, after_date_unix)
             else:
-                result = self.client.get_first_record(stream_id, data_provider)
+                # convert to (yyyy-mm-dd)
+                after_date_str = after_date.strftime("%Y-%m-%d") if after_date else None
+                result = self.client.get_first_record(stream_id, data_provider, after_date_str)
 
         if result is None:
             return None
@@ -613,7 +633,9 @@ class TNAccessBlock(Block):
         records = records[mask]
         filtered_count = len(records)
         if original_count > filtered_count:
-            self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values for stream {stream_id}.")
+            self.logger.info(
+                f"Filtered out {original_count - filtered_count} records with zero values for stream {stream_id}."
+            )
         if len(records) == 0:
             self.logger.info(f"No records to insert for stream {stream_id}.")
             return None
@@ -658,7 +680,9 @@ class TNAccessBlock(Block):
         records = records[mask]
         filtered_count = len(records)
         if original_count > filtered_count:
-            self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values for stream {stream_id}.")
+            self.logger.info(
+                f"Filtered out {original_count - filtered_count} records with zero values for stream {stream_id}."
+            )
         if len(records) == 0:
             self.logger.info(f"No records to insert for stream {stream_id}.")
             return None
@@ -746,14 +770,16 @@ class TNAccessBlock(Block):
         Returns:
             Transaction hash if successful, None otherwise
         """
-        if 'value' in records.columns and not records.empty:
+        if "value" in records.columns and not records.empty:
             original_count = len(records)
-            mask = records['value'].apply(self._value_is_nonzero_str)
+            mask = records["value"].apply(self._value_is_nonzero_str)
             records = records[mask]
             filtered_count = len(records)
             if original_count > filtered_count:
-                self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values from the batch.")
-        
+                self.logger.info(
+                    f"Filtered out {original_count - filtered_count} records with zero values from the batch."
+                )
+
         if len(records) == 0:
             self.logger.info("No records to insert from the batch.")
             return None
@@ -916,15 +942,16 @@ def task_read_records(
     is_unix: Literal[True],
 ) -> DataFrame[TnRecordModel]: ...
 
+
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_read_records(
-        block: TNAccessBlock,
-        stream_id: str,
-        data_provider: Optional[str] = None,
-        date_from: Union[ShortIso8601Date, int, None] = None,
-        date_to: Union[ShortIso8601Date, int, None] = None,
-        *,  # Force is_unix to be keyword-only
-        is_unix: bool = False,
+    block: TNAccessBlock,
+    stream_id: str,
+    data_provider: Optional[str] = None,
+    date_from: Union[ShortIso8601Date, int, None] = None,
+    date_to: Union[ShortIso8601Date, int, None] = None,
+    *,  # Force is_unix to be keyword-only
+    is_unix: bool = False,
 ) -> DataFrame[TnRecordModel]:
     """Read records from TSN with support for both ISO dates and Unix timestamps.
 
@@ -955,6 +982,7 @@ def task_read_records(
             date_to=cast(Optional[ShortIso8601Date], date_to),
             is_unix=False,
         )
+
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_tn_records(

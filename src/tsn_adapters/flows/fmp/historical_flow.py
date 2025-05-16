@@ -117,7 +117,9 @@ def get_active_tickers(psd_block: PrimitiveSourcesDescriptorBlock) -> DataFrame[
 
 
 @task
-def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[datetime.datetime]:
+def get_earliest_data_date(
+    tn_block: TNAccessBlock, stream_id: str, after_date: Optional[datetime.datetime] = None
+) -> Optional[datetime.datetime]:
     """
     Query TN for the earliest available data for the given stream.
 
@@ -134,7 +136,7 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
     """
     logger = get_logger_safe(__name__)
     try:
-        return tn_block.get_earliest_date(stream_id=stream_id, is_unix=True)
+        return tn_block.get_earliest_date(stream_id=stream_id, is_unix=True, after_date=after_date)
     except TNAccessBlock.StreamNotFoundError:
         logger.warning(f"Stream {stream_id} not found")
         raise  # Re-raise the StreamNotFoundError
@@ -290,7 +292,7 @@ def process_ticker(
 
     try:
         # Get earliest data date first - this implicitly checks if stream exists
-        earliest_date = get_earliest_data_date(tn_block=tn_block, stream_id=stream_id)
+        earliest_date = get_earliest_data_date(tn_block=tn_block, stream_id=stream_id, after_date=min_fetch_date)
         if earliest_date is None:
             earliest_date = datetime.datetime.now(datetime.timezone.utc)
 
@@ -393,7 +395,7 @@ def run_ticker_pipeline(
                         task_split_and_insert_records(
                             block=tn_block,
                             records=validated_df,
-                            wait=False,
+                            wait=True,
                             is_unix=True,
                         )
 
@@ -405,7 +407,7 @@ def run_ticker_pipeline(
                 task_split_and_insert_records(
                     block=tn_block,
                     records=validated_df,
-                    wait=False,
+                    wait=True,
                     is_unix=True,
                 )
 
