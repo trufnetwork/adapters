@@ -180,7 +180,11 @@ class FakeTNAccessBlock(TNAccessBlock):
         pass
 
     def get_earliest_date(
-        self, stream_id: str, data_provider: str | None = None, is_unix: bool = False
+        self,
+        stream_id: str,
+        data_provider: str | None = None,
+        is_unix: bool = False,
+        after_date: datetime.datetime | None = None,
     ) -> datetime.datetime | None:
         """Mock getting earliest date, raising StreamNotFoundError for unknown streams."""
         if stream_id == "unknown":
