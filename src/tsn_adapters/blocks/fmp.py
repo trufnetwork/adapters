@@ -116,7 +116,7 @@ class BatchQuoteShort(DataFrameModel):
     price: Series[pd.Float64Dtype] = Field(
         nullable=True, ge=0.0, coerce=True
     )  # Allow null prices, must be non-negative when present
-    volume: Series[pd.Int64Dtype]
+    volume: Series[pd.Int64Dtype] = Field(nullable=True)
 
     class Config(DataFrameModel.Config):
         strict = "filter"
