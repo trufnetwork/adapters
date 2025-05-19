@@ -30,6 +30,11 @@ from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_r
 from tsn_adapters.utils.logging import get_logger_safe
 
 
+class CriticalFlowError(RuntimeError):
+    """Indicates an error that should cause the flow to fail definitively."""
+    pass
+
+
 class QuoteData(TypedDict):
     """
     Type-safe structure for quote data returned from FMP API.
@@ -439,13 +444,13 @@ def process_data(
     if quotes_df is None:
         error_msg = "Cannot process data: quotes DataFrame is None"
         logger.error(error_msg)
-        raise RuntimeError(error_msg)
+        raise CriticalFlowError(error_msg)
 
     # Handle Exception case
     if isinstance(quotes_df, Exception):
-        error_msg = f"Cannot process data: quotes DataFrame is {quotes_df}"
-        logger.error(error_msg)
-        raise RuntimeError(error_msg)
+        error_msg = f"Cannot process data: received upstream exception of type {type(quotes_df).__name__}: {quotes_df}"
+        logger.error(error_msg, exc_info=True) # Log current traceback, original exception is chained
+        raise CriticalFlowError(error_msg) from quotes_df
 
     logger.info(
         "Processing real-time market data",
@@ -697,13 +702,28 @@ def real_time_flow(
             processed_df = process_data(quotes_df=combined_data, descriptor_df=descriptor_df)
 
             if isinstance(processed_df, Exception):
-                raise processed_df
+                # This path is less likely if force_sync(processed_data.result()) raises directly.
+                # If it's our critical error, re-raise it. Otherwise, wrap it.
+                if isinstance(processed_df, CriticalFlowError):
+                    raise processed_df
+                error_msg = f"Data processing task returned an unexpected exception object: {processed_df!s}"
+                logger.error(error_msg, exc_info=processed_df)
+                raise CriticalFlowError(error_msg) from processed_df
+
+        except CriticalFlowError: # Catch CriticalFlowErrors specifically
+            logger.error("Critical error during data processing. Flow will fail.", exc_info=True)
+            raise # Re-raise to be caught by the outermost handler or fail the flow
 
         except Exception as e:
-            error_msg = f"Failed to process combined data: {e!s}"
+            error_msg = f"Failed to process combined data (non-critical): {e!s}"
             logger.error(error_msg, exc_info=True)
-            # Ensure failed_batches count is accurate here
-            return create_error_result(error_msg, total_symbols=total_symbols, failed_batches=failed_batches)
+            error_details.append(error_msg) # Add to error_details for FlowResult
+            return create_error_result(
+                error_msg, # This specific error message
+                total_symbols=total_symbols,
+                failed_batches=failed_batches,
+                existing_errors=error_details # Pass cumulative errors
+            )
 
         # Calculate filtered quotes - Ensure processed_df is a DataFrame
         processed_count = len(processed_df) if isinstance(processed_df, pd.DataFrame) else 0
@@ -772,24 +792,22 @@ def real_time_flow(
                 existing_errors=error_details,
             )
 
+    except CriticalFlowError:
+        logger.error("Flow failed due to a critical error. The flow function will raise this exception.", exc_info=True)
+        raise # Let CriticalFlowError propagate out of the real_time_flow function
+
     except Exception as e:
         # Handle any unexpected errors
-        logger.error(f"Flow encountered an error: {e!s}", exc_info=True)
-        
-        # error_details is guaranteed to be initialized earlier in the flow
-        final_errors = list(error_details)
-
-        # Simplified: Treat any exception caught here as a general flow failure
-        # occurred after the initial batch fetch check.
-        # Add the current exception to the list of errors.
-        final_errors.append(f"Unexpected flow error: {e!s}")
-
+        error_msg = f"Unexpected error during flow execution: {e!s}"
+        logger.error(error_msg, exc_info=True)
+        # Add to error_details for FlowResult
+        error_details.append(error_msg)
+        # Figure out failed_batches if possible, or pass a sensible default
+        current_failed_batches = failed_batches if 'failed_batches' in locals() else total_batches if 'total_batches' in locals() else 0
+        current_total_symbols = total_symbols if 'total_symbols' in locals() else 0
         return create_error_result(
-            # The primary message can still be the top-level exception, but details are in final_errors
-            error_msg=f"Flow failed with error: {e!s}",
-            total_symbols=total_symbols,
-            # Try to use the most accurate failed_batches count available
-            # Default to total_batches if the specific count wasn't calculated (e.g., early failure)
-            failed_batches=map_failed_batches_count, # map_failed_batches_count is now guaranteed to exist
-            existing_errors=final_errors
+            error_msg, # This specific error
+            total_symbols=current_total_symbols,
+            failed_batches=current_failed_batches,
+            existing_errors=error_details # Pass cumulative errors
         )
