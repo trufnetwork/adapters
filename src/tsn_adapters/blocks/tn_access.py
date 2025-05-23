@@ -14,7 +14,7 @@ from typing import (
 
 import pandas as pd
 from pandera.typing import DataFrame
-from prefect import Task, get_run_logger, task
+from prefect import Task, task
 from prefect.blocks.core import Block
 from prefect.client.schemas.objects import State, TaskRun
 from prefect.concurrency.sync import concurrency, rate_limit
@@ -100,8 +100,10 @@ def handle_tn_errors(func: F) -> F:
     return cast(F, wrapper)
 
 
+
 P = ParamSpec("P")
 R = TypeVar("R")
+
 
 
 def tn_special_retry_condition(max_other_error_retries: int) -> Any:
@@ -213,6 +215,7 @@ class MetadataProcedureNotFoundError(Exception):
 class StreamAlreadyExistsError(Exception):
     """Custom exception raised when attempting to deploy a stream that already exists."""
 
+
     def __init__(self, stream_id: str):
         self.stream_id = stream_id
         super().__init__(f"Stream '{stream_id}' already exists.")
@@ -226,6 +229,7 @@ class StreamAlreadyExistsError(Exception):
             return error
         msg = str(error).lower()
         import re
+
 
         # Match "transaction failed: dataset exists: <stream_id>"
         match = re.search(r"dataset exists: ([a-z0-9]+)", msg)
@@ -259,6 +263,16 @@ class TNAccessBlock(Block):
     This block securely stores and manages TSN access credentials for
     authenticating with TSN API in Prefect flows.
     """
+
+    @staticmethod
+    def _value_is_nonzero_str(val: str) -> bool:
+        """Return True if the decimal string val quantized to 18 decimals is non-zero."""
+        try:
+            d = decimal.Decimal(val)
+            q = d.quantize(decimal.Decimal("1e-18"), rounding=decimal.ROUND_DOWN)
+            return not q.is_zero()
+        except decimal.InvalidOperation:
+            raise ValueError(f"Could not parse '{val}' in 'value' column as Decimal.")
 
     class Error(Exception):
         """Base error class for TNAccessBlock errors."""
@@ -338,13 +352,19 @@ class TNAccessBlock(Block):
         raise NotImplementedError("is_allowed_to_write is not implemented")
 
     @handle_tn_errors
-    def get_earliest_date(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[datetime]:
+    def get_earliest_date(
+        self,
+        stream_id: str,
+        data_provider: Optional[str] = None,
+        after_date: Optional[datetime] = None,
+    ) -> Optional[datetime]:
         """
         Get the earliest date available for a stream.
 
         Args:
             stream_id: ID of the stream to query
             data_provider: Optional data provider
+            after_date: Optional date to start the search after, inclusively
 
         Returns:
             The earliest date if found, otherwise None
@@ -356,7 +376,9 @@ class TNAccessBlock(Block):
             TNAccessBlock.Error: For other TN-related errors
         """
         try:
-            first_record = self.get_first_record(stream_id=stream_id, data_provider=data_provider)
+            first_record = self.get_first_record(
+                stream_id=stream_id, data_provider=data_provider, after_date=after_date
+            )
             if first_record is None:
                 return None
 
@@ -381,9 +403,16 @@ class TNAccessBlock(Block):
         return self.read_records(stream_id, data_provider, date_from=date_string_to_unix("1000-01-01"))
 
     @handle_tn_errors
-    def get_first_record(self, stream_id: str, data_provider: Optional[str] = None) -> Optional[TnRecord]:
+    def get_first_record(
+        self,
+        stream_id: str,
+        data_provider: Optional[str] = None,
+        after_date: Optional[datetime] = None,
+    ) -> Optional[TnRecord]:
         with concurrency("tn-read", occupy=1):
-            result = self.client.get_first_record(stream_id, data_provider)
+            # Convert after_date to Unix timestamp for the client
+            after_date_unix = int(after_date.timestamp()) if after_date else None
+            result = self.client.get_first_record(stream_id, data_provider, after_date_unix)
 
         if result is None:
             return None
@@ -445,13 +474,20 @@ class TNAccessBlock(Block):
     def insert_tn_records(
         self, stream_id: str, records: DataFrame[TnRecordModel], records_per_batch: int = 300
     ) -> Optional[list[str]]:
-        logging = get_run_logger()
+        # Filter out records where value is zero
+        if 'value' in records.columns and not records.empty:
+            original_count = len(records)
+            mask = records['value'].apply(self._value_is_nonzero_str)
+            records = records[mask]
+            filtered_count = len(records)
+            if original_count > filtered_count:
+                self.logger.info(f"Filtered out {original_count - filtered_count} records with zero values for stream {stream_id}.")
 
         if len(records) == 0:
-            logging.info(f"No records to insert for stream {stream_id}")
+            self.logger.info(f"No records to insert for stream {stream_id}.")
             return None
 
-        logging.info(f"Inserting {len(records)} records into stream {stream_id}")
+        self.logger.info(f"Inserting {len(records)} records into stream {stream_id}")
         records_dict = records.to_dict(orient="records")
 
         num_batches = ceil(len(records_dict) / records_per_batch)
@@ -459,12 +495,12 @@ class TNAccessBlock(Block):
 
         for col in ["date", "value"]:
             if col not in records.columns:
-                logging.error(f"Missing required column '{col}' in records DataFrame.")
+                self.logger.error(f"Missing required column '{col}' in records DataFrame for stream {stream_id}.")
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
             tx_hashes = self.client.batch_insert_records(batches)
-            logging.debug(f"Inserted {len(records)} records into stream {stream_id}")
+            self.logger.debug(f"Inserted {len(records)} records into stream {stream_id}")
 
         return tx_hashes
 
@@ -481,7 +517,18 @@ class TNAccessBlock(Block):
         Returns:
             Transaction hash if successful, None otherwise
         """
+        if "value" in records.columns and not records.empty:
+            original_count = len(records)
+            mask = records["value"].apply(self._value_is_nonzero_str)
+            records = records[mask]
+            filtered_count = len(records)
+            if original_count > filtered_count:
+                self.logger.info(
+                    f"Filtered out {original_count - filtered_count} records with zero values from the batch."
+                )
+
         if len(records) == 0:
+            self.logger.info("No records to insert from the batch.")
             return None
 
         # Convert DataFrame to format expected by client

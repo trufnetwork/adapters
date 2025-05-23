@@ -118,7 +118,9 @@ def get_active_tickers(psd_block: PrimitiveSourcesDescriptorBlock) -> DataFrame[
 
 
 @task
-def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[datetime.datetime]:
+def get_earliest_data_date(
+    tn_block: TNAccessBlock, stream_id: str, after_date: Optional[datetime.datetime] = None
+) -> Optional[datetime.datetime]:
     """
     Query TN for the earliest available data for the given stream.
 
@@ -135,7 +137,7 @@ def get_earliest_data_date(tn_block: TNAccessBlock, stream_id: str) -> Optional[
     """
     logger = get_logger_safe(__name__)
     try:
-        return tn_block.get_earliest_date(stream_id=stream_id)
+        return tn_block.get_earliest_date(stream_id=stream_id, after_date=after_date)
     except TNAccessBlock.StreamNotFoundError:
         logger.warning(f"Stream {stream_id} not found")
         raise  # Re-raise the StreamNotFoundError
@@ -290,8 +292,10 @@ def process_ticker(
 
     try:
         # Get earliest data date first - this implicitly checks if stream exists
-        earliest_date = get_earliest_data_date(tn_block=tn_block, stream_id=stream_id)
+        earliest_date = get_earliest_data_date(tn_block=tn_block, stream_id=stream_id, after_date=min_fetch_date)
         if earliest_date is None:
+            # If get_earliest_data_date returns None (and didn't raise StreamNotFoundError),
+            # it means no data after min_fetch_date, so we start from now.
             earliest_date = datetime.datetime.now(datetime.timezone.utc)
 
         # Calculate date range
@@ -300,6 +304,7 @@ def process_ticker(
         start_date = max((earliest_date - max_fetch_period), min_fetch_date).strftime("%Y-%m-%d")
 
         # Fetch historical data
+        # FMPDataFetchError will propagate if fetch_historical_data fails after retries
         eod_data = fetch_historical_data(
             fmp_block=fmp_block,
             symbol=symbol,
@@ -308,15 +313,25 @@ def process_ticker(
         )
 
         if len(eod_data) == 0:
-            logger.warning(f"No data found for {symbol}")
-            return TickerError(symbol, stream_id, error="no_data")
+            logger.warning(f"No data found for {symbol} in range {start_date} to {end_date}")
+            # Consider this a recoverable error for this ticker, not a flow-stopping one.
+            return TickerError(symbol, stream_id, error="no_data_in_range")
 
         logger.info(f"Successfully fetched data for {symbol} from {start_date} to {end_date}")
         return TickerSuccess(symbol, stream_id, data=eod_data)
 
+    except TNAccessBlock.StreamNotFoundError:
+        logger.warning(f"Stream {stream_id} for symbol {symbol} not found in TN. Skipping.")
+        return TickerError(symbol, stream_id, error="stream_not_found")
+    except (FMPDataFetchError, TNQueryError) as e: # These are already specific flow errors
+        logger.error(f"Critical error processing {symbol}: {e!s}")
+        # Allow these specific critical errors to propagate to fail the task, and thus the flow.
+        raise
     except Exception as e:
-        logger.error(f"Error processing {symbol}: {e}")
-        return TickerError(symbol, stream_id, error=str(e))
+        # Catch any other unexpected exceptions
+        logger.error(f"Unexpected error processing {symbol}: {e!s}", exc_info=True)
+        # For truly unexpected errors, treat as critical for this ticker and propagate
+        raise HistoricalFlowError(f"Unexpected error for {symbol}: {e!s}") from e
 
 
 def run_ticker_pipeline(
