@@ -181,6 +181,21 @@ class CommodityInfo(DataFrameModel):
         coerce = True
 
 
+class IndexInfo(DataFrameModel):
+    """
+    Schema for stock market indexes from FMP API.
+    https://site.financialmodelingprep.com/developer/docs/stable/indexes-list
+    """
+    symbol: Series[str]
+    name: Series[str] = Field(nullable=True)
+    exchange: Series[str] = Field(nullable=True)
+    currency: Series[str] = Field(nullable=True)
+
+    class Config(DataFrameModel.Config):
+        strict = "filter"
+        coerce = True
+
+
 class CommodityQuote(DataFrameModel):
     """
     Schema for commodity quotes from legacy FMP API endpoint /api/v3/quotes/commodity.
@@ -460,4 +475,16 @@ class FMPBlock(Block):
             endpoint=FMPEndpoint(FMPAPI.STABLE, "commodities-list"),
             model_type=CommodityInfo,
             log_entity_name="commodities list",
+        )
+
+    def get_index_list(self) -> DataFrame[IndexInfo]:
+        """
+        Fetch the list of available stock market indexes from FMP.
+        https://site.financialmodelingprep.com/developer/docs/stable/indexes-list
+        Endpoint: /stable/index-list
+        """
+        return self._fetch_fmp_list_data(
+            endpoint=FMPEndpoint(FMPAPI.STABLE, "index-list"),
+            model_type=IndexInfo,
+            log_entity_name="stock market indexes",
         )
