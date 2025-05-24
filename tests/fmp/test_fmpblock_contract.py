@@ -7,6 +7,7 @@ from typing import Any
 from pandera.typing import DataFrame
 from pydantic import SecretStr
 import pytest
+from prefect.testing.utilities import prefect_test_harness
 
 from tsn_adapters.blocks.fmp import (
     CommodityInfo,
@@ -15,6 +16,7 @@ from tsn_adapters.blocks.fmp import (
     FMPBlock,
     FMPExchange,
     IndexConstituent,
+    IndexInfo,
 )
 
 
@@ -98,6 +100,22 @@ def test_contract_get_commodity_list(fmp_block: FMPBlock):
 
 
 @pytest.mark.integration
+def test_contract_get_index_list(fmp_block: FMPBlock):
+    """Contract test for get_index_list."""
+    df: DataFrame[IndexInfo] = fmp_block.get_index_list()
+    assert not df.empty, "Expected stock market indexes list to be non-empty"
+    # Structural checks for fields based on IndexInfo schema
+    expected_cols = ["symbol", "name", "exchange", "currency"]
+    for col in expected_cols:
+        assert col in df.columns, f"Missing expected column {col} in index list"
+    # Expect at least one major stock market index (S&P 500, NASDAQ, Dow Jones)
+    # Common index symbols may vary, but these are typical patterns
+    assert df["symbol"].str.contains("SPX|NDX|DJI|GSPC|IXIC", regex=True).any(), \
+        "Expected at least one major index like SPX, NDX, DJI, GSPC, or IXIC"
+    print(f"Fetched {len(df)} stock market indexes from the list.")
+
+
+@pytest.mark.integration
 def test_batch_counts_for_specified_filters(fmp_block: FMPBlock):
     """
     Validate counts for different exchange and index bulk endpoints:
@@ -105,6 +123,7 @@ def test_batch_counts_for_specified_filters(fmp_block: FMPBlock):
     - NASDAQ common stocks
     - S&P 500 constituents
     - CME commodity quotes
+    - Stock market indexes
     """
     # Fetch data
     nyse_df: DataFrame[ExchangeQuote] = fmp_block.get_equities(
@@ -115,18 +134,21 @@ def test_batch_counts_for_specified_filters(fmp_block: FMPBlock):
     )
     sp500_df: DataFrame[IndexConstituent] = fmp_block.get_sp500_constituents()
     cme_df: DataFrame[CommodityQuote] = fmp_block.get_cme_commodity_quotes()
+    index_df: DataFrame[IndexInfo] = fmp_block.get_index_list()
 
     # Non-empty checks
     assert not nyse_df.empty, "Expected NYSE equities to be non-empty"
     assert not nasdaq_df.empty, "Expected NASDAQ common stocks to be non-empty"
     assert not sp500_df.empty, "Expected S&P 500 constituents to be non-empty"
     assert not cme_df.empty, "Expected CME commodity quotes to be non-empty"
+    assert not index_df.empty, "Expected stock market indexes to be non-empty"
 
     # Approximate count assertions
     assert 490 < len(sp500_df) < 550, f"Expected ~500 SP500 constituents, got {len(sp500_df)}"
     assert len(nyse_df) > len(sp500_df), f"Expected NYSE equities ({len(nyse_df)}) > SP500 constituents ({len(sp500_df)})"
     assert len(nasdaq_df) > len(sp500_df), f"Expected NASDAQ common stocks ({len(nasdaq_df)}) > SP500 constituents ({len(sp500_df)})"
     assert len(cme_df) >= 20, f"Expected at least 20 CME commodities, got {len(cme_df)}"
+    assert len(index_df) >= 10, f"Expected at least 10 stock market indexes, got {len(index_df)}"
 
 
 def save_all_data(fmp_block: FMPBlock, relative_path: str):
@@ -135,6 +157,7 @@ def save_all_data(fmp_block: FMPBlock, relative_path: str):
     nasdaq_df: DataFrame[ExchangeQuote] = fmp_block.get_equities(exchange=FMPExchange.NASDAQ)
     sp500_df: DataFrame[IndexConstituent] = fmp_block.get_sp500_constituents()
     cme_df: DataFrame[CommodityQuote] = fmp_block.get_cme_commodity_quotes()
+    index_df: DataFrame[IndexInfo] = fmp_block.get_index_list()
 
     # Create directory if it doesn't exist
     os.makedirs(relative_path, exist_ok=True)
@@ -143,6 +166,7 @@ def save_all_data(fmp_block: FMPBlock, relative_path: str):
     nasdaq_df.to_csv(f"{relative_path}/nasdaq_common_stocks.csv", index=False)
     sp500_df.to_csv(f"{relative_path}/sp500_constituents.csv", index=False)
     cme_df.to_csv(f"{relative_path}/cme_commodity_quotes.csv", index=False)
+    index_df.to_csv(f"{relative_path}/index_list.csv", index=False)
 
 
 if __name__ == "__main__":
@@ -154,5 +178,6 @@ if __name__ == "__main__":
 
     api_key = os.environ.get("FMP_API_KEY")
     assert isinstance(api_key, str), "API key must be a string"
-    fmp_block_test = FMPBlock(api_key=SecretStr(api_key))
+    with prefect_test_harness():
+        fmp_block_test = FMPBlock(api_key=SecretStr(api_key))
     save_all_data(fmp_block_test, args.path)
