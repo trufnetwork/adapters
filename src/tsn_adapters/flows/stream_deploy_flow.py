@@ -227,7 +227,6 @@ def deploy_streams_flow(
             # Call the new orchestrating task. It handles existence check and deployment attempt.
             # We set wait_for_deployment_tx=False because we want to get the tx_hash back
             # and then explicitly wait for it in the flow, allowing the flow to manage this.
-            # The user's previous direct calls to tasks also implied this pattern.
             filter_deploy_result = task_filter_and_deploy_streams(
                 block=tna_block, 
                 potential_definitions=current_super_batch_definitions, 
@@ -242,6 +241,18 @@ def deploy_streams_flow(
             if num_skipped_exist > 0:
                 skipped_count += num_skipped_exist
                 logger.info(f"Super-batch {batch_num_for_logging}: Skipped {num_skipped_exist} streams that already exist on TN.")
+                
+                # Mark streams that already exist on TN as deployed in the deployment state block
+                if deployment_state and filter_deploy_result["skipped_stream_ids_already_exist"]:
+                    batch_timestamp = datetime.now(timezone.utc)
+                    mark_batch_deployed_task(
+                        stream_ids=filter_deploy_result["skipped_stream_ids_already_exist"],
+                        deployment_state=deployment_state,
+                        timestamp=batch_timestamp,
+                    )
+                    logger.info(
+                        f"Super-batch {batch_num_for_logging}: Submitted task to mark {num_skipped_exist} already-existing streams as deployed in DeploymentStateBlock."
+                    )
 
             if batch_tx_hash: # A deployment was attempted
                 logger.info(
