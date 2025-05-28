@@ -298,9 +298,14 @@ def process_ticker(
             # it means no data after min_fetch_date, so we start from now.
             earliest_date = datetime.datetime.now(datetime.timezone.utc)
 
-        # Calculate date range
+        # Ensure both datetimes are timezone-aware for safe comparison
+        if earliest_date.tzinfo is None:
+            earliest_date = earliest_date.replace(tzinfo=datetime.timezone.utc)
+        if min_fetch_date.tzinfo is None:
+            min_fetch_date = min_fetch_date.replace(tzinfo=datetime.timezone.utc)
+
+        # Calculate date range (now safe from timezone comparison errors)
         end_date = earliest_date.strftime("%Y-%m-%d")
-        min_fetch_date = min_fetch_date.replace(tzinfo=None)
         start_date = max((earliest_date - max_fetch_period), min_fetch_date).strftime("%Y-%m-%d")
 
         # Fetch historical data
