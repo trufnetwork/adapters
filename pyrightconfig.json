@@ -1,7 +1,19 @@
 {
+  "pythonVersion": "3.12",
   "typeCheckingMode": "strict",
-  "reportUnknownMemberType": "none",
-  "reportUnknownArgumentType": "none",
-  "reportMissingTypeStubs": "none",
-  "reportUnknownVariableType": "none"
+  "useLibraryCodeForTypes": true,
+  "include": ["src"],
+  "exclude": ["**/__pycache__", "**/.pytest_cache", ".venv", "node_modules"],
+  "extraPaths": ["src"],
+  "reportMissingTypeStubs": "warning",
+  "reportUnknownMemberType": "warning",
+  "reportUnknownArgumentType": "warning",
+  "reportUnknownVariableType": "warning",
+  "reportGeneralTypeIssues": "error",
+  "reportOptionalMemberAccess": "error",
+  "reportOptionalSubscript": "error",
+  "strictListInference": true,
+  "strictDictionaryInference": true,
+  "strictSetInference": true,
+  "strictParameterNoneValue": true
 }
