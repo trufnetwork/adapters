@@ -96,6 +96,47 @@ def task_split_and_insert_records(
 
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
+def _task_only_batch_insert_records(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+) -> Optional[list[str]]:
+    """Insert records into TSN without waiting for transaction confirmation"""
+    return block.batch_insert_tn_records(records=records)
+
+
+# we don't use retries here because their individual tasks already have retries
+@task
+def task_batch_insert_tn_records(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    wait: bool = False,
+) -> Optional[list[str]]:
+    """Batch insert records into multiple streams
+
+    Args:
+        block: The TNAccessBlock instance
+        records: DataFrame containing records with stream_id column
+        wait: Whether to wait for transactions to complete
+        has_external_created_at: If True, insert with external created_at timestamps
+
+    Returns:
+        Transaction hash if successful, None otherwise
+    """
+    logging = get_run_logger()
+
+    logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
+
+    # we use task so it may retry on network or nonce errors
+    tx_hashes = _task_only_batch_insert_records(block=block, records=records)
+
+    if wait and tx_hashes is not None:
+        # we need to use task so it may retry on network errors
+        for tx_hash in tx_hashes:
+            task_wait_for_tx(block=block, tx_hash=tx_hash)
+
+    return tx_hashes
+
+@task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_tn_records(
     block: TNAccessBlock,
     stream_id: str,
@@ -282,16 +323,10 @@ def _perform_batch_insertions(
                 f"Submitting insertion batch {batch_num_log}/{len(split_records_batches)} ({len(batch)} records)..."
             )
             try:
-                # Assuming task_batch_insert_tn_records handles the actual API call
-                # It might need `is_unix` and `has_external_created_at` if those params are still relevant
-                # Passing them through from the main task signature if needed.
                 tx_hashes_or_none = task_batch_insert_tn_records(
                     block=block,
                     records=batch,
                     wait=wait,
-                    # Add is_unix and has_external_created_at here if they were kept in task_split_and_insert_records signature
-                    # is_unix=is_unix,
-                    # has_external_created_at=has_external_created_at
                 )
                 if tx_hashes_or_none:
                     success_tx_hashes.extend(tx_hashes_or_none)
@@ -300,7 +335,6 @@ def _perform_batch_insertions(
                 logger.error(f"Insertion batch {batch_num_log} failed: {e!s}", exc_info=True)
                 failed_records_list.append(batch)
                 failed_reasons.append(str(e))
-                # Decide if fail_on_batch_error logic is needed here or handled by Prefect retries on the task
 
     # Combine failed records
     if failed_records_list:
