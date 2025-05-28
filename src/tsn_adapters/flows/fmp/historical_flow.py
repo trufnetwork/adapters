@@ -422,9 +422,10 @@ def run_ticker_pipeline(
             # Process remaining records for this chunk
             if len(records_to_insert) > 0:
                 validated_df = DataFrame[TnDataRowModel](records_to_insert)
-                task_batch_insert_tn_records(
+                task_split_and_insert_records(
                     block=tn_block,
                     records=validated_df,
+                    wait=True,
                 )
 
             logger.info(f"Completed processing ticker chunk {chunk_start}-{chunk_end}")
