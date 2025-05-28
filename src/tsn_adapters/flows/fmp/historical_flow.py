@@ -24,7 +24,7 @@ from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
-from tsn_adapters.common.trufnetwork.tasks.insert import task_batch_insert_tn_records
+from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
 
@@ -411,9 +411,10 @@ def run_ticker_pipeline(
                     if len(records_to_insert) >= batch_size:
                         validated_df = DataFrame[TnDataRowModel](records_to_insert)
                         records_to_insert = pd.DataFrame()
-                        task_batch_insert_tn_records(
+                        task_split_and_insert_records(
                             block=tn_block,
                             records=validated_df,
+                            wait=True,
                         )
 
                     logger.info("Completed ticker processing pipeline")
