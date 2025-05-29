@@ -17,11 +17,10 @@ from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.cache_policies as CachePolicies
-import prefect.variables as variables
+from prefect.logging import get_run_logger
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
-from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import (
     SepaAvgPriceProductModel,
@@ -30,6 +29,7 @@ from tsn_adapters.tasks.argentina.models.sepa.sepa_models import (
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
 from tsn_adapters.tasks.argentina.task_wrappers import task_load_category_map
+from tsn_adapters.tasks.argentina.tasks import process_raw_data_streaming, task_load_category_map
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, CategoryMapDF, DateStr, SepaDF, UncategorizedDF
 from tsn_adapters.tasks.argentina.utils.weighted_average import combine_weighted_averages
 from tsn_adapters.utils.deroutine import force_sync
@@ -42,6 +42,9 @@ def process_raw_data_streaming(
     chunk_size: int = 100000,
 ) -> tuple[AggregatedPricesDF, UncategorizedDF, DataFrame[SepaWeightedAvgPriceProductModel]]:
     """Process raw SEPA data in batches using streaming to minimize memory usage.
+    
+    MEMORY OPTIMIZATION: Implements periodic reset every 50 batches to prevent
+    memory buildup that causes SIGKILL at batch 171.
 
     Args:
         raw_data_stream: Iterator yielding chunks of raw SEPA data.
@@ -55,6 +58,10 @@ def process_raw_data_streaming(
     
     # Initialize accumulator for weighted averages only
     cumulative_weighted_avg: DataFrame[SepaWeightedAvgPriceProductModel] | None = None
+    
+    # MEMORY OPTIMIZATION: Track and reset every 50 batches to prevent memory buildup
+    reset_interval = 50
+    all_weighted_results = []  # Store intermediate results
 
     batch_count = 0
     total_processed = 0
@@ -84,22 +91,39 @@ def process_raw_data_streaming(
         del batch_data
         del batch_weighted_avg
 
+        # MEMORY OPTIMIZATION: Reset every 50 batches to prevent memory buildup
+        if batch_count % reset_interval == 0:
+            logger.info(f"MEMORY RESET: Saving intermediate result at batch {batch_count}")
+            if cumulative_weighted_avg is not None:
+                all_weighted_results.append(cumulative_weighted_avg.copy())
+                cumulative_weighted_avg = None
+                # Force garbage collection after reset
+                import gc
+                gc.collect()
+
     logger.info(f"Processed {batch_count} batches with {total_processed} total rows")
 
-    # Handle empty case
-    if cumulative_weighted_avg is None or cumulative_weighted_avg.empty:
+    # Combine all intermediate results at the end
+    if cumulative_weighted_avg is not None:
+        all_weighted_results.append(cumulative_weighted_avg)
+    
+    if not all_weighted_results:
         logger.warning("No data processed - returning empty results")
         empty_weighted_avg_df = DataFrame[SepaWeightedAvgPriceProductModel](
             pd.DataFrame(columns=list(SepaWeightedAvgPriceProductModel.to_schema().columns.keys()))
         )
         return cast(AggregatedPricesDF, pd.DataFrame()), cast(UncategorizedDF, pd.DataFrame()), empty_weighted_avg_df
 
+    # Final combine of all intermediate results
+    logger.info(f"Final combine of {len(all_weighted_results)} intermediate results")
+    final_weighted_avg = combine_weighted_averages(all_weighted_results)
+
     # Convert weighted averages to standard avg price format for aggregation (done once at the end)
     standard_data = {
-        "id_producto": cumulative_weighted_avg["id_producto"],
-        "productos_descripcion": cumulative_weighted_avg["productos_descripcion"],
-        "productos_precio_lista_avg": cumulative_weighted_avg["productos_precio_lista_avg"],
-        "date": cumulative_weighted_avg["date"],
+        "id_producto": final_weighted_avg["id_producto"],
+        "productos_descripcion": final_weighted_avg["productos_descripcion"],
+        "productos_precio_lista_avg": final_weighted_avg["productos_precio_lista_avg"],
+        "date": final_weighted_avg["date"],
     }
     avg_price_df = DataFrame[SepaAvgPriceProductModel](pd.DataFrame(standard_data))
 
@@ -107,10 +131,10 @@ def process_raw_data_streaming(
     categorized, uncategorized = aggregate_prices_by_category(category_map_df, avg_price_df)
 
     logger.info(
-        f"Final results: {len(categorized)} categorized, {len(uncategorized)} uncategorized, {len(cumulative_weighted_avg)} weighted averages"
+        f"Final results: {len(categorized)} categorized, {len(uncategorized)} uncategorized, {len(final_weighted_avg)} weighted averages"
     )
 
-    return categorized, uncategorized, cumulative_weighted_avg
+    return categorized, uncategorized, final_weighted_avg
 
 
 # Keep the old function for backward compatibility but mark as deprecated
@@ -170,81 +194,51 @@ class PreprocessFlow(ArgentinaFlowController):
                 continue
             await self.process_date(date)
 
-    async def process_date(self, date: DateStr) -> None:
-        """Process data for a specific date using streaming for memory efficiency.
-
-        Args:
-            date: Date to process (YYYY-MM-DD)
-
-        Raises:
-            ValueError: If date format is invalid
-            KeyError: If no data available for date
-        """
+    async def process_date(self, date_str: DateStr) -> None:
+        """Process raw data for a specific date into aggregated prices."""
         logger = get_run_logger()
-        self.validate_date(date)
-
-        logger.info(f"Processing {date} using streaming approach")
-
-        # Check if data exists before processing
-        if not self.raw_provider.has_data_for(date):
-            logger.warning(f"No data available for date: {date}, skipping processing.")
+        self.validate_date(date_str)
+        
+        if not self.raw_provider.has_data_for(date_str):
+            logger.info(f"No raw data available for {date_str}")
             return
-
-        # Load category mapping
-        logger.info("Loading category mapping")
+        
+        logger.info(f"Loading category map from {self.category_map_url}")
         category_map_df = task_load_category_map(url=self.category_map_url)
-
-        # Process the data using streaming approach
-        logger.info("Processing raw data in batches with streaming")
-
-        # Create data stream - reduced chunk size to lower memory pressure per batch
-        chunk_size = 25000  # Reduced from 50000 to reduce memory pressure
-        raw_data_stream = self.raw_provider.stream_raw_data_for(date, chunk_size=chunk_size)
-
-        processed_data, uncategorized, weighted_avg_df = process_raw_data_streaming(
+        
+        # Stream raw data in chunks to avoid memory issues
+        chunk_size = 25000
+        
+        logger.info(f"Processing data for {date_str} with chunk size {chunk_size}")
+        raw_data_stream = self.raw_provider.stream_raw_data_for(date_str, chunk_size=chunk_size)
+        
+        processed_data, uncategorized, avg_price_df = process_raw_data_streaming(
             raw_data_stream=raw_data_stream,
             category_map_df=category_map_df,
             chunk_size=chunk_size,
-            return_state=False,
         )
-
-        # --- Save Product Averages ---
-        if not weighted_avg_df.empty:
-            logger.info("Saving product averages")
+        
+        # Save product averages if they exist (but continue if save fails)
+        if not avg_price_df.empty:
             try:
-                self.product_averages_provider.save_product_averages(date_str=date, data=weighted_avg_df)
-                logger.info("Successfully saved product averages")
+                self.product_averages_provider.save_product_averages(
+                    date_str=date_str,
+                    data=avg_price_df
+                )
+                logger.info(f"Saved {len(avg_price_df)} product averages for {date_str}")
             except Exception as e:
-                logger.error(f"Failed to save product averages for {date}: {e}", exc_info=True)
-                # Decide if this error should halt processing or just be logged
-                # For now, we log and continue to save category data
-        else:
-            logger.info("Skipping saving product averages as the DataFrame is empty.")
-
-        # Save category aggregated data to S3 (using self.processed_provider from base class)
-        logger.info("Saving processed category data")
+                logger.error(f"Failed to save product averages for {date_str}: {e}")
+        
+        # Save processed data
         self.processed_provider.save_processed_data(
-            date_str=date,
+            date_str=date_str,
             data=processed_data,
             uncategorized=uncategorized,
-            logs=b"Placeholder for logs",
+            logs=[],  # TODO: Implement logging collection
         )
-
-        # --- Set Prefect Variable on Success ---
-        try:
-            await variables.Variable.aset(ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, date, overwrite=True)
-            logger.info(f"Successfully set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE} to {date}")
-        except Exception as e:
-            # Log error but don't fail the flow just because variable setting failed
-            logger.error(
-                f"Failed to set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE} for date {date}: {e}",
-                exc_info=True,
-            )
-        # --- End Prefect Variable Setting ---
-
-        # Create summary
-        logger.info("Creating summary")
-        self._create_summary(date, processed_data, uncategorized)
+        
+        # Generate summary
+        self._create_summary(date_str, processed_data, uncategorized)
 
     def _create_summary(
         self,
