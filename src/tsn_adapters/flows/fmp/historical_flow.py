@@ -24,7 +24,7 @@ from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
-from tsn_adapters.common.trufnetwork.tasks.insert import task_batch_insert_tn_records
+from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.utils import deroutine
 from tsn_adapters.utils.logging import get_logger_safe
 
@@ -298,9 +298,14 @@ def process_ticker(
             # it means no data after min_fetch_date, so we start from now.
             earliest_date = datetime.datetime.now(datetime.timezone.utc)
 
-        # Calculate date range
+        # Ensure both datetimes are timezone-aware for safe comparison
+        if earliest_date.tzinfo is None:
+            earliest_date = earliest_date.replace(tzinfo=datetime.timezone.utc)
+        if min_fetch_date.tzinfo is None:
+            min_fetch_date = min_fetch_date.replace(tzinfo=datetime.timezone.utc)
+
+        # Calculate date range (now safe from timezone comparison errors)
         end_date = earliest_date.strftime("%Y-%m-%d")
-        min_fetch_date = min_fetch_date.replace(tzinfo=None)
         start_date = max((earliest_date - max_fetch_period), min_fetch_date).strftime("%Y-%m-%d")
 
         # Fetch historical data
@@ -406,9 +411,10 @@ def run_ticker_pipeline(
                     if len(records_to_insert) >= batch_size:
                         validated_df = DataFrame[TnDataRowModel](records_to_insert)
                         records_to_insert = pd.DataFrame()
-                        task_batch_insert_tn_records(
+                        task_split_and_insert_records(
                             block=tn_block,
                             records=validated_df,
+                            wait=True,
                         )
 
                     logger.info("Completed ticker processing pipeline")
@@ -416,9 +422,10 @@ def run_ticker_pipeline(
             # Process remaining records for this chunk
             if len(records_to_insert) > 0:
                 validated_df = DataFrame[TnDataRowModel](records_to_insert)
-                task_batch_insert_tn_records(
+                task_split_and_insert_records(
                     block=tn_block,
                     records=validated_df,
+                    wait=True,
                 )
 
             logger.info(f"Completed processing ticker chunk {chunk_start}-{chunk_end}")

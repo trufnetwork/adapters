@@ -7,6 +7,7 @@ name = "trufnetwork-adapters"
 version = "0.1.0"
 description = "A collection of prefect tasks and examples ingesting data into TSN"
 readme = "README.md"
+requires-python = ">=3.12"
 dependencies = [
     "prefect-client>=3.4.1",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
@@ -41,6 +42,7 @@ dev = [
     "moto",
     "pytest-postgresql",
     "docker",
+    "basedpyright",
 ]
 
 [tool.setuptools]

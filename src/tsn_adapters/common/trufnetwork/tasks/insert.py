@@ -1,4 +1,4 @@
-from datetime import timedelta
+
 from math import ceil
 from typing import (
     Optional,
@@ -19,7 +19,7 @@ from tsn_adapters.blocks.tn_access import (
     tn_special_retry_condition,
 )
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
-from tsn_adapters.common.trufnetwork.tn import filter_existence_cache_key, task_batch_filter_streams_by_existence
+from tsn_adapters.common.trufnetwork.tn import task_batch_filter_streams_by_existence
 from tsn_adapters.utils.logging import get_logger_safe
 
 
@@ -38,7 +38,6 @@ def task_split_and_insert_records(
     max_batch_size: int = 25000,
     wait: bool = True,
     filter_deployed_streams: bool = True,
-    filter_cache_duration: timedelta = timedelta(days=1),
     max_streams_per_existence_check: int = 1000,
 ) -> SplitInsertResults:
     """
@@ -71,7 +70,6 @@ def task_split_and_insert_records(
                 block=block,
                 records=processed_records,
                 max_streams_per_existence_check=max_streams_per_existence_check,
-                filter_cache_duration=filter_cache_duration,
             )
         except Exception as e:
             # Error during filtering is critical, re-raise to fail the task
@@ -196,7 +194,6 @@ def _filter_records_by_stream_existence(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     max_streams_per_existence_check: int,
-    filter_cache_duration: timedelta,
 ) -> DataFrame[TnDataRowModel]:
     """Filters records based on stream existence on TN.
 
@@ -204,7 +201,6 @@ def _filter_records_by_stream_existence(
         block: TNAccessBlock instance.
         records: Input DataFrame with potential records.
         max_streams_per_existence_check: Max streams per filter API call.
-        filter_cache_duration: Cache duration for the existence check.
 
     Returns:
         Filtered DataFrame containing only records for existing streams.
@@ -244,12 +240,8 @@ def _filter_records_by_stream_existence(
         )
 
         try:
-            # Apply custom cache key function
-            existence_check_task = task_batch_filter_streams_by_existence.with_options(
-                cache_key_fn=filter_existence_cache_key, cache_expiration=filter_cache_duration
-            )
             # Request non-existent streams
-            non_existent_locators_in_batch = existence_check_task.submit(
+            non_existent_locators_in_batch = task_batch_filter_streams_by_existence.submit(
                 block=block, locators=current_filter_batch, return_existing=False
             ).result()
 
@@ -331,16 +323,10 @@ def _perform_batch_insertions(
                 f"Submitting insertion batch {batch_num_log}/{len(split_records_batches)} ({len(batch)} records)..."
             )
             try:
-                # Assuming task_batch_insert_tn_records handles the actual API call
-                # It might need `is_unix` and `has_external_created_at` if those params are still relevant
-                # Passing them through from the main task signature if needed.
                 tx_hashes_or_none = task_batch_insert_tn_records(
                     block=block,
                     records=batch,
                     wait=wait,
-                    # Add is_unix and has_external_created_at here if they were kept in task_split_and_insert_records signature
-                    # is_unix=is_unix,
-                    # has_external_created_at=has_external_created_at
                 )
                 if tx_hashes_or_none:
                     success_tx_hashes.extend(tx_hashes_or_none)
@@ -349,7 +335,6 @@ def _perform_batch_insertions(
                 logger.error(f"Insertion batch {batch_num_log} failed: {e!s}", exc_info=True)
                 failed_records_list.append(batch)
                 failed_reasons.append(str(e))
-                # Decide if fail_on_batch_error logic is needed here or handled by Prefect retries on the task
 
     # Combine failed records
     if failed_records_list:
