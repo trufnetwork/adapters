@@ -48,7 +48,7 @@ def test_chunk_size_robustness(chunk_size: int):
             if not chunk.empty:
                 yield chunk
 
-    streaming_result = process_raw_data_streaming(chunked_stream(), category_map, chunk_size=chunk_size)
+    streaming_result = process_raw_data_streaming(chunked_stream(), category_map)
 
     # Should produce same results regardless of chunk size
     assert_results_equivalent(original_result, streaming_result)
@@ -67,7 +67,7 @@ def test_memory_benefit_exists():
             yield large_dataset.iloc[i : i + chunk_size]
 
     # Should complete without memory errors
-    result = process_raw_data_streaming(chunked_stream(), category_map, chunk_size=10)
+    result = process_raw_data_streaming(chunked_stream(), category_map)
     
     # Basic sanity check
     assert len(result[2]) > 0, "Should produce some weighted average results"

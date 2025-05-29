@@ -253,10 +253,9 @@ class TestPreprocessFlowProcessDate:
 
         # Assert
         mock_raw_provider.has_data_for.assert_called_once_with(TEST_DATE)
-        mock_raw_provider.stream_raw_data_for.assert_called_once_with(TEST_DATE, chunk_size=25000)
+        mock_raw_provider.stream_raw_data_for.assert_called_once_with(TEST_DATE)
         mock_task_load_category_map.assert_called_once_with(url=preprocess_flow_instance.category_map_url)
         call_args = mock_process_raw_data_streaming.call_args[1]
-        assert call_args["chunk_size"] == 25000
         assert call_args["raw_data_stream"] == mock_raw_provider.stream_raw_data_for.return_value
         assert call_args["category_map_df"] == mock_category_map
 
@@ -460,7 +459,7 @@ class TestPreprocessFlowProcessDate:
             _ = await preprocess_flow_instance.process_date(TEST_DATE)
 
         mock_raw_provider.has_data_for.assert_called_once_with(TEST_DATE)
-        mock_raw_provider.stream_raw_data_for.assert_called_once_with(TEST_DATE, chunk_size=25000)
+        mock_raw_provider.stream_raw_data_for.assert_called_once_with(TEST_DATE)
         mock_process_raw_data_streaming.assert_called_once() # Verify it was called
         mock_processed_provider.save_processed_data.assert_not_called()
 
