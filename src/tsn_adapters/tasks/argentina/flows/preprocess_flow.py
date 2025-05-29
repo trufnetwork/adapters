@@ -9,7 +9,9 @@ This flow handles:
 """
 
 import asyncio
-from typing import Iterator, cast
+from collections.abc import Iterator
+import gc
+from typing import cast
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -59,18 +61,26 @@ def process_raw_data_streaming(
         if chunk.empty:
             continue
 
-        logger.info(f"Processing batch {i+1} with {len(chunk)} rows")
+        logger.info(f"Processing batch {i + 1} with {len(chunk)} rows")
 
         # Get weighted average for this chunk
         chunk_weighted_avg = SepaWeightedAvgPriceProductModel.from_sepa_product_data(chunk)
         batch_weighted_results.append(chunk_weighted_avg)
         total_processed += len(chunk)
 
-        # Periodically combine results to manage memory
-        if len(batch_weighted_results) >= 10:
+        # Explicitly delete the chunk to free memory immediately
+        del chunk
+
+        # More aggressive memory management - combine every 3 batches for large datasets
+        combine_frequency = 3 if total_processed > 500000 else 5  # Adapt frequency based on data size
+        if len(batch_weighted_results) >= combine_frequency:
             logger.info("Combining intermediate batch results to manage memory")
             combined = combine_weighted_averages(batch_weighted_results)
+            # Clear the list before reassigning to ensure old references are removed
+            batch_weighted_results.clear()
             batch_weighted_results = [combined]
+            # Force garbage collection to free memory
+            gc.collect()
 
     logger.info(f"Finished processing {total_processed} total rows in batches")
 
@@ -84,20 +94,30 @@ def process_raw_data_streaming(
 
     final_weighted_avg = combine_weighted_averages(batch_weighted_results)
 
+    # Clear batch results immediately after combining
+    batch_weighted_results.clear()
+    gc.collect()
+
     # Convert to standard model for backward compatibility with aggregation
     # Create a proper SepaAvgPriceProductModel DataFrame
     standard_data = {
-        'id_producto': final_weighted_avg['id_producto'],
-        'productos_descripcion': final_weighted_avg['productos_descripcion'], 
-        'productos_precio_lista_avg': final_weighted_avg['productos_precio_lista_avg'],
-        'date': final_weighted_avg['date']
+        "id_producto": final_weighted_avg["id_producto"],
+        "productos_descripcion": final_weighted_avg["productos_descripcion"],
+        "productos_precio_lista_avg": final_weighted_avg["productos_precio_lista_avg"],
+        "date": final_weighted_avg["date"],
     }
     avg_price_df = DataFrame[SepaAvgPriceProductModel](pd.DataFrame(standard_data))
 
     # Apply category mapping and aggregation
     categorized, uncategorized = aggregate_prices_by_category(category_map_df, avg_price_df)
 
-    logger.info(f"Final results: {len(categorized)} categorized, {len(uncategorized)} uncategorized, {len(final_weighted_avg)} weighted averages")
+    # Clean up intermediate data
+    del avg_price_df
+    gc.collect()
+
+    logger.info(
+        f"Final results: {len(categorized)} categorized, {len(uncategorized)} uncategorized, {len(final_weighted_avg)} weighted averages"
+    )
 
     return categorized, uncategorized, final_weighted_avg
 
@@ -111,11 +131,11 @@ def process_raw_data(
     """DEPRECATED: Use process_raw_data_streaming for better memory efficiency."""
     logger = get_run_logger()
     logger.warning("Using deprecated process_raw_data - consider switching to process_raw_data_streaming")
-    
+
     # Convert single DataFrame to iterator for compatibility
     def single_chunk_iterator():
         yield raw_data
-    
+
     return process_raw_data_streaming(single_chunk_iterator(), category_map_df)
 
 
@@ -185,11 +205,11 @@ class PreprocessFlow(ArgentinaFlowController):
 
         # Process the data using streaming approach
         logger.info("Processing raw data in batches with streaming")
-        
-        # Create data stream - configurable chunk size for memory optimization
-        chunk_size = 50000 # totally arbitrary
+
+        # Create data stream - reduced chunk size to lower memory pressure per batch
+        chunk_size = 25000  # Reduced from 50000 to reduce memory pressure
         raw_data_stream = self.raw_provider.stream_raw_data_for(date, chunk_size=chunk_size)
-        
+
         processed_data, uncategorized, weighted_avg_df = process_raw_data_streaming(
             raw_data_stream=raw_data_stream,
             category_map_df=category_map_df,

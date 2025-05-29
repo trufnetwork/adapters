@@ -56,11 +56,11 @@ def combine_weighted_averages(
     combined["weighted_sum"] = combined["productos_precio_lista_avg"] * combined["product_count"]
     
     # Group by product and date, summing the weighted values and counts
-    result = combined.groupby(["id_producto", "date"]).agg({
+    result = combined.groupby(["id_producto", "date"], as_index=False).agg({
         "productos_descripcion": "first",
         "weighted_sum": "sum",
         "product_count": "sum"
-    }).reset_index()
+    })
     
     # Calculate the new weighted average
     result["productos_precio_lista_avg"] = result["weighted_sum"] / result["product_count"]
