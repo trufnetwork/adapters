@@ -9,7 +9,7 @@ This flow handles:
 """
 
 import asyncio
-from typing import cast
+from typing import Iterator, cast
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -22,44 +22,101 @@ from prefect_aws import S3Bucket
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
-from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import (
+    SepaAvgPriceProductModel,
+    SepaWeightedAvgPriceProductModel,
+)
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
 from tsn_adapters.tasks.argentina.task_wrappers import task_load_category_map
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, CategoryMapDF, DateStr, SepaDF, UncategorizedDF
+from tsn_adapters.tasks.argentina.utils.weighted_average import combine_weighted_averages
 from tsn_adapters.utils.deroutine import force_sync
 
 
-@task(name="Process Raw Data")
-def process_raw_data(
-    raw_data: SepaDF,
+@task(name="Process Raw Data in Batches")
+def process_raw_data_streaming(
+    raw_data_stream: Iterator[SepaDF],
     category_map_df: CategoryMapDF,
-) -> tuple[AggregatedPricesDF, UncategorizedDF, DataFrame[SepaAvgPriceProductModel]]:
-    """Process raw SEPA data, calculate product averages, and aggregate by category.
+    chunk_size: int = 100000,
+) -> tuple[AggregatedPricesDF, UncategorizedDF, DataFrame[SepaWeightedAvgPriceProductModel]]:
+    """Process raw SEPA data in batches using streaming to minimize memory usage.
 
     Args:
-        raw_data: Raw SEPA data DataFrame.
+        raw_data_stream: Iterator yielding chunks of raw SEPA data.
         category_map_df: Category mapping DataFrame.
+        chunk_size: Size of each processing batch.
 
     Returns:
-        Tuple of (category aggregated data, uncategorized products, product average data).
+        Tuple of (category aggregated data, uncategorized products, weighted product average data).
     """
-    # Process the raw data
-    if raw_data.empty:
-        # Return empty DataFrames with correct types if raw data is empty
-        empty_avg_price_df = DataFrame[SepaAvgPriceProductModel](
-            pd.DataFrame(columns=list(SepaAvgPriceProductModel.to_schema().columns.keys()))
-        )
-        return cast(AggregatedPricesDF, pd.DataFrame()), cast(UncategorizedDF, pd.DataFrame()), empty_avg_price_df
+    logger = get_run_logger()
+    batch_weighted_results = []
+    total_processed = 0
 
-    # Get average price per product (This is the SepaAvgPriceProductModel DataFrame)
-    avg_price_df = SepaAvgPriceProductModel.from_sepa_product_data(raw_data)
+    # Process each chunk and collect weighted averages
+    for i, chunk in enumerate(raw_data_stream):
+        if chunk.empty:
+            continue
+
+        logger.info(f"Processing batch {i+1} with {len(chunk)} rows")
+
+        # Get weighted average for this chunk
+        chunk_weighted_avg = SepaWeightedAvgPriceProductModel.from_sepa_product_data(chunk)
+        batch_weighted_results.append(chunk_weighted_avg)
+        total_processed += len(chunk)
+
+        # Periodically combine results to manage memory
+        if len(batch_weighted_results) >= 10:
+            logger.info("Combining intermediate batch results to manage memory")
+            combined = combine_weighted_averages(batch_weighted_results)
+            batch_weighted_results = [combined]
+
+    logger.info(f"Finished processing {total_processed} total rows in batches")
+
+    # Combine all batch results into final weighted averages
+    if not batch_weighted_results:
+        logger.warning("No data processed - returning empty results")
+        empty_weighted_avg_df = DataFrame[SepaWeightedAvgPriceProductModel](
+            pd.DataFrame(columns=list(SepaWeightedAvgPriceProductModel.to_schema().columns.keys()))
+        )
+        return cast(AggregatedPricesDF, pd.DataFrame()), cast(UncategorizedDF, pd.DataFrame()), empty_weighted_avg_df
+
+    final_weighted_avg = combine_weighted_averages(batch_weighted_results)
+
+    # Convert to standard model for backward compatibility with aggregation
+    # Create a proper SepaAvgPriceProductModel DataFrame
+    standard_data = {
+        'id_producto': final_weighted_avg['id_producto'],
+        'productos_descripcion': final_weighted_avg['productos_descripcion'], 
+        'productos_precio_lista_avg': final_weighted_avg['productos_precio_lista_avg'],
+        'date': final_weighted_avg['date']
+    }
+    avg_price_df = DataFrame[SepaAvgPriceProductModel](pd.DataFrame(standard_data))
 
     # Apply category mapping and aggregation
     categorized, uncategorized = aggregate_prices_by_category(category_map_df, avg_price_df)
 
-    # Return all three DataFrames
-    return categorized, uncategorized, avg_price_df
+    logger.info(f"Final results: {len(categorized)} categorized, {len(uncategorized)} uncategorized, {len(final_weighted_avg)} weighted averages")
+
+    return categorized, uncategorized, final_weighted_avg
+
+
+# Keep the old function for backward compatibility but mark as deprecated
+@task(name="Process Raw Data")
+def process_raw_data(
+    raw_data: SepaDF,
+    category_map_df: CategoryMapDF,
+) -> tuple[AggregatedPricesDF, UncategorizedDF, DataFrame[SepaWeightedAvgPriceProductModel]]:
+    """DEPRECATED: Use process_raw_data_streaming for better memory efficiency."""
+    logger = get_run_logger()
+    logger.warning("Using deprecated process_raw_data - consider switching to process_raw_data_streaming")
+    
+    # Convert single DataFrame to iterator for compatibility
+    def single_chunk_iterator():
+        yield raw_data
+    
+    return process_raw_data_streaming(single_chunk_iterator(), category_map_df)
 
 
 @task(name="List Available Dates", cache_policy=CachePolicies.RUN_ID)
@@ -103,7 +160,7 @@ class PreprocessFlow(ArgentinaFlowController):
             await self.process_date(date)
 
     async def process_date(self, date: DateStr) -> None:
-        """Process data for a specific date.
+        """Process data for a specific date using streaming for memory efficiency.
 
         Args:
             date: Date to process (YYYY-MM-DD)
@@ -115,11 +172,10 @@ class PreprocessFlow(ArgentinaFlowController):
         logger = get_run_logger()
         self.validate_date(date)
 
-        logger.info(f"Processing {date}")
+        logger.info(f"Processing {date} using streaming approach")
 
-        # Get raw data
-        raw_data = self.raw_provider.get_raw_data_for(date)
-        if raw_data.empty:
+        # Check if data exists before processing
+        if not self.raw_provider.has_data_for(date):
             logger.warning(f"No data available for date: {date}, skipping processing.")
             return
 
@@ -127,19 +183,25 @@ class PreprocessFlow(ArgentinaFlowController):
         logger.info("Loading category mapping")
         category_map_df = task_load_category_map(url=self.category_map_url)
 
-        # Process the data - unpack all three results
-        logger.info("Processing raw data and aggregating categories")
-        processed_data, uncategorized, avg_price_df = process_raw_data(
-            raw_data=raw_data,
+        # Process the data using streaming approach
+        logger.info("Processing raw data in batches with streaming")
+        
+        # Create data stream - configurable chunk size for memory optimization
+        chunk_size = 50000  # Adjust based on available memory
+        raw_data_stream = self.raw_provider.stream_raw_data_for(date, chunk_size=chunk_size)
+        
+        processed_data, uncategorized, weighted_avg_df = process_raw_data_streaming(
+            raw_data_stream=raw_data_stream,
             category_map_df=category_map_df,
+            chunk_size=chunk_size,
             return_state=False,
         )
 
         # --- Save Product Averages ---
-        if not avg_price_df.empty:
+        if not weighted_avg_df.empty:
             logger.info("Saving product averages")
             try:
-                self.product_averages_provider.save_product_averages(date_str=date, data=avg_price_df)
+                self.product_averages_provider.save_product_averages(date_str=date, data=weighted_avg_df)
                 logger.info("Successfully saved product averages")
             except Exception as e:
                 logger.error(f"Failed to save product averages for {date}: {e}", exc_info=True)

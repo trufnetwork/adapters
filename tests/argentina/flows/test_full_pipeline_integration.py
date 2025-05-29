@@ -5,11 +5,11 @@ This test executes the aggregation, deployment, and insertion flows sequentially
 verifying the state of S3, database, TN, and Prefect variables at each stage.
 """
 
+from collections import defaultdict
 from datetime import datetime, timezone
 from functools import partial  # To pass verification args
 import inspect
 from typing import Any, Callable, Optional
-from collections import defaultdict
 
 from mypy_boto3_s3 import S3Client
 import pandas as pd
@@ -20,7 +20,6 @@ from prefect_aws import S3Bucket
 import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session as SqlaSession
-from tsn_adapters.flows.stream_deploy_flow import deploy_streams_flow
 from tests.argentina.helpers import upload_df_to_s3_csv_zip
 
 from tsn_adapters.blocks.models.sql_models import primitive_sources_table  # For DB verification
@@ -28,13 +27,13 @@ from tsn_adapters.blocks.sql_deployment_state import SqlAlchemyDeploymentState
 from tsn_adapters.blocks.sql_source_descriptor import SqlAlchemySourceDescriptor
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnRecordModel  # Import model for read_records
+from tsn_adapters.flows.stream_deploy_flow import deploy_streams_flow
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames
 from tsn_adapters.tasks.argentina.flows.aggregate_products_flow import aggregate_argentina_products_flow
 from tsn_adapters.tasks.argentina.flows.insert_products_flow import insert_argentina_products_flow
-from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaWeightedAvgPriceProductModel
 from tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks import _generate_stream_id  # type: ignore
 from tsn_adapters.utils.logging import get_logger_safe
-
 
 # === Helper Functions for Verification ===
 
@@ -350,6 +349,7 @@ async def test_full_argentina_pipeline(
                 "productos_descripcion": f"Product {k}",
                 "productos_precio_lista_avg": v[1],
                 "date": v[0],
+                "product_count": 1,  # Add required product_count column
             }
             for k, v in source_data_d1.items()
         ]
@@ -361,6 +361,7 @@ async def test_full_argentina_pipeline(
                 "productos_descripcion": f"Product {k}",
                 "productos_precio_lista_avg": v[1],
                 "date": v[0],
+                "product_count": 1,  # Add required product_count column
             }
             for k, v in source_data_d2.items()
         ]
@@ -372,13 +373,14 @@ async def test_full_argentina_pipeline(
                 "productos_descripcion": f"Product {k}",
                 "productos_precio_lista_avg": v[1],
                 "date": v[0],
+                "product_count": 1,  # Add required product_count column
             }
             for k, v in source_data_d3.items()
         ]
     )
-    data_d1 = SepaAvgPriceProductModel.validate(data_d1)
-    data_d2 = SepaAvgPriceProductModel.validate(data_d2)
-    data_d3 = SepaAvgPriceProductModel.validate(data_d3)
+    data_d1 = SepaWeightedAvgPriceProductModel.validate(data_d1)
+    data_d2 = SepaWeightedAvgPriceProductModel.validate(data_d2)
+    data_d3 = SepaWeightedAvgPriceProductModel.validate(data_d3)
 
     s3_base_path = "processed"
     datasets = {"2024-05-01": data_d1, "2024-05-02": data_d2, "2024-05-03": data_d3}
@@ -522,6 +524,7 @@ async def test_full_argentina_pipeline(
                 "productos_descripcion": f"Product {k}",
                 "productos_precio_lista_avg": v[1],
                 "date": v[0],
+                "product_count": 1,  # Add required product_count column
             }
             for k, v in source_data_d4.items()
         ]
@@ -533,12 +536,13 @@ async def test_full_argentina_pipeline(
                 "productos_descripcion": f"Product {k}",
                 "productos_precio_lista_avg": v[1],
                 "date": v[0],
+                "product_count": 1,  # Add required product_count column
             }
             for k, v in source_data_d5.items()
         ]
     )
-    data_d4 = SepaAvgPriceProductModel.validate(data_d4)
-    data_d5 = SepaAvgPriceProductModel.validate(data_d5)
+    data_d4 = SepaWeightedAvgPriceProductModel.validate(data_d4)
+    data_d5 = SepaWeightedAvgPriceProductModel.validate(data_d5)
     logger.info("Uploading resumption data (D4, D5) to S3...")
     upload_df_to_s3_csv_zip(s3_bucket_block, f"{s3_base_path}/2024-05-04/product_averages.zip", data_d4)
     upload_df_to_s3_csv_zip(s3_bucket_block, f"{s3_base_path}/2024-05-05/product_averages.zip", data_d5)
