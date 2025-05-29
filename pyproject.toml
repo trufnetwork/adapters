@@ -21,7 +21,7 @@ dependencies = [
     "psycopg2-binary",
     "prefect-aws",
     "bs4",
-    "tqdm"
+    "tqdm",
 ]
 
 [project.optional-dependencies]
