@@ -5,8 +5,11 @@ This flow reads daily average product prices, maps them to TN streams,
 transforms the data, inserts it into TN, and manages state.
 """
 
+from itertools import batched
+from typing import Generator, Sequence
+
 from pandera.typing import DataFrame
-from prefect import flow, get_run_logger
+from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.variables as variables  # Import prefect variables
 from prefect_aws import S3Bucket
@@ -27,12 +30,92 @@ from tsn_adapters.tasks.argentina.tasks import (
     transform_product_data,
 )
 
+StreamLocatorBatches = Sequence[Sequence[tn_client.StreamLocatorInput]]
 
-# Custom Exception for Deployment Check Failures
+
 class DeploymentCheckError(Exception):
     """Raised when required streams for a date are not deployed."""
 
     pass
+
+
+def process_stream_batches(
+    tn_block: TNAccessBlock,
+    batches: StreamLocatorBatches,
+) -> Generator[tn_client.StreamLocatorInput, None, None]:
+    """
+    Generator that processes stream existence batches and yields missing locators.
+    
+    Extracted as a standalone function for better testability and reusability.
+    Uses yield from to flatten batch results efficiently without accumulating
+    all results in memory before returning.
+    
+    Args:
+        tn_block: TNAccessBlock instance for API calls
+        batches: Sequence of batches, each containing stream locators to check
+        
+    Yields:
+        StreamLocatorInput: Individual missing stream locators
+        
+    Raises:
+        Exception: If any batch existence check fails
+    """
+    logger = get_run_logger()
+    
+    for batch_num, current_filter_batch in enumerate(batches, 1):
+        logger.debug(
+            f"Checking existence batch {batch_num}/{len(batches)} ({len(current_filter_batch)} locators)..."
+        )
+        
+        try:
+            missing_locators_in_batch = task_batch_filter_streams_by_existence(
+                block=tn_block, 
+                locators=list(current_filter_batch), 
+                return_existing=False  # Inverted: returns non-existent streams
+            )
+            
+            logger.debug(f"Batch {batch_num}: Found {len(missing_locators_in_batch)} non-existent streams.")
+            yield from missing_locators_in_batch
+            
+        except Exception as e:
+            logger.error(f"Failed to check existence for batch {batch_num}: {e}", exc_info=True)
+            raise
+
+
+@task(name="Batch Check Missing Streams")
+def task_batch_check_missing_streams(
+    tn_block: TNAccessBlock,
+    required_locators: list[tn_client.StreamLocatorInput],
+    max_filter_size: int,
+    date_str: str,
+    ) -> list[tn_client.StreamLocatorInput]:
+    """
+    Check which streams from the required list do not exist on TN using batched API calls.
+    
+    Uses a functional approach with generators to avoid API rate limits while maintaining
+    memory efficiency for large stream sets (65k+ streams observed in production).
+    
+    Args:
+        tn_block: TNAccessBlock instance for API calls
+        required_locators: List of stream locators to check
+        max_filter_size: Maximum number of streams per API batch (typically 500 to avoid rate limits)
+        date_str: Date string for logging context
+        
+    Returns:
+        List of missing stream locators (empty if all exist)
+        
+    Raises:
+        Exception: If any batch check fails
+    """
+    logger = get_run_logger()
+    logger.info(f"Checking existence for {len(required_locators)} streams for date {date_str}")
+    
+    locator_batches = list(batched(required_locators, max_filter_size))
+    logger.info(f"Processing {len(locator_batches)} batches (batch size: {max_filter_size}) for date {date_str}")
+    
+    all_missing_locators = list(process_stream_batches(tn_block, locator_batches))
+    logger.info(f"Found {len(all_missing_locators)} missing streams out of {len(required_locators)} total")
+    return all_missing_locators
 
 
 @flow(name="Insert Argentina SEPA Products to TN")
@@ -41,9 +124,8 @@ async def insert_argentina_products_flow(
     tn_block: TNAccessBlock,
     descriptor_block: PrimitiveSourcesDescriptorBlock,
     deployment_state: DeploymentStateBlock,
-    batch_size: int = 10000,  # Default batch size (empirically chosen to balance API load and memory)
+    batch_size: int = 1000,  # Default batch size (empirically chosen to balance API load and memory)
     max_filter_size: int = 500,  # Max number of streams per batch when filtering deployed streams
-    filter_deployed_streams: bool = True,
 ):
     """
     Inserts pre-calculated Argentina SEPA daily average product prices into TN streams.
@@ -237,19 +319,19 @@ State is managed by Prefect Variables.
                     continue
                 
                 try:
-                    # Check which of the required streams actually exist
-                    logger.debug(f"Checking for non-existent streams among {len(required_locators_list)} required locators...")
-                    missing_locators_result = task_batch_filter_streams_by_existence(
-                        block=tn_block, 
-                        locators=required_locators_list, 
-                        return_existing=False # Ask for non-existent ones
+                    # Check for missing streams using dedicated task
+                    missing_locators = task_batch_check_missing_streams(
+                        tn_block=tn_block,
+                        required_locators=required_locators_list,
+                        max_filter_size=max_filter_size,
+                        date_str=date_str
                     )
                     
-                    # The result is now the list of streams that DO NOT exist
-                    if missing_locators_result:
+                    # Check if any streams are missing
+                    if missing_locators:
                         missing_list_sample = [
                             (loc.get("data_provider", "N/A"), loc.get("stream_id", "N/A")) 
-                            for loc in missing_locators_result[:20]
+                            for loc in missing_locators[:20]
                         ]
                         error_msg = (
                             f"Halting flow: Date {date_str} cannot be processed because the following required streams "
@@ -258,7 +340,6 @@ State is managed by Prefect Variables.
                         logger.error(error_msg)
                         raise DeploymentCheckError(error_msg) 
                     else:
-                        # If the result is empty, all required streams exist
                         logger.info(f"All {len(required_locators_set)} required streams exist for date {date_str}. Proceeding to insertion.")
                         
                 except Exception as e_exist:
