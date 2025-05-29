@@ -187,7 +187,7 @@ class PreprocessFlow(ArgentinaFlowController):
         logger.info("Processing raw data in batches with streaming")
         
         # Create data stream - configurable chunk size for memory optimization
-        chunk_size = 50000  # Adjust based on available memory
+        chunk_size = 50000 # totally arbitrary
         raw_data_stream = self.raw_provider.stream_raw_data_for(date, chunk_size=chunk_size)
         
         processed_data, uncategorized, weighted_avg_df = process_raw_data_streaming(
