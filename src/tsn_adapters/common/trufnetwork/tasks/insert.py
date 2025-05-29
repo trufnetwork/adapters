@@ -99,7 +99,7 @@ def task_split_and_insert_records(
 def _task_only_batch_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-) -> Optional[list[str]]:
+) -> Optional[str]:
     """Insert records into TSN without waiting for transaction confirmation"""
     return block.batch_insert_tn_records(records=records)
 
@@ -110,7 +110,7 @@ def task_batch_insert_tn_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
     wait: bool = False,
-) -> Optional[list[str]]:
+) -> Optional[str]:
     """Batch insert records into multiple streams
 
     Args:
@@ -127,21 +127,20 @@ def task_batch_insert_tn_records(
     logging.info(f"Batch inserting {len(records)} records across {len(records['stream_id'].unique())} streams")
 
     # we use task so it may retry on network or nonce errors
-    tx_hashes = _task_only_batch_insert_records(block=block, records=records)
+    tx_hash = _task_only_batch_insert_records(block=block, records=records)
 
-    if wait and tx_hashes is not None:
+    if wait and tx_hash is not None:
         # we need to use task so it may retry on network errors
-        for tx_hash in tx_hashes:
-            task_wait_for_tx(block=block, tx_hash=tx_hash)
+        task_wait_for_tx(block=block, tx_hash=tx_hash)
 
-    return tx_hashes
+    return tx_hash
 
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_tn_records(
     block: TNAccessBlock,
     stream_id: str,
     records: DataFrame[TnRecordModel],
-) -> Optional[list[str]]:
+) -> Optional[str]:
     return block.insert_tn_records(stream_id, records)
 
 
@@ -323,14 +322,14 @@ def _perform_batch_insertions(
                 f"Submitting insertion batch {batch_num_log}/{len(split_records_batches)} ({len(batch)} records)..."
             )
             try:
-                tx_hashes_or_none = task_batch_insert_tn_records(
+                tx_hash_or_none = task_batch_insert_tn_records(
                     block=block,
                     records=batch,
                     wait=wait,
                 )
-                if tx_hashes_or_none:
-                    success_tx_hashes.extend(tx_hashes_or_none)
-                logger.debug(f"Insertion batch {batch_num_log} submitted. TXs: {tx_hashes_or_none}")
+                if tx_hash_or_none:
+                    success_tx_hashes.append(tx_hash_or_none)
+                logger.debug(f"Insertion batch {batch_num_log} submitted. TX: {tx_hash_or_none}")
             except Exception as e:
                 logger.error(f"Insertion batch {batch_num_log} failed: {e!s}", exc_info=True)
                 failed_records_list.append(batch)

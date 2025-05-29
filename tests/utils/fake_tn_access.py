@@ -68,7 +68,7 @@ class FakeInternalTNClient(tn_client.TNClient):
                 results.append(locator)
         return results
 
-    def batch_insert_records(self, batches: list[RecordBatch], wait: bool = False) -> list[str]:
+    def batch_insert_records(self, batches: list[RecordBatch], wait: bool = False) -> str:
         if self._error_on.get("batch_insert_records"):
             raise self._error_on["batch_insert_records"]
 
@@ -90,11 +90,7 @@ class FakeInternalTNClient(tn_client.TNClient):
             df["date"] = df["date"].astype(int)
             self._inserted_dataframes_history.append(PanderaDataFrame[TnDataRowModel](df))
 
-        return (
-            [f"fake_client_tx_hash_{idx+1}" for idx in range(len(self._inserted_dataframes_history))]
-            if self._inserted_dataframes_history and batches
-            else []
-        )
+        return f"fake_client_tx_hash_{len(self._inserted_dataframes_history)}"
 
     def deploy_stream(
         self, stream_id: str, stream_type: str = tn_client.STREAM_TYPE_PRIMITIVE, wait: bool = True
