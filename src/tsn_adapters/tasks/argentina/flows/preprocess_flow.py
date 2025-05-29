@@ -10,7 +10,6 @@ This flow handles:
 
 import asyncio
 from collections.abc import Iterator
-import gc
 from typing import cast
 
 import pandas as pd
@@ -53,73 +52,65 @@ def process_raw_data_streaming(
         Tuple of (category aggregated data, uncategorized products, weighted product average data).
     """
     logger = get_run_logger()
-    batch_weighted_results = []
+    
+    # Initialize accumulator for weighted averages only
+    cumulative_weighted_avg: DataFrame[SepaWeightedAvgPriceProductModel] | None = None
+
+    batch_count = 0
     total_processed = 0
 
-    # Process each chunk and collect weighted averages
-    for i, chunk in enumerate(raw_data_stream):
-        if chunk.empty:
+    for batch_data in raw_data_stream:
+        if batch_data.empty:
             continue
 
-        logger.info(f"Processing batch {i + 1} with {len(chunk)} rows")
+        batch_count += 1
+        current_batch_size = len(batch_data)
+        total_processed += current_batch_size
 
-        # Get weighted average for this chunk
-        chunk_weighted_avg = SepaWeightedAvgPriceProductModel.from_sepa_product_data(chunk)
-        batch_weighted_results.append(chunk_weighted_avg)
-        total_processed += len(chunk)
+        logger.info(f"Processing batch {batch_count} with {current_batch_size} rows")
 
-        # Explicitly delete the chunk to free memory immediately
-        del chunk
+        # Process current batch to weighted averages
+        batch_weighted_avg = SepaWeightedAvgPriceProductModel.from_sepa_product_data(batch_data)
+        
+        # IMMEDIATE COMBINE: Combine with cumulative result right away
+        if cumulative_weighted_avg is None:
+            # First batch - just store it
+            cumulative_weighted_avg = batch_weighted_avg
+        else:
+            # Combine with existing cumulative result immediately
+            cumulative_weighted_avg = combine_weighted_averages([cumulative_weighted_avg, batch_weighted_avg])
+        
+        # Clean up batch data immediately
+        del batch_data
+        del batch_weighted_avg
 
-        # More aggressive memory management - combine every 3 batches for large datasets
-        combine_frequency = 3 if total_processed > 500000 else 5  # Adapt frequency based on data size
-        if len(batch_weighted_results) >= combine_frequency:
-            logger.info("Combining intermediate batch results to manage memory")
-            combined = combine_weighted_averages(batch_weighted_results)
-            # Clear the list before reassigning to ensure old references are removed
-            batch_weighted_results.clear()
-            batch_weighted_results = [combined]
-            # Force garbage collection to free memory
-            gc.collect()
+    logger.info(f"Processed {batch_count} batches with {total_processed} total rows")
 
-    logger.info(f"Finished processing {total_processed} total rows in batches")
-
-    # Combine all batch results into final weighted averages
-    if not batch_weighted_results:
+    # Handle empty case
+    if cumulative_weighted_avg is None or cumulative_weighted_avg.empty:
         logger.warning("No data processed - returning empty results")
         empty_weighted_avg_df = DataFrame[SepaWeightedAvgPriceProductModel](
             pd.DataFrame(columns=list(SepaWeightedAvgPriceProductModel.to_schema().columns.keys()))
         )
         return cast(AggregatedPricesDF, pd.DataFrame()), cast(UncategorizedDF, pd.DataFrame()), empty_weighted_avg_df
 
-    final_weighted_avg = combine_weighted_averages(batch_weighted_results)
-
-    # Clear batch results immediately after combining
-    batch_weighted_results.clear()
-    gc.collect()
-
-    # Convert to standard model for backward compatibility with aggregation
-    # Create a proper SepaAvgPriceProductModel DataFrame
+    # Convert weighted averages to standard avg price format for aggregation (done once at the end)
     standard_data = {
-        "id_producto": final_weighted_avg["id_producto"],
-        "productos_descripcion": final_weighted_avg["productos_descripcion"],
-        "productos_precio_lista_avg": final_weighted_avg["productos_precio_lista_avg"],
-        "date": final_weighted_avg["date"],
+        "id_producto": cumulative_weighted_avg["id_producto"],
+        "productos_descripcion": cumulative_weighted_avg["productos_descripcion"],
+        "productos_precio_lista_avg": cumulative_weighted_avg["productos_precio_lista_avg"],
+        "date": cumulative_weighted_avg["date"],
     }
     avg_price_df = DataFrame[SepaAvgPriceProductModel](pd.DataFrame(standard_data))
 
-    # Apply category mapping and aggregation
+    # Apply category aggregation once at the end
     categorized, uncategorized = aggregate_prices_by_category(category_map_df, avg_price_df)
 
-    # Clean up intermediate data
-    del avg_price_df
-    gc.collect()
-
     logger.info(
-        f"Final results: {len(categorized)} categorized, {len(uncategorized)} uncategorized, {len(final_weighted_avg)} weighted averages"
+        f"Final results: {len(categorized)} categorized, {len(uncategorized)} uncategorized, {len(cumulative_weighted_avg)} weighted averages"
     )
 
-    return categorized, uncategorized, final_weighted_avg
+    return categorized, uncategorized, cumulative_weighted_avg
 
 
 # Keep the old function for backward compatibility but mark as deprecated
