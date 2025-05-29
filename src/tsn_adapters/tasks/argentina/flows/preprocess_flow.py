@@ -17,7 +17,6 @@ from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.cache_policies as CachePolicies
-from prefect.logging import get_run_logger
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
@@ -38,10 +37,9 @@ from tsn_adapters.utils.deroutine import force_sync
 def process_raw_data_streaming(
     raw_data_stream: Iterator[SepaDF],
     category_map_df: CategoryMapDF,
-    chunk_size: int = 100000,
 ) -> tuple[AggregatedPricesDF, UncategorizedDF, DataFrame[SepaWeightedAvgPriceProductModel]]:
     """Process raw SEPA data in batches using streaming to minimize memory usage.
-    
+
     MEMORY OPTIMIZATION: Implements periodic reset every 50 batches to prevent
     memory buildup that causes SIGKILL at batch 171.
 
@@ -54,10 +52,10 @@ def process_raw_data_streaming(
         Tuple of (category aggregated data, uncategorized products, weighted product average data).
     """
     logger = get_run_logger()
-    
+
     # Initialize accumulator for weighted averages only
     cumulative_weighted_avg: DataFrame[SepaWeightedAvgPriceProductModel] | None = None
-    
+
     # MEMORY OPTIMIZATION: Track and reset every 50 batches to prevent memory buildup
     reset_interval = 50
     all_weighted_results = []  # Store intermediate results
@@ -77,7 +75,7 @@ def process_raw_data_streaming(
 
         # Process current batch to weighted averages
         batch_weighted_avg = SepaWeightedAvgPriceProductModel.from_sepa_product_data(batch_data)
-        
+
         # IMMEDIATE COMBINE: Combine with cumulative result right away
         if cumulative_weighted_avg is None:
             # First batch - just store it
@@ -85,7 +83,7 @@ def process_raw_data_streaming(
         else:
             # Combine with existing cumulative result immediately
             cumulative_weighted_avg = combine_weighted_averages([cumulative_weighted_avg, batch_weighted_avg])
-        
+
         # Clean up batch data immediately
         del batch_data
         del batch_weighted_avg
@@ -97,6 +95,7 @@ def process_raw_data_streaming(
             cumulative_weighted_avg = None
             # Force garbage collection after reset
             import gc
+
             gc.collect()
 
     logger.info(f"Processed {batch_count} batches with {total_processed} total rows")
@@ -104,7 +103,7 @@ def process_raw_data_streaming(
     # Combine all intermediate results at the end
     if cumulative_weighted_avg is not None:
         all_weighted_results.append(cumulative_weighted_avg)
-    
+
     if not all_weighted_results:
         logger.warning("No data processed - returning empty results")
         empty_weighted_avg_df = DataFrame[SepaWeightedAvgPriceProductModel](
@@ -196,38 +195,31 @@ class PreprocessFlow(ArgentinaFlowController):
         """Process raw data for a specific date into aggregated prices."""
         logger = get_run_logger()
         self.validate_date(date_str)
-        
+
         if not self.raw_provider.has_data_for(date_str):
             logger.info(f"No raw data available for {date_str}")
             return
-        
+
         logger.info(f"Loading category map from {self.category_map_url}")
         category_map_df = task_load_category_map(url=self.category_map_url)
-        
-        # Stream raw data in chunks to avoid memory issues
-        chunk_size = 25000
-        
-        logger.info(f"Processing data for {date_str} with chunk size {chunk_size}")
-        raw_data_stream = self.raw_provider.stream_raw_data_for(date_str, chunk_size=chunk_size)
-        
+
+        logger.info(f"Processing data for {date_str}")
+        raw_data_stream = self.raw_provider.stream_raw_data_for(date_str)
+
         processed_data, uncategorized, avg_price_df = process_raw_data_streaming(
             raw_data_stream=raw_data_stream,
             category_map_df=category_map_df,
-            chunk_size=chunk_size,
             return_state=False,
         )
-        
+
         # Save product averages if they exist (but continue if save fails)
         if not avg_price_df.empty:
             try:
-                self.product_averages_provider.save_product_averages(
-                    date_str=date_str,
-                    data=avg_price_df
-                )
+                self.product_averages_provider.save_product_averages(date_str=date_str, data=avg_price_df)
                 logger.info(f"Saved {len(avg_price_df)} product averages for {date_str}")
             except Exception as e:
                 logger.error(f"Failed to save product averages for {date_str}: {e}")
-        
+
         # Save processed data
         self.processed_provider.save_processed_data(
             date_str=date_str,
@@ -235,7 +227,7 @@ class PreprocessFlow(ArgentinaFlowController):
             uncategorized=uncategorized,
             logs=b"",  # TODO: Implement logging collection
         )
-        
+
         # Generate summary
         self._create_summary(date_str, processed_data, uncategorized)
 
