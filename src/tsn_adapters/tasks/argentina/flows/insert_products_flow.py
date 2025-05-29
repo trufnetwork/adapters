@@ -13,14 +13,14 @@ from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.variables as variables  # Import prefect variables
 from prefect_aws import S3Bucket
+import trufnetwork_sdk_py.client as tn_client
 
 from tsn_adapters.blocks.deployment_state import DeploymentStateBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
 from tsn_adapters.blocks.tn_access import TNAccessBlock, extract_stream_locators
-from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.tn import task_batch_filter_streams_by_existence
-import trufnetwork_sdk_py.client as tn_client
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames  # Import config
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
@@ -210,10 +210,13 @@ State is managed by Prefect Variables.
             )
             return  # Exit gracefully if no dates
 
+        # IMPORTANT: Freeze the date list to prevent mid-loop variable updates from affecting processing
+        dates_to_process_frozen = list(dates_to_process)  # Create immutable copy
         logger.info(
-            f"Determined {len(dates_to_process)} dates to process via task: "
-            f"{dates_to_process[0]} to {dates_to_process[-1]}"
+            f"Determined {len(dates_to_process_frozen)} dates to process via task: "
+            f"{dates_to_process_frozen[0]} to {dates_to_process_frozen[-1]}"
         )
+        logger.info(f"Full date list (frozen): {dates_to_process_frozen}")
     except Exception as e:
         logger.critical(f"Fatal Error: Failed to determine dates to process using task: {e}", exc_info=True)
         raise  # Fatal: Cannot proceed if date determination fails
@@ -226,9 +229,9 @@ State is managed by Prefect Variables.
     last_processed_date_str = (
         ArgentinaFlowVariableNames.DEFAULT_DATE
     )  # Variable to track the last successfully processed date
-    first_processed_date_str = dates_to_process[0]
+    first_processed_date_str = dates_to_process_frozen[0]
 
-    for date_str in dates_to_process:
+    for date_str in dates_to_process_frozen:
         logger.info(f"--- Processing date: {date_str} ---")
         try:
             # Step 10a: Load daily averages for the current date
@@ -246,10 +249,12 @@ State is managed by Prefect Variables.
             # --- Deployment Status Check (Moved Before Transformation/Insertion) ---
             # Get unique product IDs for this date
             product_ids_for_date: set[str] = set(daily_avg_df["id_producto"].unique())
+            logger.info(f"Found {len(product_ids_for_date)} unique product IDs for date {date_str}")
 
             # Business mapping: external 'id_producto' -> TN 'stream_id' (per ARG SEPA spec)
             descriptor_subset = descriptor_df[descriptor_df["source_id"].isin(product_ids_for_date)]
             required_stream_ids: list[str] = descriptor_subset["stream_id"].tolist()
+            logger.info(f"Mapped to {len(required_stream_ids)} required stream IDs for date {date_str}")
 
             if not required_stream_ids:
                 # This indicates missing mappings in the descriptor for products present in daily data
@@ -260,14 +265,16 @@ State is managed by Prefect Variables.
 
             # Check if all required streams are deployed
             try:
-                logger.debug(
-                    f"Checking deployment status for {len(required_stream_ids)} required streams for date {date_str}..."
+                logger.info(
+                    f"Starting deployment status check for {len(required_stream_ids)} required streams for date {date_str}..."
                 )
                 stream_deployment_status: dict[str, bool] = deployment_state.check_multiple_streams(required_stream_ids)
+                logger.info(f"Deployment status check completed for date {date_str}")
 
                 undeployed_streams = [
                     sid for sid in required_stream_ids if not stream_deployment_status.get(sid, False)
                 ]
+                logger.info(f"Found {len(undeployed_streams)} undeployed streams out of {len(required_stream_ids)} total for date {date_str}")
 
                 if undeployed_streams:
                     error_msg = (
@@ -284,6 +291,10 @@ State is managed by Prefect Variables.
             except Exception as e_state:
                 error_msg = f"Halting flow: Failed to check deployment status for date {date_str}: {e_state}."
                 logger.error(error_msg, exc_info=True)
+                # Log the exact exception type and details for debugging
+                logger.error(f"Exception type: {type(e_state).__name__}")
+                logger.error(f"Exception args: {e_state.args}")
+                logger.error(f"Exception string: {str(e_state)}")
                 raise DeploymentCheckError(error_msg) from e_state  # Re-raise to stop flow
             # --- End Deployment Status Check ---
 
@@ -345,6 +356,10 @@ State is managed by Prefect Variables.
                 except Exception as e_exist:
                     error_msg = f"Halting flow: Failed during pre-insertion stream existence check for date {date_str}: {e_exist}."
                     logger.error(error_msg, exc_info=True)
+                    # Log the exact exception type and details for debugging  
+                    logger.error(f"Stream existence check - Exception type: {type(e_exist).__name__}")
+                    logger.error(f"Stream existence check - Exception args: {e_exist.args}")
+                    logger.error(f"Stream existence check - Exception string: {str(e_exist)}")
                     raise DeploymentCheckError(error_msg) from e_exist
                 # === End Pre-insertion Stream Existence Check ===
 
@@ -385,10 +400,10 @@ State is managed by Prefect Variables.
                 f"Updated {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE} to {last_processed_date_str}"
             )
 
-        except DeploymentCheckError:
-            # Logged sufficiently above, re-raise to halt the flow run
-            logger.error("Deployment check failed. Halting flow run.")
-            raise
+        except DeploymentCheckError as e:
+            # Preserve the original error message instead of masking it
+            logger.error(f"Deployment check failed for date {date_str}. Original error: {e}")
+            raise  # Re-raise with original error intact
         except Exception as e:
             # Catch other errors during load, transform, insert for this specific date
             logger.critical(f"Fatal Error processing date {date_str}: {e}", exc_info=True)
