@@ -29,7 +29,6 @@ from tsn_adapters.tasks.argentina.models.sepa.sepa_models import (
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.provider.s3 import RawDataProvider
 from tsn_adapters.tasks.argentina.task_wrappers import task_load_category_map
-from tsn_adapters.tasks.argentina.tasks import process_raw_data_streaming, task_load_category_map
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, CategoryMapDF, DateStr, SepaDF, UncategorizedDF
 from tsn_adapters.tasks.argentina.utils.weighted_average import combine_weighted_averages
 from tsn_adapters.utils.deroutine import force_sync
@@ -94,12 +93,11 @@ def process_raw_data_streaming(
         # MEMORY OPTIMIZATION: Reset every 50 batches to prevent memory buildup
         if batch_count % reset_interval == 0:
             logger.info(f"MEMORY RESET: Saving intermediate result at batch {batch_count}")
-            if cumulative_weighted_avg is not None:
-                all_weighted_results.append(cumulative_weighted_avg.copy())
-                cumulative_weighted_avg = None
-                # Force garbage collection after reset
-                import gc
-                gc.collect()
+            all_weighted_results.append(cumulative_weighted_avg.copy())
+            cumulative_weighted_avg = None
+            # Force garbage collection after reset
+            import gc
+            gc.collect()
 
     logger.info(f"Processed {batch_count} batches with {total_processed} total rows")
 
@@ -216,6 +214,7 @@ class PreprocessFlow(ArgentinaFlowController):
             raw_data_stream=raw_data_stream,
             category_map_df=category_map_df,
             chunk_size=chunk_size,
+            return_state=False,
         )
         
         # Save product averages if they exist (but continue if save fails)
@@ -234,7 +233,7 @@ class PreprocessFlow(ArgentinaFlowController):
             date_str=date_str,
             data=processed_data,
             uncategorized=uncategorized,
-            logs=[],  # TODO: Implement logging collection
+            logs=b"",  # TODO: Implement logging collection
         )
         
         # Generate summary
