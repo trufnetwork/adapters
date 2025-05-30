@@ -3,12 +3,13 @@ S3-based data providers for Argentina SEPA data.
 """
 
 import re
+from typing import Iterator
 
 from prefect_aws import S3Bucket
 
 from tsn_adapters.common.interfaces.provider import IProviderGetter
 from tsn_adapters.tasks.argentina.provider.base import SepaS3BaseProvider
-from tsn_adapters.tasks.argentina.provider.data_processor import process_sepa_zip
+from tsn_adapters.tasks.argentina.provider.data_processor import process_sepa_zip, process_sepa_zip_streaming
 from tsn_adapters.tasks.argentina.types import AggregatedPricesDF, DateStr, SepaDF, UncategorizedDF
 
 
@@ -27,9 +28,35 @@ class RawDataProvider(SepaS3BaseProvider[SepaDF]):
         super().__init__(prefix="source_data/", s3_block=s3_block)
 
     def get_raw_data_for(self, date: DateStr) -> SepaDF:
-        """Get raw data for specific date"""
+        """Get raw data for specific date - DEPRECATED: Use stream_raw_data_for() for memory efficiency"""
         file_key = self.to_file_key(date)
         return process_sepa_zip(self.create_reader(file_key), date, "sepa")
+
+    def stream_raw_data_for(self, date: DateStr, chunk_size: int = 100000) -> Iterator[SepaDF]:
+        """
+        Stream raw data for specific date in chunks for memory-efficient processing.
+        
+        Args:
+            date: Date to process (YYYY-MM-DD)
+            chunk_size: Number of rows per chunk
+            
+        Yields:
+            SepaDF chunks of the specified size
+        """
+        file_key = self.to_file_key(date)
+        
+        # Use the new streaming processor that handles chunking at the source
+        yield from process_sepa_zip_streaming(
+            self.create_reader(file_key), 
+            date, 
+            "sepa", 
+            chunk_size=chunk_size
+        )
+
+    def has_data_for(self, date: DateStr) -> bool:
+        """Check if data exists for the given date without loading it."""
+        file_key = self.to_file_key(date)
+        return self.path_exists(file_key)
 
 
 class ProcessedDataProvider(

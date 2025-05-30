@@ -49,9 +49,9 @@ class SepaProductosAlternativeModel(type(BaseModel), pa.DataFrameModel):
         date: str,
         lines: list[str],
         logger: Logger,
-    ) -> DataFrame[T]:
+    ) -> DataFrame["SepaProductosAlternativeModel"]:
         """
-        Read the CSV file and return the core model.
+        Read the CSV file and return the alternative model DataFrame.
         """
 
         text_content = "\n".join(lines)
@@ -76,7 +76,7 @@ class SepaProductosAlternativeModel(type(BaseModel), pa.DataFrameModel):
         df = filter_failures(df, cls)
         if len(df) < original_len:
             logger.warning(f"Filtered out {original_len - len(df)} invalid rows")
-        return cast(DataFrame[T], df)
+        return cast(DataFrame[SepaProductosAlternativeModel], df)
 
 
 class SepaProductosDataModel(SepaProductosAlternativeModel):
@@ -206,6 +206,59 @@ class SepaAvgPriceProductModel(ProductDescriptionModel):
 
         df = filter_failures(with_average_price, cls)
 
+        return df
+
+
+class SepaWeightedAvgPriceProductModel(SepaAvgPriceProductModel):
+    """
+    Pandera model for product descriptions with weighted average prices.
+    Includes count for future weighted averaging operations.
+    """
+
+    product_count: Series[int]  # Number of products that contributed to the average
+
+    class Config(SepaAvgPriceProductModel.Config):
+        strict = "filter"
+        coerce = True
+
+    @classmethod
+    def from_sepa_product_data(
+        cls: type["SepaWeightedAvgPriceProductModel"],
+        data: DataFrame[SepaProductosDataModel],
+    ) -> DataFrame["SepaWeightedAvgPriceProductModel"]:
+        """
+        Create weighted average price model with counts from raw SEPA data.
+        
+        This allows for proper weighted averaging when combining datasets later.
+        """
+        with_weighted_average = (
+            data.groupby(["id_producto", "date"])
+            .agg(
+                {
+                    "id_producto": "first",
+                    "productos_precio_lista": ["mean", "count"],
+                    "productos_descripcion": "first", 
+                    "date": "first",
+                }
+            )
+            .reset_index(drop=True)
+        )
+
+        # Flatten the multi-level column names
+        with_weighted_average.columns = [
+            "id_producto",
+            "productos_precio_lista_avg",
+            "product_count",
+            "productos_descripcion",
+            "date",
+        ]
+
+        # Reorder columns to match expected schema
+        with_weighted_average = with_weighted_average[
+            ["id_producto", "productos_descripcion", "productos_precio_lista_avg", "date", "product_count"]
+        ]
+
+        df = filter_failures(with_weighted_average, cls)
         return df
 
 

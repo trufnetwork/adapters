@@ -2,18 +2,21 @@
 S3 provider for handling Argentina SEPA product average data.
 """
 
-from pandera.typing import DataFrame
-from prefect_aws import S3Bucket
 import re
 
-from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
+from pandera.typing import DataFrame
+from prefect_aws import S3Bucket
+
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import (
+    SepaWeightedAvgPriceProductModel,
+)
 from tsn_adapters.tasks.argentina.provider.base import SepaS3BaseProvider
 from tsn_adapters.tasks.argentina.types import DateStr
 
 
-class ProductAveragesProvider(SepaS3BaseProvider[DataFrame[SepaAvgPriceProductModel]]):
+class ProductAveragesProvider(SepaS3BaseProvider[DataFrame[SepaWeightedAvgPriceProductModel]]):
     """
-    Handles reading and writing of processed product average data
+    Handles reading and writing of processed product average data with counts
     in the 'processed/' prefix of the S3 bucket.
     """
 
@@ -54,30 +57,30 @@ class ProductAveragesProvider(SepaS3BaseProvider[DataFrame[SepaAvgPriceProductMo
         """
         return f"{date}/product_averages.zip"
 
-    def save_product_averages(self, date_str: DateStr, data: DataFrame[SepaAvgPriceProductModel]) -> None:
+    def save_product_averages(self, date_str: DateStr, data: DataFrame[SepaWeightedAvgPriceProductModel]) -> None:
         """
-        Saves the product average DataFrame to the designated S3 location as a compressed CSV.
+        Saves the weighted product average DataFrame to the designated S3 location as a compressed CSV.
 
         Args:
             date_str: The date string ('YYYY-MM-DD') for which the data is being saved.
-            data: The DataFrame containing product average data conforming to SepaAvgPriceProductModel.
+            data: The DataFrame containing weighted product average data conforming to SepaWeightedAvgPriceProductModel.
         """
         file_key = self.to_product_averages_file_key(date_str)
         self.write_csv(file_key, data)
 
-    def get_product_averages_for(self, key: DateStr) -> DataFrame[SepaAvgPriceProductModel]:
+    def get_product_averages_for(self, key: DateStr) -> DataFrame[SepaWeightedAvgPriceProductModel]:
         """
-        Retrieves the product average DataFrame from S3 for a specific date.
+        Retrieves the weighted product average DataFrame from S3 for a specific date.
 
         Args:
             key: The date string ('YYYY-MM-DD') to retrieve data for.
 
         Returns:
-            A DataFrame containing the product average data.
+            A DataFrame containing the weighted product average data.
         """
         file_key = self.to_product_averages_file_key(key)
         # Cast the result of read_csv to the specific Pandera DataFrame type
-        return DataFrame[SepaAvgPriceProductModel](self.read_csv(file_key))
+        return DataFrame[SepaWeightedAvgPriceProductModel](self.read_csv(file_key))
 
     def exists(self, key: DateStr) -> bool:
         """

@@ -1,4 +1,5 @@
 import pandas as pd
+from pandera.typing import DataFrame
 import pytest
 
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import (
@@ -35,7 +36,7 @@ def sample_alt1_data():
     return df
 
 
-def test_alt1_to_core_model_conversion(sample_alt1_data):
+def test_alt1_to_core_model_conversion(sample_alt1_data: DataFrame[SepaProductosDataModelAlt1]):
     """Test conversion from alternative model 1 to core model."""
     # Convert alt1 to core model
     core_df = SepaProductosDataModelAlt1.to_core_model(sample_alt1_data)
@@ -47,7 +48,7 @@ def test_alt1_to_core_model_conversion(sample_alt1_data):
     assert all(core_df.id_producto == sample_alt1_data.id_producto)
 
 
-def test_product_description_model_creation(sample_core_data):
+def test_product_description_model_creation(sample_core_data: DataFrame[SepaProductosDataModel]):
     """Test creation of ProductDescriptionModel from core data."""
     desc_df = ProductDescriptionModel.from_sepa_product_data(sample_core_data)
 
@@ -58,7 +59,7 @@ def test_product_description_model_creation(sample_core_data):
     assert len(desc_df) == len(desc_df.drop_duplicates())
 
 
-def test_avg_price_product_model_creation(sample_core_data):
+def test_avg_price_product_model_creation(sample_core_data: DataFrame[SepaProductosDataModel]):
     """Test creation of SepaAvgPriceProductModel from core data."""
     avg_price_df = SepaAvgPriceProductModel.from_sepa_product_data(sample_core_data)
 
@@ -72,7 +73,7 @@ def test_avg_price_product_model_creation(sample_core_data):
     assert avg_prices == original_prices  # In this case they're the same since we have no duplicates
 
 
-def test_model_validation():
+def test_model_validation(sample_core_data: DataFrame[SepaProductosDataModel]):
     """Test model validation with invalid data."""
     invalid_data = {
         "id_producto": ["1"],
@@ -87,7 +88,7 @@ def test_model_validation():
         SepaProductosDataModel.validate(df)
 
 
-def test_has_columns_detection():
+def test_has_columns_detection(sample_core_data: DataFrame[SepaProductosDataModel], sample_alt1_data: DataFrame[SepaProductosDataModelAlt1]):
     """Test the column detection functionality."""
     core_header = "id_producto|productos_descripcion|productos_precio_lista|date"
     alt1_header = "id_producto|productos_descripcion|precio_unitario_bulto_por_unidad_venta_con_iva|date"

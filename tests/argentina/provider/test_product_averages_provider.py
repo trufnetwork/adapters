@@ -5,7 +5,7 @@ from pandera.typing import DataFrame
 from prefect_aws import S3Bucket
 import pytest
 
-from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
+from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaWeightedAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider.product_averages import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.types import DateStr
 
@@ -23,16 +23,17 @@ def provider(mock_s3_block: MagicMock) -> ProductAveragesProvider:
 
 
 @pytest.fixture
-def sample_avg_price_data() -> DataFrame[SepaAvgPriceProductModel]:
-    """Fixture for sample SepaAvgPriceProductModel data."""
+def sample_avg_price_data() -> DataFrame[SepaWeightedAvgPriceProductModel]:
+    """Fixture for sample SepaWeightedAvgPriceProductModel data."""
     data = {
         "id_producto": ["prod1", "prod2"],
         "productos_descripcion": ["Product 1", "Product 2"],
         "productos_precio_lista_avg": [100.50, 200.75],
         "date": ["2023-01-01", "2023-01-01"],
+        "product_count": [1, 1],  # Add required product_count column
     }
     # Cast to the specific Pandera DataFrame type
-    return DataFrame[SepaAvgPriceProductModel](pd.DataFrame(data))
+    return DataFrame[SepaWeightedAvgPriceProductModel](pd.DataFrame(data))
 
 
 def test_to_product_averages_file_key():
@@ -47,7 +48,7 @@ def test_to_product_averages_file_key():
 def test_save_product_averages(
     mock_write_csv: MagicMock,
     provider: ProductAveragesProvider,
-    sample_avg_price_data: DataFrame[SepaAvgPriceProductModel],
+    sample_avg_price_data: DataFrame[SepaWeightedAvgPriceProductModel],
 ):
     """Test that save_product_averages calls write_csv with correct relative key and data."""
     test_date: DateStr = DateStr("2023-01-01")
@@ -65,7 +66,7 @@ def test_save_product_averages(
 def test_get_product_averages_for(
     mock_read_csv: MagicMock,
     provider: ProductAveragesProvider,
-    sample_avg_price_data: DataFrame[SepaAvgPriceProductModel],
+    sample_avg_price_data: DataFrame[SepaWeightedAvgPriceProductModel],
 ):
     """Test that get_product_averages_for calls read_csv with correct relative key and returns data."""
     test_date: DateStr = DateStr("2023-01-01")
@@ -75,7 +76,7 @@ def test_get_product_averages_for(
     result = provider.get_product_averages_for(test_date)
 
     mock_read_csv.assert_called_once_with(expected_relative_key) # Assert relative key
-    SepaAvgPriceProductModel.validate(result)
+    SepaWeightedAvgPriceProductModel.validate(result)
     pd.testing.assert_frame_equal(result, sample_avg_price_data)
 
 

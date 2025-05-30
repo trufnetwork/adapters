@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -60,6 +60,50 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
             self.logger.error(f"Failed to get SQLAlchemy engine from connector: {e}", exc_info=True)
             raise
 
+    def _execute_with_retry(self, stmt: Any, operation_name: str) -> Any:
+        """
+        Execute a SQL statement with automatic connection retry logic.
+        
+        Handles stale connections by detecting connection errors and disposing 
+        the connection pool to force fresh connections.
+        
+        Args:
+            stmt: SQLAlchemy statement to execute
+            operation_name: Description of the operation for logging
+            
+        Returns:
+            Query result from connection.execute()
+            
+        Raises:
+            SQLAlchemyError: If operation fails after all retries
+        """
+        engine = self._get_engine()
+        max_retries = 2
+        
+        for attempt in range(max_retries):
+            try:
+                with engine.connect() as connection:
+                    return connection.execute(stmt).fetchall()
+            except SQLAlchemyError as e:
+                error_msg = str(e).lower()
+                is_connection_error = any(
+                    keyword in error_msg 
+                    for keyword in ['ssl syscall', 'eof detected', 'connection', 'closed', 'broken', 'operationalerror']
+                )
+                
+                if is_connection_error and attempt < max_retries - 1:
+                    self.logger.warning(
+                        f"Connection error during {operation_name} (attempt {attempt + 1}/{max_retries}): {e}. "
+                        f"Disposing connection pool and retrying..."
+                    )
+                    engine.dispose()
+                    continue
+                else:
+                    self.logger.error(f"Database error during {operation_name}: {e}", exc_info=True)
+                    raise
+        
+        raise SQLAlchemyError(f"Failed to execute {operation_name} after {max_retries} attempts")
+
     # --- Read Methods  ---
     def has_been_deployed(self, stream_id: str) -> bool:
         """Check if the deployment has been performed for a given stream_id."""
@@ -82,10 +126,10 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
             raise  # Re-raise after logging
 
     def check_multiple_streams(self, stream_ids: list[str]) -> dict[str, bool]:
-        """Check deployment status for multiple stream_ids."""
+        """Check deployment status for multiple stream_ids with connection retry logic."""
         if not stream_ids:
             return {}
-        engine = self._get_engine()
+        
         unique_ids = list(set(filter(None, stream_ids)))
         if not unique_ids:
             return {}
@@ -97,18 +141,15 @@ class SqlAlchemyDeploymentState(DeploymentStateBlock):
             )
         )
         results = {stream_id: False for stream_id in unique_ids}  # Initialize all as False
+        
         try:
-            with engine.connect() as connection:
-                db_results = connection.execute(stmt).fetchall()
-                for stream_id, is_deployed in db_results:
-                    results[stream_id] = bool(is_deployed)
+            db_results = self._execute_with_retry(stmt, "deployment status check")
+            for stream_id, is_deployed in db_results:
+                results[stream_id] = bool(is_deployed)
             return results
-        except SQLAlchemyError as e:
-            self.logger.error(f"Database error checking multiple deployments: {e}", exc_info=True)
-            raise  # Re-raise after logging
         except Exception as e:
             self.logger.error(f"Unexpected error checking multiple deployments: {e}", exc_info=True)
-            raise  # Re-raise after logging
+            raise
 
     def get_deployment_states(self) -> DataFrame[DeploymentStateModel]:
         """Retrieve the deployment states (stream_id and nullable deployment_timestamp)

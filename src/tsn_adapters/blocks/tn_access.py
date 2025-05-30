@@ -11,6 +11,7 @@ from typing import (
     Union,
     cast,
 )
+import warnings
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -473,7 +474,13 @@ class TNAccessBlock(Block):
     @handle_tn_errors
     def insert_tn_records(
         self, stream_id: str, records: DataFrame[TnRecordModel], records_per_batch: int = 300
-    ) -> Optional[list[str]]:
+    ) -> Optional[str]:
+        warnings.warn(
+            "insert_tn_records is deprecated. Use batch_insert_tn_records for better performance and batch processing.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+    
         # Filter out records where value is zero
         if 'value' in records.columns and not records.empty:
             original_count = len(records)
@@ -499,16 +506,16 @@ class TNAccessBlock(Block):
                 raise ValueError(f"Missing required column '{col}' in records DataFrame.")
 
         with concurrency("tn-write", occupy=1):
-            tx_hashes = self.client.batch_insert_records(batches)
+            tx_hash = self.client.batch_insert_records(batches)
             self.logger.debug(f"Inserted {len(records)} records into stream {stream_id}")
 
-        return tx_hashes
+        return tx_hash
 
     @handle_tn_errors
     def batch_insert_tn_records(
         self,
         records: DataFrame[TnDataRowModel],
-    ) -> Optional[list[str]]:
+    ) -> Optional[str]:
         """Batch insert records into multiple streams.
 
         Args:
@@ -555,12 +562,10 @@ class TNAccessBlock(Block):
             return None
 
         with concurrency("tn-write", occupy=1):
-            tx_hashes = self.client.batch_insert_records(
+            return self.client.batch_insert_records(
                 batches=batches,
                 wait=False,
             )
-
-            return tx_hashes
 
     @handle_tn_errors
     def wait_for_tx(self, tx_hash: str) -> None:

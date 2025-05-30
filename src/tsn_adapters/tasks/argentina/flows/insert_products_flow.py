@@ -5,19 +5,22 @@ This flow reads daily average product prices, maps them to TN streams,
 transforms the data, inserts it into TN, and manages state.
 """
 
+from collections.abc import Generator, Sequence
+from itertools import batched
+
 from pandera.typing import DataFrame
-from prefect import flow, get_run_logger
+from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.variables as variables  # Import prefect variables
 from prefect_aws import S3Bucket
+import trufnetwork_sdk_py.client as tn_client
 
 from tsn_adapters.blocks.deployment_state import DeploymentStateBlock
 from tsn_adapters.blocks.primitive_source_descriptor import PrimitiveSourceDataModel, PrimitiveSourcesDescriptorBlock
 from tsn_adapters.blocks.tn_access import TNAccessBlock, extract_stream_locators
-from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.common.trufnetwork.tn import task_batch_filter_streams_by_existence
-import trufnetwork_sdk_py.client as tn_client
 from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames  # Import config
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
@@ -27,12 +30,128 @@ from tsn_adapters.tasks.argentina.tasks import (
     transform_product_data,
 )
 
+StreamLocatorBatches = Sequence[Sequence[tn_client.StreamLocatorInput]]
 
-# Custom Exception for Deployment Check Failures
+
 class DeploymentCheckError(Exception):
     """Raised when required streams for a date are not deployed."""
 
     pass
+
+
+def process_stream_batches(
+    tn_block: TNAccessBlock,
+    batches: StreamLocatorBatches,
+) -> Generator[tn_client.StreamLocatorInput, None, None]:
+    """
+    Generator that processes stream existence batches and yields missing locators.
+    
+    Extracted as a standalone function for better testability and reusability.
+    Uses yield from to flatten batch results efficiently without accumulating
+    all results in memory before returning.
+    
+    Args:
+        tn_block: TNAccessBlock instance for API calls
+        batches: Sequence of batches, each containing stream locators to check
+        
+    Yields:
+        StreamLocatorInput: Individual missing stream locators
+        
+    Raises:
+        Exception: If any batch existence check fails
+    """
+    logger = get_run_logger()
+    
+    for batch_num, current_filter_batch in enumerate(batches, 1):
+        logger.debug(
+            f"Checking existence batch {batch_num}/{len(batches)} ({len(current_filter_batch)} locators)..."
+        )
+        
+        try:
+            missing_locators_in_batch = task_batch_filter_streams_by_existence(
+                block=tn_block, 
+                locators=list(current_filter_batch), 
+                return_existing=False  # Inverted: returns non-existent streams
+            )
+            
+            logger.debug(f"Batch {batch_num}: Found {len(missing_locators_in_batch)} non-existent streams.")
+            yield from missing_locators_in_batch
+            
+        except Exception as e:
+            logger.error(f"Failed to check existence for batch {batch_num}: {e}", exc_info=True)
+            raise
+
+
+@task(name="Batch Check Missing Streams")
+def task_batch_check_missing_streams(
+    tn_block: TNAccessBlock,
+    required_locators: list[tn_client.StreamLocatorInput],
+    max_filter_size: int,
+    date_str: str,
+    ) -> list[tn_client.StreamLocatorInput]:
+    """
+    Check which streams from the required list do not exist on TN using batched API calls.
+    
+    Uses a functional approach with generators to avoid API rate limits while maintaining
+    memory efficiency for large stream sets (65k+ streams observed in production).
+    
+    Args:
+        tn_block: TNAccessBlock instance for API calls
+        required_locators: List of stream locators to check
+        max_filter_size: Maximum number of streams per API batch (typically 500 to avoid rate limits)
+        date_str: Date string for logging context
+        
+    Returns:
+        List of missing stream locators (empty if all exist)
+        
+    Raises:
+        Exception: If any batch check fails
+    """
+    logger = get_run_logger()
+    logger.info(f"Checking existence for {len(required_locators)} streams for date {date_str}")
+    
+    locator_batches = list(batched(required_locators, max_filter_size))
+    logger.info(f"Processing {len(locator_batches)} batches (batch size: {max_filter_size}) for date {date_str}")
+    
+    all_missing_locators = list(process_stream_batches(tn_block, locator_batches))
+    logger.info(f"Found {len(all_missing_locators)} missing streams out of {len(required_locators)} total")
+    return all_missing_locators
+
+
+@task(
+    name="Check Deployment Status",
+    retries=5,
+    retry_delay_seconds=10,
+)
+def task_check_deployment_status(
+    deployment_state: DeploymentStateBlock, 
+    stream_ids: list[str], 
+    date_str: str
+) -> dict[str, bool]:
+    """
+    Check deployment status for multiple streams with automatic retry for database connection issues.
+    
+    Args:
+        deployment_state: The deployment state block to query
+        stream_ids: List of stream IDs to check
+        date_str: Date string for logging context
+        
+    Returns:
+        Dictionary mapping stream_id to deployment status
+        
+    Raises:
+        Exception: If deployment check fails after all retries
+    """
+    logger = get_run_logger()
+    
+    try:
+        logger.info(f"Checking deployment status for {len(stream_ids)} streams for date {date_str}")
+        result = deployment_state.check_multiple_streams(stream_ids)
+        logger.info(f"✅ Deployment status check completed successfully for date {date_str}")
+        return result
+    except Exception as e:
+        logger.error(f"Deployment status check failed for date {date_str}: {e}")
+        raise  # Let Prefect handle retries based on retry_condition_fn
 
 
 @flow(name="Insert Argentina SEPA Products to TN")
@@ -41,9 +160,8 @@ async def insert_argentina_products_flow(
     tn_block: TNAccessBlock,
     descriptor_block: PrimitiveSourcesDescriptorBlock,
     deployment_state: DeploymentStateBlock,
-    batch_size: int = 10000,  # Default batch size (empirically chosen to balance API load and memory)
+    batch_size: int = 1000,  # Default batch size (empirically chosen to balance API load and memory)
     max_filter_size: int = 500,  # Max number of streams per batch when filtering deployed streams
-    filter_deployed_streams: bool = True,
 ):
     """
     Inserts pre-calculated Argentina SEPA daily average product prices into TN streams.
@@ -128,10 +246,13 @@ State is managed by Prefect Variables.
             )
             return  # Exit gracefully if no dates
 
+        # IMPORTANT: Freeze the date list to prevent mid-loop variable updates from affecting processing
+        dates_to_process_frozen = list(dates_to_process)  # Create immutable copy
         logger.info(
-            f"Determined {len(dates_to_process)} dates to process via task: "
-            f"{dates_to_process[0]} to {dates_to_process[-1]}"
+            f"Determined {len(dates_to_process_frozen)} dates to process via task: "
+            f"{dates_to_process_frozen[0]} to {dates_to_process_frozen[-1]}"
         )
+        logger.info(f"Full date list (frozen): {dates_to_process_frozen}")
     except Exception as e:
         logger.critical(f"Fatal Error: Failed to determine dates to process using task: {e}", exc_info=True)
         raise  # Fatal: Cannot proceed if date determination fails
@@ -144,9 +265,9 @@ State is managed by Prefect Variables.
     last_processed_date_str = (
         ArgentinaFlowVariableNames.DEFAULT_DATE
     )  # Variable to track the last successfully processed date
-    first_processed_date_str = dates_to_process[0]
+    first_processed_date_str = dates_to_process_frozen[0]
 
-    for date_str in dates_to_process:
+    for date_str in dates_to_process_frozen:
         logger.info(f"--- Processing date: {date_str} ---")
         try:
             # Step 10a: Load daily averages for the current date
@@ -164,10 +285,12 @@ State is managed by Prefect Variables.
             # --- Deployment Status Check (Moved Before Transformation/Insertion) ---
             # Get unique product IDs for this date
             product_ids_for_date: set[str] = set(daily_avg_df["id_producto"].unique())
+            logger.info(f"Found {len(product_ids_for_date)} unique product IDs for date {date_str}")
 
             # Business mapping: external 'id_producto' -> TN 'stream_id' (per ARG SEPA spec)
             descriptor_subset = descriptor_df[descriptor_df["source_id"].isin(product_ids_for_date)]
             required_stream_ids: list[str] = descriptor_subset["stream_id"].tolist()
+            logger.info(f"Mapped to {len(required_stream_ids)} required stream IDs for date {date_str}")
 
             if not required_stream_ids:
                 # This indicates missing mappings in the descriptor for products present in daily data
@@ -178,14 +301,21 @@ State is managed by Prefect Variables.
 
             # Check if all required streams are deployed
             try:
-                logger.debug(
-                    f"Checking deployment status for {len(required_stream_ids)} required streams for date {date_str}..."
+                logger.info(
+                    f"Starting deployment status check for {len(required_stream_ids)} required streams for date {date_str}..."
                 )
-                stream_deployment_status: dict[str, bool] = deployment_state.check_multiple_streams(required_stream_ids)
-
+                
+                # Use the task wrapper to get Prefect retries and observability
+                stream_deployment_status = task_check_deployment_status(
+                    deployment_state=deployment_state,
+                    stream_ids=required_stream_ids,
+                    date_str=date_str
+                )
+                
                 undeployed_streams = [
                     sid for sid in required_stream_ids if not stream_deployment_status.get(sid, False)
                 ]
+                logger.info(f"Found {len(undeployed_streams)} undeployed streams out of {len(required_stream_ids)} total for date {date_str}")
 
                 if undeployed_streams:
                     error_msg = (
@@ -196,12 +326,16 @@ State is managed by Prefect Variables.
                     raise DeploymentCheckError(error_msg)  # Raise exception to stop flow
                 else:
                     logger.info(
-                        f"All {len(required_stream_ids)} required streams for date {date_str} are deployed. Proceeding."
+                        f"✅ Deployment check PASSED: All {len(required_stream_ids)} required streams for date {date_str} are deployed. Proceeding to transformation."
                     )
 
             except Exception as e_state:
                 error_msg = f"Halting flow: Failed to check deployment status for date {date_str}: {e_state}."
                 logger.error(error_msg, exc_info=True)
+                # Log the exact exception type and details for debugging
+                logger.error(f"Exception type: {type(e_state).__name__}")
+                logger.error(f"Exception args: {e_state.args}")
+                logger.error(f"Exception string: {e_state!s}")
                 raise DeploymentCheckError(error_msg) from e_state  # Re-raise to stop flow
             # --- End Deployment Status Check ---
 
@@ -237,19 +371,19 @@ State is managed by Prefect Variables.
                     continue
                 
                 try:
-                    # Check which of the required streams actually exist
-                    logger.debug(f"Checking for non-existent streams among {len(required_locators_list)} required locators...")
-                    missing_locators_result = task_batch_filter_streams_by_existence(
-                        block=tn_block, 
-                        locators=required_locators_list, 
-                        return_existing=False # Ask for non-existent ones
+                    # Check for missing streams using dedicated task
+                    missing_locators = task_batch_check_missing_streams(
+                        tn_block=tn_block,
+                        required_locators=required_locators_list,
+                        max_filter_size=max_filter_size,
+                        date_str=date_str
                     )
                     
-                    # The result is now the list of streams that DO NOT exist
-                    if missing_locators_result:
+                    # Check if any streams are missing
+                    if missing_locators:
                         missing_list_sample = [
                             (loc.get("data_provider", "N/A"), loc.get("stream_id", "N/A")) 
-                            for loc in missing_locators_result[:20]
+                            for loc in missing_locators[:20]
                         ]
                         error_msg = (
                             f"Halting flow: Date {date_str} cannot be processed because the following required streams "
@@ -258,12 +392,15 @@ State is managed by Prefect Variables.
                         logger.error(error_msg)
                         raise DeploymentCheckError(error_msg) 
                     else:
-                        # If the result is empty, all required streams exist
                         logger.info(f"All {len(required_locators_set)} required streams exist for date {date_str}. Proceeding to insertion.")
                         
                 except Exception as e_exist:
                     error_msg = f"Halting flow: Failed during pre-insertion stream existence check for date {date_str}: {e_exist}."
                     logger.error(error_msg, exc_info=True)
+                    # Log the exact exception type and details for debugging  
+                    logger.error(f"Stream existence check - Exception type: {type(e_exist).__name__}")
+                    logger.error(f"Stream existence check - Exception args: {e_exist.args}")
+                    logger.error(f"Stream existence check - Exception string: {e_exist!s}")
                     raise DeploymentCheckError(error_msg) from e_exist
                 # === End Pre-insertion Stream Existence Check ===
 
@@ -304,10 +441,10 @@ State is managed by Prefect Variables.
                 f"Updated {ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE} to {last_processed_date_str}"
             )
 
-        except DeploymentCheckError:
-            # Logged sufficiently above, re-raise to halt the flow run
-            logger.error("Deployment check failed. Halting flow run.")
-            raise
+        except DeploymentCheckError as e:
+            # Preserve the original error message instead of masking it
+            logger.error(f"Deployment check failed for date {date_str}. Original error: {e}")
+            raise  # Re-raise with original error intact
         except Exception as e:
             # Catch other errors during load, transform, insert for this specific date
             logger.critical(f"Fatal Error processing date {date_str}: {e}", exc_info=True)
