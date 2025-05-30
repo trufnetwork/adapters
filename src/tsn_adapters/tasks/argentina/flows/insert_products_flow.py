@@ -5,8 +5,8 @@ This flow reads daily average product prices, maps them to TN streams,
 transforms the data, inserts it into TN, and manages state.
 """
 
+from collections.abc import Generator, Sequence
 from itertools import batched
-from typing import Generator, Sequence
 
 from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
@@ -116,6 +116,42 @@ def task_batch_check_missing_streams(
     all_missing_locators = list(process_stream_batches(tn_block, locator_batches))
     logger.info(f"Found {len(all_missing_locators)} missing streams out of {len(required_locators)} total")
     return all_missing_locators
+
+
+@task(
+    name="Check Deployment Status",
+    retries=5,
+    retry_delay_seconds=10,
+)
+def task_check_deployment_status(
+    deployment_state: DeploymentStateBlock, 
+    stream_ids: list[str], 
+    date_str: str
+) -> dict[str, bool]:
+    """
+    Check deployment status for multiple streams with automatic retry for database connection issues.
+    
+    Args:
+        deployment_state: The deployment state block to query
+        stream_ids: List of stream IDs to check
+        date_str: Date string for logging context
+        
+    Returns:
+        Dictionary mapping stream_id to deployment status
+        
+    Raises:
+        Exception: If deployment check fails after all retries
+    """
+    logger = get_run_logger()
+    
+    try:
+        logger.info(f"Checking deployment status for {len(stream_ids)} streams for date {date_str}")
+        result = deployment_state.check_multiple_streams(stream_ids)
+        logger.info(f"✅ Deployment status check completed successfully for date {date_str}")
+        return result
+    except Exception as e:
+        logger.error(f"Deployment status check failed for date {date_str}: {e}")
+        raise  # Let Prefect handle retries based on retry_condition_fn
 
 
 @flow(name="Insert Argentina SEPA Products to TN")
@@ -268,9 +304,11 @@ State is managed by Prefect Variables.
                 logger.info(
                     f"Starting deployment status check for {len(required_stream_ids)} required streams for date {date_str}..."
                 )
-                stream_deployment_status: dict[str, bool] = deployment_state.check_multiple_streams(required_stream_ids)
-                logger.info(f"Deployment status check completed for date {date_str}")
-
+                
+                # The deployment state block now handles connection retries internally
+                stream_deployment_status = deployment_state.check_multiple_streams(required_stream_ids)
+                logger.info(f"✅ Deployment status check completed successfully for date {date_str}")
+                
                 undeployed_streams = [
                     sid for sid in required_stream_ids if not stream_deployment_status.get(sid, False)
                 ]
@@ -285,7 +323,7 @@ State is managed by Prefect Variables.
                     raise DeploymentCheckError(error_msg)  # Raise exception to stop flow
                 else:
                     logger.info(
-                        f"All {len(required_stream_ids)} required streams for date {date_str} are deployed. Proceeding."
+                        f"✅ Deployment check PASSED: All {len(required_stream_ids)} required streams for date {date_str} are deployed. Proceeding to transformation."
                     )
 
             except Exception as e_state:
@@ -294,7 +332,7 @@ State is managed by Prefect Variables.
                 # Log the exact exception type and details for debugging
                 logger.error(f"Exception type: {type(e_state).__name__}")
                 logger.error(f"Exception args: {e_state.args}")
-                logger.error(f"Exception string: {str(e_state)}")
+                logger.error(f"Exception string: {e_state!s}")
                 raise DeploymentCheckError(error_msg) from e_state  # Re-raise to stop flow
             # --- End Deployment Status Check ---
 
@@ -359,7 +397,7 @@ State is managed by Prefect Variables.
                     # Log the exact exception type and details for debugging  
                     logger.error(f"Stream existence check - Exception type: {type(e_exist).__name__}")
                     logger.error(f"Stream existence check - Exception args: {e_exist.args}")
-                    logger.error(f"Stream existence check - Exception string: {str(e_exist)}")
+                    logger.error(f"Stream existence check - Exception string: {e_exist!s}")
                     raise DeploymentCheckError(error_msg) from e_exist
                 # === End Pre-insertion Stream Existence Check ===
 
