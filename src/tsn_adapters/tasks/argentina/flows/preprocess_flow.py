@@ -17,9 +17,11 @@ from pandera.typing import DataFrame
 from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 import prefect.cache_policies as CachePolicies
+import prefect.variables as variables  # Import prefect variables
 from prefect_aws import S3Bucket
 
 from tsn_adapters.tasks.argentina.aggregate import aggregate_prices_by_category
+from tsn_adapters.tasks.argentina.config import ArgentinaFlowVariableNames  # Import config
 from tsn_adapters.tasks.argentina.flows.base import ArgentinaFlowController
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import (
     SepaAvgPriceProductModel,
@@ -185,11 +187,23 @@ class PreprocessFlow(ArgentinaFlowController):
         3. If not, process the date
         """
         logger = get_run_logger()
+        
         for date in self.raw_provider.list_available_keys():
             if self.processed_provider.exists(date):
                 logger.info(f"Skipping {date} because it already exists")
                 continue
             await self.process_date(date)
+            
+            # Update LAST_PREPROCESS_SUCCESS_DATE immediately after successful processing
+            try:
+                await variables.Variable.aset(
+                    ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, 
+                    date, 
+                    overwrite=True
+                )
+                logger.info(f"Successfully set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE} to {date}")
+            except Exception as e:
+                logger.error(f"Failed to set {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE}: {e}", exc_info=True)
 
     async def process_date(self, date_str: DateStr) -> None:
         """Process raw data for a specific date into aggregated prices."""
