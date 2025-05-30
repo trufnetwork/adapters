@@ -11,8 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "prefect-client>=3.4.1",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
-    # do not merge
-    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@cd315a3e1141a1e5f0cebe089b060e62d40a5102",
+    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@5d320512a98fac703655595c07c84491d32d4519",
     "PyGithub",
     "pandera>=0.23.1",
     "pandas",
