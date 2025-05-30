@@ -305,9 +305,12 @@ State is managed by Prefect Variables.
                     f"Starting deployment status check for {len(required_stream_ids)} required streams for date {date_str}..."
                 )
                 
-                # The deployment state block now handles connection retries internally
-                stream_deployment_status = deployment_state.check_multiple_streams(required_stream_ids)
-                logger.info(f"✅ Deployment status check completed successfully for date {date_str}")
+                # Use the task wrapper to get Prefect retries and observability
+                stream_deployment_status = task_check_deployment_status(
+                    deployment_state=deployment_state,
+                    stream_ids=required_stream_ids,
+                    date_str=date_str
+                )
                 
                 undeployed_streams = [
                     sid for sid in required_stream_ids if not stream_deployment_status.get(sid, False)
