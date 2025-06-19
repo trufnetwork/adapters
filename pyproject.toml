@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "prefect-client>=3.4.1",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20241008",
-    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@5d320512a98fac703655595c07c84491d32d4519",
+    "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@v0.3.2-alpha3",
     "PyGithub",
     "pandera>=0.23.1",
     "pandas",
@@ -46,8 +46,8 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = {find = {where = ["src"]}}
-package-dir = {"" = "."}
+packages = { find = { where = ["src"] } }
+package-dir = { "" = "." }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -63,12 +63,12 @@ testpaths = ["tests"]
 
 [tool.ruff]
 select = [
-    "E",    # pycodestyle errors
-    "F",    # pyflakes
-    "I",    # isort
-    "UP",   # pyupgrade
-    "RUF",  # ruff-specific rules
-    "TID",  # flake8-tidy-imports
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "RUF", # ruff-specific rules
+    "TID", # flake8-tidy-imports
 ]
 line-length = 120
 target-version = "py39"
