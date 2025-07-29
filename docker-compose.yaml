@@ -13,7 +13,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
   prefect:
     restart: always
-    image: prefecthq/prefect:3.3.7-python3.10-conda
+    image: prefecthq/prefect:3.4.10-python3.10-conda
     environment:
       PREFECT_HOME: /data
       PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:password@prefect-postgres/prefect
@@ -29,7 +29,7 @@ services:
 
   prefect-worker:
     restart: always
-    image: prefecthq/prefect:3.3.7-python3.10-conda
+    image: prefecthq/prefect:3.4.10-python3.10-conda
     command: prefect worker start -p default-workers
     environment:
       PREFECT_API_URL: http://prefect:4200/api
