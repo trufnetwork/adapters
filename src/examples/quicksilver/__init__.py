@@ -1,0 +1,3 @@
+"""
+Quicksilver API adapter examples.
+"""
