@@ -12,6 +12,43 @@ The Quicksilver adapter implements the standard TSN adapter pattern:
 
 ## Architecture
 
+```mermaid
+graph TD
+    subgraph DePIN Data Sources
+        Yahoo[Yahoo! Finance]
+        CoinGecko[CoinGecko]
+        Sensors[IoT Devices/Sensors]
+        OtherSources[Other Data Providers]
+    end
+
+    subgraph Quicksilver
+        QS_API(Quicksilver API Gateway)
+    end
+
+    Adapter[TSN Adapter]
+
+    subgraph Consumer Clients
+        TrufNetwork[TrufNetwork Platform]
+        AIAgents[AI Agents]
+        OtherClients[Other Applications]
+    end
+
+
+    Yahoo --> QS_API
+    CoinGecko --> QS_API
+    Sensors --> QS_API
+    OtherSources --> QS_API
+
+    QS_API  --> Adapter
+    Adapter --> TrufNetwork
+
+    QS_API --> AIAgents
+    QS_API --> OtherClients
+
+    classDef truf_highlight fill:#d4f0ff,stroke:#007bff,stroke-width:2px,color:#000
+    class Adapter truf_highlight
+```
+
 ### Components
 
 - **`QuicksilverBlock`** - Prefect block for HTTP requests
