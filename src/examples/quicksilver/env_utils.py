@@ -57,9 +57,8 @@ def get_quicksilver_config() -> dict[str, str]:
         Dictionary with configuration values
     """
     return {
-        'asset_id': os.getenv("QUICKSILVER_ASSET_ID", "bitcoin"),
-        'stream_id': os.getenv("QUICKSILVER_STREAM_ID", "stream_bitcoin_price"),
-        'base_url': os.getenv("QUICKSILVER_BASE_URL", "https://quicksilver.example.com"),
-        'endpoint_path': os.getenv("QUICKSILVER_ENDPOINT_PATH", 
-                                 "/api/gateway/example/coingekoMarket/findMany")
+        'ticker': os.getenv("QUICKSILVER_TICKER", "AAPL"),
+        'stream_id': os.getenv("QUICKSILVER_STREAM_ID", "stream_aapl_price"),
+        'base_url': os.getenv("QUICKSILVER_BASE_URL", "https://api.example.com/"),
+        'endpoint_path': os.getenv("QUICKSILVER_ENDPOINT_PATH", "/api/gateway/example/findMany")
     }

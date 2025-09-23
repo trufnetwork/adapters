@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """
-Quicksilver POC - Single Asset Data Integration
+Quicksilver POC - Data Integration
 
-Fetches asset data from Quicksilver API using ID-based filtering.
-
-Features:
-- Single asset focus (configurable via QUICKSILVER_ASSET_ID)
-- Dry-run mode for safe testing
+Fetches data from Quicksilver API using ticker-based filtering.
 """
 
 import os
@@ -15,7 +11,7 @@ from env_utils import load_environment, get_quicksilver_config
 env_status = load_environment()
 config = get_quicksilver_config()
 
-ASSET_ID = config['asset_id']
+TICKER = config['ticker']
 STREAM_ID = config['stream_id']
 
 from tsn_adapters.blocks.quicksilver import QuicksilverBlock
@@ -24,56 +20,50 @@ from mock_tn_block import MockTNAccessBlock
 
 
 def main():
-    print("🚀 Quicksilver POC - Single Asset Integration")
-    print("=" * 60)
-    print(f"Asset: {ASSET_ID}")
-    print(f"Stream ID: {STREAM_ID}")
+    print("🚀 Quicksilver POC - Data Integration")
+    print("=" * 50)
+    print(f"This POC demonstrates:")
+    print(f"1. 📡 Connect to Quicksilver API")
+    print(f"2. 📊 Fetch data for ticker: {TICKER}")
+    print(f"3. 🔄 Transform data to TrufNetwork format")
+    print(f"4. 🧪 Run complete flow in dry-run mode")
     print()
     
     print("📡 Step 1: Setting up Quicksilver API connection...")
-    
     try:
-        quicksilver_block = QuicksilverBlock(
-            base_url=config['base_url'],
-            timeout=30
-        )
-        print("✅ API block configured")
+        quicksilver_block = QuicksilverBlock(base_url=config['base_url'], timeout=30)
+        print("✅ API block configured successfully")
     except Exception as e:
         print(f"❌ Failed to configure API block: {e}")
         return
     
-    print(f"\n📊 Step 2: Fetching {ASSET_ID} market data...")
-    
+    print(f"\n📊 Step 2: Fetching data for ticker {TICKER}...")
     try:
-        endpoint_path = config['endpoint_path']
-        market_data = quicksilver_block.fetch_data(
-            endpoint_path=endpoint_path,
-            asset_id=ASSET_ID,
-            params={"source": "pg", "limit": "1"}
+        data = quicksilver_block.fetch_data(
+            endpoint_path=config['endpoint_path'],
+            ticker=TICKER,
+            params={"source": "yahoo", "limit": "10"}
         )
         
-        print(f"✅ Successfully fetched {len(market_data)} record!")
-        print(f"\n📋 Sample data for {ASSET_ID}:")
-        if len(market_data) > 0:
-            record = market_data.iloc[0]
-            print(f"   ID: {record['id']}")
-            print(f"   Symbol: {record['symbol']}")
-            print(f"   Price: ${record['current_price']}")
-            print(f"   Last Updated: {record['last_updated']}")
+        print(f"✅ Successfully fetched {len(data)} record(s)")
+        print(f"\n📋 Sample data for {TICKER}:")
+        if len(data) > 0:
+            record = data.iloc[0]
+            print(f"   Ticker: {record['ticker']}")
+            print(f"   Price: {record['price']}")
         
     except Exception as e:
         print(f"❌ Failed to fetch sample data: {e}")
         return
     
     print(f"\n🔄 Step 3: Testing complete flow (dry-run mode)...")
-    
     try:
         tn_block = MockTNAccessBlock()
         
         result = quicksilver_flow(
             quicksilver_block=quicksilver_block,
             tn_block=tn_block,
-            asset_id=ASSET_ID,
+            ticker=TICKER,
             stream_id=STREAM_ID,
             data_provider="quicksilver-poc",
             dry_run=True
@@ -87,6 +77,13 @@ def main():
         
         if result['errors']:
             print(f"   Errors: {result['errors']}")
+        else:
+            print("   No errors detected")
+        
+        print(f"\n🎯 POC completed! The adapter is ready to:")
+        print(f"   • Fetch data from any Quicksilver endpoint")
+        print(f"   • Transform data for TrufNetwork")
+        print(f"   • Handle different tickers by changing QUICKSILVER_TICKER")
         
     except Exception as e:
         print(f"❌ Flow execution failed: {e}")

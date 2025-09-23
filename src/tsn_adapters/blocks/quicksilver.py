@@ -44,7 +44,7 @@ class QuicksilverBlock(Block):
     
     base_url: str = PydanticField(
         default_factory=lambda: os.getenv("QUICKSILVER_BASE_URL", "https://api.example.com/"),
-        description="Base URL for Quicksilver API (set via QUICKSILVER_BASE_URL env var)"
+        description="Base URL for Quicksilver API"
     )
     
     timeout: int = PydanticField(
@@ -99,34 +99,16 @@ class QuicksilverBlock(Block):
     def fetch_data(
         self, 
         endpoint_path: str,
-        asset_id: Optional[str] = None,
+        ticker: Optional[str] = None,
         params: Optional[dict[str, Any]] = None
     ) -> DataFrame:
-        """
-        Fetch data from Quicksilver API and return as typed DataFrame.
-        
-        Args:
-            endpoint_path: API endpoint path (e.g., "/data/latest")
-            asset_id: Optional asset ID for filtering (e.g., "bitcoin", "ethereum")
-            params: Optional additional query parameters
-            
-        Returns:
-            DataFrame containing the API response data
-            
-        Raises:
-            ValueError: If API returns unexpected data format
-            Exception: If request fails
-        """
-        # Import locally to avoid circular dependency
         from tsn_adapters.tasks.quicksilver.types import QuicksilverDataModel
         
-        # Build query parameters
         query_params = params or {}
         
-        # Add ID filter if specified (for deterministic single asset queries)
-        if asset_id:
+        if ticker:
             import json
-            where_clause = {"id": asset_id}
+            where_clause = {"ticker": ticker}
             query_params["where"] = json.dumps(where_clause)
         
         endpoint = QuicksilverEndpoint(endpoint_path, query_params)

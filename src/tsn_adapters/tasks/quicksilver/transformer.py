@@ -14,45 +14,25 @@ from .types import QuicksilverDataDF, QuicksilverKey
 
 
 class QuicksilverDataTransformer(IDataTransformer[QuicksilverDataDF]):
-    """
-    Transforms Quicksilver API data into TrufNetwork records.
-    """
+    """Transforms Quicksilver data into TrufNetwork records."""
     
-    def __init__(
-        self, 
-        stream_id: str,
-        data_provider: str = "quicksilver"
-    ):
-        """
-        Initialize transformer for single asset processing.
-        
-        Args:
-            stream_id: TrufNetwork stream ID for this asset
-            data_provider: Name of the data provider (default: "quicksilver")
-        """
+    def __init__(self, stream_id: str, data_provider: str = "quicksilver"):
         self.stream_id = stream_id
         self.data_provider = data_provider
         self.logger = get_logger_safe(__name__)
 
     def transform(self, data: QuicksilverDataDF) -> DataFrame[TnDataRowModel]:
-        """
-        Transform Quicksilver data into TrufNetwork records.
-        
-        Args:
-            data: The Quicksilver data to transform
-            
-        Returns:
-            DataFrame containing TrufNetwork-formatted records
-        """
         if data.empty:
-            self.logger.info("Input data is empty, returning empty TN DataFrame")
             return DataFrame[TnDataRowModel](pd.DataFrame(columns=["date", "value", "stream_id", "data_provider"]))
         
-        self.logger.info(f"Transforming {len(data)} Quicksilver records to TrufNetwork format")
+        self.logger.info(f"Transforming {len(data)} Quicksilver records")
+        
+        # Clean price data
+        clean_prices = data['price'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
         
         tn_data = pd.DataFrame({
-            'date': pd.to_datetime(data['last_updated']).astype('int64') // 10**9,
-            'value': data['current_price'].astype(str),
+            'date': int(datetime.now().timestamp()),
+            'value': clean_prices,
             'stream_id': self.stream_id,
             'data_provider': self.data_provider
         })
