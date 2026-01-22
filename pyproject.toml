@@ -14,7 +14,7 @@ dependencies = [
     "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@5d320512a98fac703655595c07c84491d32d4519",
     "PyGithub",
     "pandera>=0.23.1",
-    "pandas",
+    "pandas>=2.0,<2.3",  # Pin to <2.3 for pandas-datareader compatibility (transitive dep from truflation-data)
     "prefect-sqlalchemy",
     "SQLAlchemy",
     "psycopg2-binary",
