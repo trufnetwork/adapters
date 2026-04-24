@@ -4,12 +4,12 @@ from typing import (
     Optional,
     TypedDict,
 )
+import warnings
 
 import pandas as pd
 from pandera.typing import DataFrame
 from prefect import get_run_logger, task
 from prefect.states import Completed
-from trufnetwork_sdk_py import BulkInsertError
 import trufnetwork_sdk_py.client as tn_client
 
 from tsn_adapters.blocks.tn_access import (
@@ -63,6 +63,14 @@ def task_split_and_insert_records(
     Returns:
         SplitInsertResults with one tx_hash per chunk (~10 rows) and any failed records/reasons.
     """
+    if max_batch_size != 25000 or wait is not True:
+        warnings.warn(
+            "max_batch_size and wait are deprecated; BulkInserter chunks at the "
+            "protocol cap (10 rows/tx) and always drains before returning.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     logger = get_logger_safe(__name__)
     processed_records = records.copy()
 
@@ -299,6 +307,13 @@ def _perform_batch_insertions(
 ) -> SplitInsertResults:
     """Insert records via sdk-py BulkInserter (cached-nonce pipelining).
 
+    Exceptions propagate so the enclosing Prefect task
+    (`task_split_and_insert_records`, with `tn_special_retry_condition(5)`)
+    can retry. We don't catch `BulkInsertError` partially: retrying with
+    the known-committed txs removed would require mapping flattened chunks
+    back to source rows, which BulkInserter's stream-grouped flatten makes
+    unreliable. Letting the whole batch re-run is safer.
+
     Args:
         block: TNAccessBlock instance.
         records_to_insert: DataFrame of records ready for insertion.
@@ -308,46 +323,25 @@ def _perform_batch_insertions(
             in-flight broadcasts via WaitTx before returning.
 
     Returns:
-        SplitInsertResults with one tx_hash per chunk (~10 rows).
+        SplitInsertResults with one tx_hash per chunk (~10 rows). On
+        failure, raises (does not return partial results).
     """
     del max_batch_size, wait  # parameters retained for API compat
 
     logger = get_logger_safe(__name__)
-    failed_reasons: list[str] = []
-    success_tx_hashes: list[str] = []
-    failed_records_list: list[DataFrame[TnDataRowModel]] = []
 
     if records_to_insert.empty:
         logger.warning("No records to insert.")
-    else:
-        logger.info(f"Submitting {len(records_to_insert)} records via BulkInserter (chunk_size=10).")
-        try:
-            success_tx_hashes = block.bulk_insert_tn_records(records_to_insert)
-            logger.info(f"BulkInserter submitted {len(success_tx_hashes)} txs.")
-        except BulkInsertError as e:
-            logger.error(
-                f"BulkInserter failed at chunk {e.failed_chunk_index} "
-                f"(drain_failure={e.drain_failure}): {e!s}",
-                exc_info=True,
-            )
-            success_tx_hashes = list(e.tx_hashes)
-            # Per-row mapping back to source DataFrame rows isn't reliable
-            # (BulkInserter groups by stream then flattens), so mark the
-            # whole submission as failed and let the caller retry.
-            failed_records_list.append(records_to_insert)
-            failed_reasons.append(str(e))
-        except Exception as e:
-            logger.error(f"Batch insertion failed: {e!s}", exc_info=True)
-            failed_records_list.append(records_to_insert)
-            failed_reasons.append(str(e))
+        empty_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+        return SplitInsertResults(success_tx_hashes=[], failed_records=empty_df, failed_reasons=[])
 
-    if failed_records_list:
-        failed_records_df = DataFrame[TnDataRowModel](pd.concat(failed_records_list))
-    else:
-        failed_records_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+    logger.info(f"Submitting {len(records_to_insert)} records via BulkInserter (chunk_size=10).")
+    success_tx_hashes = block.bulk_insert_tn_records(records_to_insert)
+    logger.info(f"BulkInserter submitted {len(success_tx_hashes)} txs.")
 
+    empty_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
     return SplitInsertResults(
         success_tx_hashes=success_tx_hashes,
-        failed_records=failed_records_df,
-        failed_reasons=failed_reasons,
+        failed_records=empty_df,
+        failed_reasons=[],
     )

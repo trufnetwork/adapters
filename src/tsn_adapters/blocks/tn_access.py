@@ -551,6 +551,10 @@ class TNAccessBlock(Block):
 
         return batches
 
+    # Node-level per-tx insert cap (honored by bulk_insert_tn_records which
+    # chunks automatically; batch_insert_tn_records rejects over-cap inputs).
+    _INSERT_RECORDS_CAP = 10
+
     @handle_tn_errors
     def batch_insert_tn_records(
         self,
@@ -558,19 +562,30 @@ class TNAccessBlock(Block):
     ) -> Optional[str]:
         """Batch insert records into multiple streams in a single transaction.
 
-        Note: subject to the node's per-tx insert cap (currently 10 rows).
-        For large batches, prefer ``bulk_insert_tn_records`` which chunks
-        and pipelines automatically.
+        Enforces the node's per-tx insert cap (10 rows total, across streams).
+        For larger datasets, use ``bulk_insert_tn_records`` which chunks and
+        pipelines automatically.
 
         Args:
             records: DataFrame containing records with stream_id column
 
         Returns:
             Transaction hash if successful, None otherwise
+
+        Raises:
+            ValueError: if total rows exceed the protocol cap.
         """
         batches = self._records_to_batches(records)
         if not batches:
             return None
+
+        total_rows = sum(len(b["inputs"]) for b in batches)
+        if total_rows > self._INSERT_RECORDS_CAP:
+            raise ValueError(
+                f"batch_insert_tn_records received {total_rows} rows but the node's "
+                f"per-tx cap is {self._INSERT_RECORDS_CAP}. "
+                f"Use bulk_insert_tn_records for larger datasets."
+            )
 
         with concurrency("tn-write", occupy=1):
             return self.client.batch_insert_records(
@@ -599,7 +614,15 @@ class TNAccessBlock(Block):
 
         Returns:
             List of tx hashes in submission order.
+
+        Raises:
+            ValueError: if batch_size is outside [1, _INSERT_RECORDS_CAP].
         """
+        if not isinstance(batch_size, int) or not 1 <= batch_size <= self._INSERT_RECORDS_CAP:
+            raise ValueError(
+                f"batch_size must be an int in [1, {self._INSERT_RECORDS_CAP}]; got {batch_size!r}"
+            )
+
         batches = self._records_to_batches(records)
         if not batches:
             return []
