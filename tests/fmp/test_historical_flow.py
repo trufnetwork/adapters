@@ -7,6 +7,7 @@ actual network calls.
 """
 
 import datetime
+from math import ceil
 import time
 from typing import Any
 
@@ -16,6 +17,8 @@ from pydantic import SecretStr
 import pytest
 from pytest_mock import MockerFixture
 from trufnetwork_sdk_py.client import TNClient
+
+from tests.utils.constants import FAKE_PRIVATE_KEY
 
 from tsn_adapters.blocks.fmp import EODData, FMPBlock
 from tsn_adapters.blocks.primitive_source_descriptor import (
@@ -136,12 +139,22 @@ class FakeTNAccessBlock(TNAccessBlock):
     """Fake TN access block that tracks inserted records."""
 
     def __init__(self):
-        # Initialize Pydantic model with required fields
-        super().__init__(tn_provider="fake", tn_private_key=SecretStr("fake"))
+        # Initialize Pydantic model with required fields. Use a valid-looking
+        # hex private key — sdk-py rejects non-hex at TNClient construction
+        # time, and that leaks through any code path touching self.client.
+        super().__init__(
+            tn_provider="fake",
+            tn_private_key=FAKE_PRIVATE_KEY,
+        )
         # Initialize our tracking variables
         self._inserted_records: list[DataFrame[TnDataRowModel]] = []
         self._insert_times: list[float] = []
         self._batch_sizes: list[int] = []
+
+    @property
+    def current_account(self) -> str:
+        # Skip self.client access — tests don't need the real account.
+        return "fake_account"
 
     @property
     def inserted_records(self) -> list[DataFrame[TnDataRowModel]]:
@@ -172,6 +185,25 @@ class FakeTNAccessBlock(TNAccessBlock):
         self._insert_times.append(time.time())
         self._batch_sizes.append(len(records))
         return ["fake_tx_hash"]
+
+    def bulk_insert_tn_records(
+        self,
+        records: DataFrame[TnDataRowModel],
+        batch_size: int = 10,
+    ) -> list[str]:
+        """Fake BulkInserter path: chunk records and call
+        batch_insert_tn_records per chunk for tracking parity with real
+        BulkInserter's one-tx-per-10-rows shape."""
+        if not isinstance(batch_size, int) or not 1 <= batch_size <= 10:
+            raise ValueError(f"batch_size must be an int in [1, 10]; got {batch_size!r}")
+        if len(records) == 0:
+            return []
+        hashes: list[str] = []
+        for i in range(0, len(records), batch_size):
+            chunk = records.iloc[i : i + batch_size]
+            self.batch_insert_tn_records(DataFrame[TnDataRowModel](chunk))
+            hashes.append(f"fake_tx_{i // batch_size}")
+        return hashes
 
     def wait_for_tx(self, tx_hash: str) -> None:
         """Mock waiting."""

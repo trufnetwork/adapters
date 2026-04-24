@@ -4,6 +4,7 @@ from typing import (
     Optional,
     TypedDict,
 )
+import warnings
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -41,22 +42,35 @@ def task_split_and_insert_records(
     max_streams_per_existence_check: int = 1000,
 ) -> SplitInsertResults:
     """
-    Splits records into batches and inserts them into TN, optionally filtering by stream existence first.
+    Inserts records into TN via BulkInserter (cached-nonce pipelining),
+    optionally filtering by stream existence first.
 
-    Orchestrates filtering and batch insertion logic.
+    The underlying node enforces a per-tx insert cap (currently 10 rows).
+    BulkInserter satisfies that by chunking internally at 10/tx and
+    pipelining broadcasts so throughput stays bounded by admission
+    (~50ms) rather than inclusion (~1-2s/block).
 
     Args:
         block: The TNAccessBlock instance.
         records: The records to insert.
-        max_batch_size: Maximum number of records per insert batch.
-        wait: Whether to wait for the insertion transaction(s) to be mined.
+        max_batch_size: Legacy. Ignored — BulkInserter chunks at the
+            protocol cap (10 rows/tx).
+        wait: Legacy. Effectively always-true — BulkInserter drains
+            in-flight broadcasts via WaitTx before returning.
         filter_deployed_streams: Whether to filter out streams that do not exist on TN.
-        filter_cache_duration: How long to cache the stream existence filter results.
         max_streams_per_existence_check: Max streams to check in one existence API call.
 
     Returns:
-        SplitInsertResults containing transaction hashes and any failed records/reasons.
+        SplitInsertResults with one tx_hash per chunk (~10 rows) and any failed records/reasons.
     """
+    if max_batch_size != 25000 or wait is not True:
+        warnings.warn(
+            "max_batch_size and wait are deprecated; BulkInserter chunks at the "
+            "protocol cap (10 rows/tx) and always drains before returning.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     logger = get_logger_safe(__name__)
     processed_records = records.copy()
 
@@ -291,58 +305,43 @@ def _perform_batch_insertions(
     max_batch_size: int,
     wait: bool,
 ) -> SplitInsertResults:
-    """Splits records and performs batch insertions, collecting results.
+    """Insert records via sdk-py BulkInserter (cached-nonce pipelining).
+
+    Exceptions propagate so the enclosing Prefect task
+    (`task_split_and_insert_records`, with `tn_special_retry_condition(5)`)
+    can retry. We don't catch `BulkInsertError` partially: retrying with
+    the known-committed txs removed would require mapping flattened chunks
+    back to source rows, which BulkInserter's stream-grouped flatten makes
+    unreliable. Letting the whole batch re-run is safer.
 
     Args:
         block: TNAccessBlock instance.
         records_to_insert: DataFrame of records ready for insertion.
-        max_batch_size: Max records per insertion API call.
-        wait: Whether to wait for insertion transactions.
+        max_batch_size: Legacy. Ignored — BulkInserter chunks at the
+            protocol cap (10 rows/tx) internally.
+        wait: Legacy. Effectively always-true — BulkInserter drains all
+            in-flight broadcasts via WaitTx before returning.
 
     Returns:
-        SplitInsertResults dictionary.
+        SplitInsertResults with one tx_hash per chunk (~10 rows). On
+        failure, raises (does not return partial results).
     """
+    del max_batch_size, wait  # parameters retained for API compat
+
     logger = get_logger_safe(__name__)
-    failed_reasons: list[str] = []
-    success_tx_hashes: list[str] = []
-    failed_records_list: list[DataFrame[TnDataRowModel]] = []
 
-    split_records_batches = block.split_records(records_to_insert, max_batch_size)
+    if records_to_insert.empty:
+        logger.warning("No records to insert.")
+        empty_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
+        return SplitInsertResults(success_tx_hashes=[], failed_records=empty_df, failed_reasons=[])
 
-    if not split_records_batches:
-        logger.warning("No record batches to insert.")
-        # Fall through to return empty results
-    else:
-        logger.info(
-            f"Submitting {len(records_to_insert)} records for insertion in {len(split_records_batches)} batches."
-        )
-        for i, batch in enumerate(split_records_batches):
-            batch_num_log = i + 1
-            logger.debug(
-                f"Submitting insertion batch {batch_num_log}/{len(split_records_batches)} ({len(batch)} records)..."
-            )
-            try:
-                tx_hash_or_none = task_batch_insert_tn_records(
-                    block=block,
-                    records=batch,
-                    wait=wait,
-                )
-                if tx_hash_or_none:
-                    success_tx_hashes.append(tx_hash_or_none)
-                logger.debug(f"Insertion batch {batch_num_log} submitted. TX: {tx_hash_or_none}")
-            except Exception as e:
-                logger.error(f"Insertion batch {batch_num_log} failed: {e!s}", exc_info=True)
-                failed_records_list.append(batch)
-                failed_reasons.append(str(e))
+    logger.info(f"Submitting {len(records_to_insert)} records via BulkInserter (chunk_size=10).")
+    success_tx_hashes = block.bulk_insert_tn_records(records_to_insert)
+    logger.info(f"BulkInserter submitted {len(success_tx_hashes)} txs.")
 
-    # Combine failed records
-    if failed_records_list:
-        failed_records_df = DataFrame[TnDataRowModel](pd.concat(failed_records_list))
-    else:
-        failed_records_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
-
+    empty_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
     return SplitInsertResults(
         success_tx_hashes=success_tx_hashes,
-        failed_records=failed_records_df,
-        failed_reasons=failed_reasons,
+        failed_records=empty_df,
+        failed_reasons=[],
     )

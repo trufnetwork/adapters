@@ -1,11 +1,12 @@
+from math import ceil
 from typing import Any, Optional
 
 import pandas as pd
 from pandera.typing import DataFrame as PanderaDataFrame
-from pydantic import SecretStr
 import trufnetwork_sdk_py.client as tn_client
 from trufnetwork_sdk_py.client import RecordBatch, StreamDefinitionInput, StreamLocatorInput
 
+from tests.utils.constants import FAKE_PRIVATE_KEY
 from tsn_adapters.blocks.tn_access import (
     StreamAlreadyExistsError,
     TNAccessBlock,
@@ -158,7 +159,7 @@ class FakeTNAccessBlock(TNAccessBlock):
         # if TNAccessBlock.__init__ attempts to create a real client early.
         super().__init__(
             tn_provider="fake_provider",
-            tn_private_key=SecretStr("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"),
+            tn_private_key=FAKE_PRIVATE_KEY,
         )
         # Override the client with our fake internal client
         self._internal_fake_client = FakeInternalTNClient(
@@ -204,6 +205,28 @@ class FakeTNAccessBlock(TNAccessBlock):
     # No need to override batch_insert_tn_records here.
     # The goal is to let TNAccessBlock.batch_insert_tn_records run its course,
     # which will call self.client.batch_insert_records (our faked one).
+
+    def bulk_insert_tn_records(
+        self,
+        records: PanderaDataFrame[TnDataRowModel],
+        batch_size: int = 10,
+    ) -> list[str]:
+        """Fake BulkInserter path: chunk records into ``batch_size`` groups
+        and route each chunk through batch_insert_tn_records so
+        FakeInternalTNClient captures each DataFrame. Bypasses the real
+        gopy BulkInserter. Returns one fake hash per chunk, matching
+        production's one-tx-per-chunk shape."""
+        if not isinstance(batch_size, int) or not 1 <= batch_size <= 10:
+            raise ValueError(f"batch_size must be an int in [1, 10]; got {batch_size!r}")
+        if len(records) == 0:
+            return []
+        hashes: list[str] = []
+        for i in range(0, len(records), batch_size):
+            chunk = records.iloc[i : i + batch_size]
+            tx_hash = self.batch_insert_tn_records(records=PanderaDataFrame[TnDataRowModel](chunk))
+            if tx_hash is not None:
+                hashes.append(tx_hash)
+        return hashes
 
     def stream_exists(self, data_provider: str, stream_id: str) -> bool:
         if self._block_error_on.get("stream_exists"):

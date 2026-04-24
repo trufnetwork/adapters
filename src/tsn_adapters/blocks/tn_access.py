@@ -21,6 +21,7 @@ from prefect.client.schemas.objects import State, TaskRun
 from prefect.concurrency.sync import concurrency, rate_limit
 from pydantic import ConfigDict, SecretStr
 import trufnetwork_sdk_c_bindings.exports as truf_sdk
+from trufnetwork_sdk_py import BulkInserter, BulkInsertError
 import trufnetwork_sdk_py.client as tn_client
 from typing_extensions import ParamSpec
 
@@ -511,19 +512,11 @@ class TNAccessBlock(Block):
 
         return tx_hash
 
-    @handle_tn_errors
-    def batch_insert_tn_records(
+    def _records_to_batches(
         self,
         records: DataFrame[TnDataRowModel],
-    ) -> Optional[str]:
-        """Batch insert records into multiple streams.
-
-        Args:
-            records: DataFrame containing records with stream_id column
-
-        Returns:
-            Transaction hash if successful, None otherwise
-        """
+    ) -> list[tn_client.RecordBatch]:
+        """Filter zero-values and group a TnDataRow DataFrame into per-stream RecordBatches."""
         if "value" in records.columns and not records.empty:
             original_count = len(records)
             mask = records["value"].apply(self._value_is_nonzero_str)
@@ -536,9 +529,8 @@ class TNAccessBlock(Block):
 
         if len(records) == 0:
             self.logger.info("No records to insert from the batch.")
-            return None
+            return []
 
-        # Convert DataFrame to format expected by client
         batches: list[tn_client.RecordBatch] = []
         stream_locators = records[["data_provider", "stream_id"]].drop_duplicates()
         for _, row in stream_locators.iterrows():
@@ -552,20 +544,92 @@ class TNAccessBlock(Block):
                 for record in stream_records.to_dict(orient="records")
             ]
 
-            # check that all dates are unix timestamps
             if not all(check_unix_timestamp(int(record["date"])) for record in inputs):
                 raise ValueError("All dates must be unix timestamps")
 
             batches.append(tn_client.RecordBatch(stream_id=row["stream_id"], inputs=inputs))
 
+        return batches
+
+    # Node-level per-tx insert cap (honored by bulk_insert_tn_records which
+    # chunks automatically; batch_insert_tn_records rejects over-cap inputs).
+    _INSERT_RECORDS_CAP = 10
+
+    @handle_tn_errors
+    def batch_insert_tn_records(
+        self,
+        records: DataFrame[TnDataRowModel],
+    ) -> Optional[str]:
+        """Batch insert records into multiple streams in a single transaction.
+
+        Enforces the node's per-tx insert cap (10 rows total, across streams).
+        For larger datasets, use ``bulk_insert_tn_records`` which chunks and
+        pipelines automatically.
+
+        Args:
+            records: DataFrame containing records with stream_id column
+
+        Returns:
+            Transaction hash if successful, None otherwise
+
+        Raises:
+            ValueError: if total rows exceed the protocol cap.
+        """
+        batches = self._records_to_batches(records)
         if not batches:
             return None
+
+        total_rows = sum(len(b["inputs"]) for b in batches)
+        if total_rows > self._INSERT_RECORDS_CAP:
+            raise ValueError(
+                f"batch_insert_tn_records received {total_rows} rows but the node's "
+                f"per-tx cap is {self._INSERT_RECORDS_CAP}. "
+                f"Use bulk_insert_tn_records for larger datasets."
+            )
 
         with concurrency("tn-write", occupy=1):
             return self.client.batch_insert_records(
                 batches=batches,
                 wait=False,
             )
+
+    @handle_tn_errors
+    def bulk_insert_tn_records(
+        self,
+        records: DataFrame[TnDataRowModel],
+        batch_size: int = 10,
+    ) -> list[str]:
+        """Pipelined high-throughput insert via sdk-py BulkInserter.
+
+        Chunks records into ``batch_size`` per insert_records tx (must be
+        <= the node's protocol cap, currently 10) and broadcasts with a
+        cached nonce so admission (~50ms) becomes the rate limit instead
+        of inclusion (~1-2s/block). Returns one tx hash per chunk; raises
+        ``BulkInsertError`` on chunk failure (carrying partial tx_hashes
+        and the failed_chunk_index for recovery).
+
+        Args:
+            records: DataFrame with stream_id, data_provider, date, value.
+            batch_size: Records per insert_records tx (default 10 = cap).
+
+        Returns:
+            List of tx hashes in submission order.
+
+        Raises:
+            ValueError: if batch_size is outside [1, _INSERT_RECORDS_CAP].
+        """
+        if not isinstance(batch_size, int) or not 1 <= batch_size <= self._INSERT_RECORDS_CAP:
+            raise ValueError(
+                f"batch_size must be an int in [1, {self._INSERT_RECORDS_CAP}]; got {batch_size!r}"
+            )
+
+        batches = self._records_to_batches(records)
+        if not batches:
+            return []
+
+        with concurrency("tn-write", occupy=1):
+            inserter = BulkInserter(self.client, batch_size=batch_size)
+            return inserter.insert_all(batches)
 
     @handle_tn_errors
     def wait_for_tx(self, tx_hash: str) -> None:
