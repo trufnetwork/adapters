@@ -205,6 +205,17 @@ class FakeTNAccessBlock(TNAccessBlock):
     # The goal is to let TNAccessBlock.batch_insert_tn_records run its course,
     # which will call self.client.batch_insert_records (our faked one).
 
+    def bulk_insert_tn_records(
+        self,
+        records: PanderaDataFrame[TnDataRowModel],
+        batch_size: int = 10,
+    ) -> list[str]:
+        """Fake BulkInserter path: route through batch_insert_tn_records so
+        FakeInternalTNClient captures the inserted DataFrame. Bypasses the
+        real gopy BulkInserter (which would hit the C bindings)."""
+        tx_hash = self.batch_insert_tn_records(records=records)
+        return [tx_hash] if tx_hash else []
+
     def stream_exists(self, data_provider: str, stream_id: str) -> bool:
         if self._block_error_on.get("stream_exists"):
             raise self._block_error_on["stream_exists"]

@@ -136,12 +136,22 @@ class FakeTNAccessBlock(TNAccessBlock):
     """Fake TN access block that tracks inserted records."""
 
     def __init__(self):
-        # Initialize Pydantic model with required fields
-        super().__init__(tn_provider="fake", tn_private_key=SecretStr("fake"))
+        # Initialize Pydantic model with required fields. Use a valid-looking
+        # hex private key — sdk-py rejects non-hex at TNClient construction
+        # time, and that leaks through any code path touching self.client.
+        super().__init__(
+            tn_provider="fake",
+            tn_private_key=SecretStr("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"),
+        )
         # Initialize our tracking variables
         self._inserted_records: list[DataFrame[TnDataRowModel]] = []
         self._insert_times: list[float] = []
         self._batch_sizes: list[int] = []
+
+    @property
+    def current_account(self) -> str:
+        # Skip self.client access — tests don't need the real account.
+        return "fake_account"
 
     @property
     def inserted_records(self) -> list[DataFrame[TnDataRowModel]]:
@@ -171,6 +181,15 @@ class FakeTNAccessBlock(TNAccessBlock):
         self._inserted_records.append(records)
         self._insert_times.append(time.time())
         self._batch_sizes.append(len(records))
+        return ["fake_tx_hash"]
+
+    def bulk_insert_tn_records(
+        self,
+        records: DataFrame[TnDataRowModel],
+        batch_size: int = 10,
+    ) -> list[str]:
+        """Fake BulkInserter path: reuse the tracking done by batch_insert_tn_records."""
+        self.batch_insert_tn_records(records)
         return ["fake_tx_hash"]
 
     def wait_for_tx(self, tx_hash: str) -> None:
