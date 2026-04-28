@@ -653,9 +653,16 @@ class TNAccessBlock(Block):
         #    by gopy with TypeError("must be real number, not str") (see the
         #    2026-04-26 incident on cherubic-orca).
         if "value" in records.columns:
+            original_count = len(records)
             mask = records["value"].apply(self._value_is_nonzero_str)
             records = records[mask]
+            filtered_count = len(records)
+            if original_count > filtered_count:
+                self.logger.info(
+                    f"Filtered out {original_count - filtered_count} records with zero values from the batch."
+                )
         if records.empty:
+            self.logger.info("No records to insert from the batch.")
             return []
 
         # Pack one record per RecordBatch so BulkInserter's flatten produces
