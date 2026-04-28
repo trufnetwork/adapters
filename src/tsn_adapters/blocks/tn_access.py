@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import decimal
 from functools import wraps
 from math import ceil
+import time
 from typing import (
     Any,
     Callable,
@@ -442,7 +443,6 @@ class TNAccessBlock(Block):
                 {
                     "date": rec["EventTime"],
                     "value": decimal.Decimal(rec["Value"]),
-                    **{k: v for k, v in rec.items() if k not in ("EventTime", "Value")},
                 }
                 for rec in recs
             ]
@@ -599,37 +599,158 @@ class TNAccessBlock(Block):
         records: DataFrame[TnDataRowModel],
         batch_size: int = 10,
     ) -> list[str]:
-        """Pipelined high-throughput insert via sdk-py BulkInserter.
+        """Pipelined high-throughput insert via sdk-py BulkInserter, with
+        in-process resume on transient backend failures.
 
         Chunks records into ``batch_size`` per insert_records tx (must be
         <= the node's protocol cap, currently 10) and broadcasts with a
         cached nonce so admission (~50ms) becomes the rate limit instead
-        of inclusion (~1-2s/block). Returns one tx hash per chunk; raises
-        ``BulkInsertError`` on chunk failure (carrying partial tx_hashes
-        and the failed_chunk_index for recovery).
+        of inclusion (~1-2s/block).
+
+        On chunk failure after BulkInserter exhausts its internal retries,
+        this method consults ``BulkInsertError.failed_chunk_index``, slices
+        off the records that were already broadcast, pauses briefly, and
+        re-attempts the remainder. This avoids re-broadcasting tens of
+        thousands of records when a transient catch-up event happens deep
+        into a large batch (the 2026-04-25 incident pattern). The Prefect
+        task wrapper still retries the whole task on a final failure, but
+        each Prefect retry only redoes the work that actually didn't get
+        committed.
 
         Args:
             records: DataFrame with stream_id, data_provider, date, value.
+                Row order is the canonical order for resume — a record's
+                position in this DataFrame determines its chunk index.
             batch_size: Records per insert_records tx (default 10 = cap).
 
         Returns:
-            List of tx hashes in submission order.
+            List of tx hashes in submission order across all resume attempts.
 
         Raises:
             ValueError: if batch_size is outside [1, _INSERT_RECORDS_CAP].
+            BulkInsertError: if the backend keeps failing after MAX_RESUMES
+                in-process resume attempts. The error carries the cumulative
+                tx_hashes from every successful broadcast so far.
         """
         if not isinstance(batch_size, int) or not 1 <= batch_size <= self._INSERT_RECORDS_CAP:
             raise ValueError(
                 f"batch_size must be an int in [1, {self._INSERT_RECORDS_CAP}]; got {batch_size!r}"
             )
 
-        batches = self._records_to_batches(records)
-        if not batches:
+        if records.empty:
             return []
 
-        with concurrency("tn-write", occupy=1):
+        # Mirror the filter+coerce logic from _records_to_batches (the previous
+        # entry path) so the wire payload is identical to the old code's:
+        #
+        # 1. Drop zero values — these are no-ops on the node side and waste a
+        #    tx slot. The check goes through Decimal so "0", "0.0", "0e-18",
+        #    etc. all collapse to the same zero.
+        # 2. Validate dates are unix timestamps. Catching this here turns an
+        #    obscure Go-side reject into a clear ValueError at the boundary.
+        # 3. Coerce `value` to float — the gopy NewInsertRecordInputForProvider
+        #    binding accepts `float64`. Passing a Decimal or str gets rejected
+        #    by gopy with TypeError("must be real number, not str") (see the
+        #    2026-04-26 incident on cherubic-orca).
+        if "value" in records.columns:
+            original_count = len(records)
+            mask = records["value"].apply(self._value_is_nonzero_str)
+            records = records[mask]
+            filtered_count = len(records)
+            if original_count > filtered_count:
+                self.logger.info(
+                    f"Filtered out {original_count - filtered_count} records with zero values from the batch."
+                )
+        if records.empty:
+            self.logger.info("No records to insert from the batch.")
+            return []
+
+        # Pack one record per RecordBatch so BulkInserter's flatten produces
+        # exactly our DataFrame row order — `flat[failed_chunk_index*batch_size:]`
+        # then reliably gives the leftover work. The InsertRecords action
+        # accepts mixed-stream chunks (each input carries its own stream_id),
+        # so the per-tx cost is identical to stream-grouped batches.
+        flat_batches: list[tn_client.RecordBatch] = []
+        for row in records.itertuples(index=False):
+            date_int = int(row.date)
+            if not check_unix_timestamp(date_int):
+                raise ValueError(
+                    f"date {row.date} for stream {row.stream_id} is not a unix timestamp"
+                )
+            flat_batches.append({
+                "stream_id": str(row.stream_id),
+                "inputs": [{"date": date_int, "value": float(row.value)}],
+            })
+
+        # Resume budget. 5 in-process attempts x 30s pause covers ~2.5 min of
+        # backend recovery time before falling back to the Prefect-task retry,
+        # which then has its own 5 retries. Total cushion ≈ 12 min.
+        MAX_RESUMES = 5
+        RESUME_PAUSE_SECONDS = 30
+
+        cumulative_tx_hashes: list[str] = []
+        remaining = flat_batches
+
+        # The tn-write slot is held only across the actual insert attempt;
+        # backoff sleep + resume bookkeeping run lock-free so other writers
+        # aren't starved while we wait.
+        for attempt in range(MAX_RESUMES + 1):
+            if not remaining:
+                return cumulative_tx_hashes
+
             inserter = BulkInserter(self.client, batch_size=batch_size)
-            return inserter.insert_all(batches)
+            try:
+                with concurrency("tn-write", occupy=1):
+                    tx_hashes = inserter.insert_all(remaining)
+                cumulative_tx_hashes.extend(tx_hashes)
+                return cumulative_tx_hashes
+            except BulkInsertError as exc:
+                cumulative_tx_hashes.extend(exc.tx_hashes)
+
+                # A drain failure means every chunk WAS broadcast — only
+                # WaitTx polling failed. Re-running here makes no sense
+                # (we'd just re-broadcast already-admitted txs). Surface
+                # to the Prefect retry / caller with the full hash set.
+                if exc.drain_failure:
+                    raise BulkInsertError(
+                        str(exc),
+                        tx_hashes=cumulative_tx_hashes,
+                        drain_failure=True,
+                        failed_chunk_index=exc.failed_chunk_index,
+                    ) from exc
+
+                done = exc.failed_chunk_index * batch_size
+                new_remaining = remaining[done:]
+                self.logger.warning(
+                    "BulkInserter resume #%d: %d records committed this pass, "
+                    "%d remaining (failed at chunk %d: %s)",
+                    attempt + 1, done, len(new_remaining), exc.failed_chunk_index,
+                    str(exc).splitlines()[0],
+                )
+
+                # Need real progress AND budget left to keep going.
+                if (
+                    attempt < MAX_RESUMES
+                    and new_remaining
+                    and len(new_remaining) < len(remaining)
+                ):
+                    remaining = new_remaining
+                    time.sleep(RESUME_PAUSE_SECONDS)
+                    continue
+
+                # Out of attempts (or no progress). Re-raise carrying the
+                # cumulative hashes, not just this attempt's, so the outer
+                # Prefect retry can dedupe / report correctly.
+                raise BulkInsertError(
+                    str(exc),
+                    tx_hashes=cumulative_tx_hashes,
+                    drain_failure=False,
+                    failed_chunk_index=exc.failed_chunk_index,
+                ) from exc
+
+        # Defensive: loop only exits via return or raise, but mypy/pyright
+        # need a terminal statement.
+        return cumulative_tx_hashes
 
     @handle_tn_errors
     def wait_for_tx(self, tx_hash: str) -> None:
