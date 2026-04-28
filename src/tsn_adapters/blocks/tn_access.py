@@ -675,7 +675,7 @@ class TNAccessBlock(Block):
                 "inputs": [{"date": date_int, "value": float(row.value)}],
             })
 
-        # Resume budget. 5 in-process attempts × 30s pause covers ~2.5 min of
+        # Resume budget. 5 in-process attempts x 30s pause covers ~2.5 min of
         # backend recovery time before falling back to the Prefect-task retry,
         # which then has its own 5 retries. Total cushion ≈ 12 min.
         MAX_RESUMES = 5
@@ -684,59 +684,62 @@ class TNAccessBlock(Block):
         cumulative_tx_hashes: list[str] = []
         remaining = flat_batches
 
-        with concurrency("tn-write", occupy=1):
-            for attempt in range(MAX_RESUMES + 1):
-                if not remaining:
-                    return cumulative_tx_hashes
+        # The tn-write slot is held only across the actual insert attempt;
+        # backoff sleep + resume bookkeeping run lock-free so other writers
+        # aren't starved while we wait.
+        for attempt in range(MAX_RESUMES + 1):
+            if not remaining:
+                return cumulative_tx_hashes
 
-                inserter = BulkInserter(self.client, batch_size=batch_size)
-                try:
+            inserter = BulkInserter(self.client, batch_size=batch_size)
+            try:
+                with concurrency("tn-write", occupy=1):
                     tx_hashes = inserter.insert_all(remaining)
-                    cumulative_tx_hashes.extend(tx_hashes)
-                    return cumulative_tx_hashes
-                except BulkInsertError as exc:
-                    cumulative_tx_hashes.extend(exc.tx_hashes)
+                cumulative_tx_hashes.extend(tx_hashes)
+                return cumulative_tx_hashes
+            except BulkInsertError as exc:
+                cumulative_tx_hashes.extend(exc.tx_hashes)
 
-                    # A drain failure means every chunk WAS broadcast — only
-                    # WaitTx polling failed. Re-running here makes no sense
-                    # (we'd just re-broadcast already-admitted txs). Surface
-                    # to the Prefect retry / caller with the full hash set.
-                    if exc.drain_failure:
-                        raise BulkInsertError(
-                            str(exc),
-                            tx_hashes=cumulative_tx_hashes,
-                            drain_failure=True,
-                            failed_chunk_index=exc.failed_chunk_index,
-                        ) from exc
-
-                    done = exc.failed_chunk_index * batch_size
-                    new_remaining = remaining[done:]
-                    self.logger.warning(
-                        "BulkInserter resume #%d: %d records committed this pass, "
-                        "%d remaining (failed at chunk %d: %s)",
-                        attempt + 1, done, len(new_remaining), exc.failed_chunk_index,
-                        str(exc).splitlines()[0],
-                    )
-
-                    # Need real progress AND budget left to keep going.
-                    if (
-                        attempt < MAX_RESUMES
-                        and new_remaining
-                        and len(new_remaining) < len(remaining)
-                    ):
-                        remaining = new_remaining
-                        time.sleep(RESUME_PAUSE_SECONDS)
-                        continue
-
-                    # Out of attempts (or no progress). Re-raise carrying the
-                    # cumulative hashes, not just this attempt's, so the outer
-                    # Prefect retry can dedupe / report correctly.
+                # A drain failure means every chunk WAS broadcast — only
+                # WaitTx polling failed. Re-running here makes no sense
+                # (we'd just re-broadcast already-admitted txs). Surface
+                # to the Prefect retry / caller with the full hash set.
+                if exc.drain_failure:
                     raise BulkInsertError(
                         str(exc),
                         tx_hashes=cumulative_tx_hashes,
-                        drain_failure=False,
+                        drain_failure=True,
                         failed_chunk_index=exc.failed_chunk_index,
                     ) from exc
+
+                done = exc.failed_chunk_index * batch_size
+                new_remaining = remaining[done:]
+                self.logger.warning(
+                    "BulkInserter resume #%d: %d records committed this pass, "
+                    "%d remaining (failed at chunk %d: %s)",
+                    attempt + 1, done, len(new_remaining), exc.failed_chunk_index,
+                    str(exc).splitlines()[0],
+                )
+
+                # Need real progress AND budget left to keep going.
+                if (
+                    attempt < MAX_RESUMES
+                    and new_remaining
+                    and len(new_remaining) < len(remaining)
+                ):
+                    remaining = new_remaining
+                    time.sleep(RESUME_PAUSE_SECONDS)
+                    continue
+
+                # Out of attempts (or no progress). Re-raise carrying the
+                # cumulative hashes, not just this attempt's, so the outer
+                # Prefect retry can dedupe / report correctly.
+                raise BulkInsertError(
+                    str(exc),
+                    tx_hashes=cumulative_tx_hashes,
+                    drain_failure=False,
+                    failed_chunk_index=exc.failed_chunk_index,
+                ) from exc
 
         # Defensive: loop only exits via return or raise, but mypy/pyright
         # need a terminal statement.
