@@ -272,10 +272,16 @@ class TNAccessBlock(Block):
         """Return True if the decimal string val quantized to 18 decimals is non-zero."""
         try:
             d = decimal.Decimal(val)
-            q = d.quantize(decimal.Decimal("1e-18"), rounding=decimal.ROUND_DOWN)
-            return not q.is_zero()
         except decimal.InvalidOperation:
             raise ValueError(f"Could not parse '{val}' in 'value' column as Decimal.")
+        # Any |val| >= 1 is trivially non-zero at 18 decimals; skip quantize so we
+        # don't blow past the default 28-digit precision (FMP can yield market caps,
+        # volumes etc. >= 1e10 which need >28 digits when quantized to 1e-18).
+        if abs(d) >= 1:
+            return True
+        with decimal.localcontext() as ctx:
+            ctx.prec = max(ctx.prec, 50)
+            return not d.quantize(decimal.Decimal("1e-18"), rounding=decimal.ROUND_DOWN).is_zero()
 
     class Error(Exception):
         """Base error class for TNAccessBlock errors."""
