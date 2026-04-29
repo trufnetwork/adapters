@@ -420,7 +420,7 @@ class TNAccessBlock(Block):
         if result is None:
             return None
 
-        return TnRecord(date=int(result["date"]), value=float(result["value"]))
+        return TnRecord(date=int(result["EventTime"]), value=float(result["Value"]))
 
     @handle_tn_errors
     def read_records(

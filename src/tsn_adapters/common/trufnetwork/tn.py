@@ -124,7 +124,6 @@ def get_all_tsn_records(
         {
             "date": rec["EventTime"],
             "value": float(rec["Value"]),
-            **{k: v for k, v in rec.items() if k not in ("EventTime", "Value")},
         }
         for rec in recs
     ]
