@@ -656,16 +656,17 @@ def real_time_flow(
                 # map_failed_batches_count += 1
                 # batch_errors.append(unexpected_type_msg)
 
-        # If any batch failed during the map phase, return early with those specific errors
+        # If any batch failed during the map phase, raise so Prefect marks the run
+        # as FAILED in the dashboard. Returning a `success=False` FlowResult here
+        # used to leave the flow run in a COMPLETED state — silent breakage that
+        # hid a 73-day FMP volume-coerce regression (2026-02-23 → 2026-05-07).
         if batch_errors:
-             logger.error(f"Flow failed during batch fetching. Reporting {len(batch_errors)} errors.")
-             # Use the accurate count of failures detected here
-             return create_error_result(
-                 error_msg="One or more batches failed during fetch.", # Primary message for the result dict
-                 total_symbols=total_symbols,
-                 failed_batches=map_failed_batches_count,
-                 existing_errors=batch_errors # List of detailed batch errors
-             )
+            logger.error(f"Flow failed during batch fetching. Reporting {len(batch_errors)} errors.")
+            raise CriticalFlowError(
+                f"{map_failed_batches_count}/{total_batches} batches failed during fetch: "
+                + "; ".join(batch_errors[:5])
+                + (f" (+{len(batch_errors) - 5} more)" if len(batch_errors) > 5 else "")
+            )
         # --- End check for immediate failures ---
 
 

@@ -16,9 +16,16 @@ T = TypeVar("T", bound="ProductDescriptionModel")
 S = TypeVar("S", bound="SepaProductosDataModel")
 
 
-class SepaProductosAlternativeModel(type(BaseModel), pa.DataFrameModel):
+class SepaProductosAlternativeModel(pa.DataFrameModel):
     """
     Alternative model for SEPA productos data.
+
+    Note: this used to inherit from `(type(BaseModel), pa.DataFrameModel)` —
+    a metaclass mixing trick that broke under pydantic 2 + pandera 0.31
+    because `cls.__fields__` is a property in pydantic 2 (not a dict),
+    and pandera's internals call `.keys()` on it. The mixing wasn't
+    actually needed: `filter_failures` only uses `model.validate()`, which
+    is pure pandera. Drop the metaclass mix to restore introspection.
     """
 
     @classmethod

@@ -116,7 +116,12 @@ class BatchQuoteShort(DataFrameModel):
     price: Series[pd.Float64Dtype] = Field(
         nullable=True, ge=0.0, coerce=True
     )  # Allow null prices, must be non-negative when present
-    volume: Series[pd.Int64Dtype] = Field(nullable=True)
+    # FMP returns fractional volume for many tickers (e.g. RFIX, GUSA, ABVEW),
+    # which breaks pd.Int64Dtype coercion under pandera ≥ 0.31 with the cryptic
+    # "Could not coerce <Series> data_container into type Int64:None" — failing
+    # the whole 500-symbol batch. The column is only validated for presence
+    # downstream, never used for arithmetic, so accept any numeric type.
+    volume: Series[pd.Float64Dtype] = Field(nullable=True)
 
     class Config(DataFrameModel.Config):
         strict = "filter"
