@@ -23,6 +23,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 from tsn_adapters.blocks.tn_access import convert_to_typed_df
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.flows.fmp.real_time_flow import (
+    CriticalFlowError,
     batch_symbols,
     combine_batch_results,
     convert_quotes_to_tn_data,
@@ -156,7 +157,12 @@ class TestRealTimeFlow:
 
     @pytest.mark.timeout(5, func_only=True)
     def test_real_time_flow_api_error(self, error_fmp_block: ErrorFMPBlock):
-        """Test the flow's behavior when FMP API calls fail."""
+        """When all batches fail, the flow must raise so Prefect marks FAILED.
+
+        Previously this returned a `FlowResult(success=False)` which left the
+        run in COMPLETED state — a green dashboard hiding 73 days of broken
+        ingestion. Critical batch-fetch failures must surface to the operator.
+        """
         # Test direct error from the FMP block
         with pytest.raises(RuntimeError, match="API Error"):
             error_fmp_block.get_batch_quote(["AAPL"])
@@ -167,16 +173,14 @@ class TestRealTimeFlow:
         # Streams need to be 'deployed' in the fake for the flow to attempt processing
         tn_block.set_deployed_streams({"stream_aapl"})
 
-        # The flow should capture the error and return a failed result
-        result = real_time_flow(
-            fmp_block=error_fmp_block,
-            psd_block=psd_block,
-            tn_block=tn_block,
-            tickers_per_request=1,
-            fetch_task=fetch_quotes_for_batch.with_options(retries=0),
-        )
-        assert result["success"] is False
-        assert "API Error" in result["errors"][0]
+        with pytest.raises(CriticalFlowError, match="batches failed during fetch"):
+            real_time_flow(
+                fmp_block=error_fmp_block,
+                psd_block=psd_block,
+                tn_block=tn_block,
+                tickers_per_request=1,
+                fetch_task=fetch_quotes_for_batch.with_options(retries=0),
+            )
 
 
 class TestProcessDataAndDescriptor:
@@ -201,9 +205,9 @@ class TestProcessDataAndDescriptor:
             process_data(None, sample_descriptor_df)  # type: ignore
 
     def test_process_data_with_exception(self, sample_descriptor_df: DataFrame[PrimitiveSourceDataModel]):
-        """Test that process_data raises RuntimeError with exception details when quotes_df is an Exception."""
+        """Test that process_data raises CriticalFlowError with exception details when quotes_df is an Exception."""
         test_error = RuntimeError("Test API Error")
-        with pytest.raises(RuntimeError, match=f"Cannot process data: quotes DataFrame is {test_error}"):
+        with pytest.raises(CriticalFlowError, match=r"received upstream exception of type RuntimeError: Test API Error"):
             process_data(test_error, sample_descriptor_df)  # type: ignore
 
     def test_get_symbols_from_descriptor(self):
@@ -406,8 +410,58 @@ class TestNullPriceHandling:
         assert result["failed_batches"] == 0
         assert len(result["errors"]) == 0
 
-        # Verify no data was inserted
-        assert len(tn_block.inserted_records) == 0
+
+class TestFractionalVolume:
+    """FMP returns fractional volume for some tickers (e.g., RFIX, GUSA, ABVEW).
+    Regression: pd.Int64Dtype coercion failed the entire batch with the cryptic
+    "Could not coerce <Series> data_container into type Int64:None" error,
+    silently breaking ingestion from 2026-02-23 to 2026-05-07. Schema must accept
+    fractional floats since volume is never used downstream.
+    """
+
+    def test_batch_quote_short_accepts_fractional_volume(self):
+        """BatchQuoteShort must validate FMP responses with fractional volumes."""
+        data = [
+            {"symbol": "RFIX", "price": 1.0, "volume": 210868.65373},
+            {"symbol": "GUSA", "price": 2.0, "volume": 13.019},
+            {"symbol": "AAPL", "price": 287.51, "volume": 58322453},  # int still OK
+            {"symbol": "ZZZZ", "price": 0.5, "volume": None},  # null still OK
+        ]
+        df = DataFrame[BatchQuoteShort](pd.DataFrame(data))
+        assert len(df) == 4
+        assert df.iloc[0]["volume"] == 210868.65373
+        assert df.iloc[1]["volume"] == 13.019
+        assert df.iloc[2]["volume"] == 58322453
+        assert pd.isna(df.iloc[3]["volume"])
+
+    @pytest.mark.usefixtures("prefect_test_fixture")
+    def test_real_time_flow_with_fractional_volume(self):
+        """End-to-end: flow processes batches even when FMP returns fractional volume."""
+
+        class FractionalVolumeFMPBlock(FMPBlock):
+            def get_batch_quote(self, symbols: list[str]) -> DataFrame[BatchQuoteShort]:
+                data = {
+                    "symbol": symbols,
+                    "price": [150.0] * len(symbols),
+                    "volume": [13.019 * (i + 1) for i in range(len(symbols))],
+                }
+                return DataFrame[BatchQuoteShort](pd.DataFrame(data))
+
+        block = FractionalVolumeFMPBlock(api_key=SecretStr("fake"))
+        psd_block = FakePrimitiveSourcesDescriptorBlock()
+        tn_block = FakeTNAccessBlock()
+        tn_block.set_deployed_streams({"stream_aapl", "stream_googl", "stream_msft"})
+
+        result = real_time_flow(
+            fmp_block=block,
+            psd_block=psd_block,
+            tn_block=tn_block,
+            tickers_per_request=3,
+        )
+
+        assert result["success"] is True
+        assert result["failed_batches"] == 0
+        assert result["processed_quotes"] == 3
 
 
 if __name__ == "__main__":

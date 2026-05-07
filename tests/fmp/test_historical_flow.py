@@ -28,6 +28,7 @@ from tsn_adapters.blocks.primitive_source_descriptor import (
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import StreamLocatorModel, TnDataRowModel
 from tsn_adapters.flows.fmp.historical_flow import (
+    HistoricalFlowError,
     convert_eod_to_tn_df,
     fetch_historical_data,
     get_earliest_data_date,
@@ -230,6 +231,13 @@ class FakeTNAccessBlock(TNAccessBlock):
             pd.DataFrame(stream_ids, data_providers, columns=["stream_id", "data_provider"])
         )
 
+    def batch_filter_streams_by_existence(
+        self, locators: list[Any], return_existing: bool
+    ) -> list[Any]:
+        """Mock filter — treat any locator with stream_id starting 'stream_' as existing."""
+        is_existing = lambda loc: loc.get("stream_id", "").startswith("stream_") if isinstance(loc, dict) else False
+        return [loc for loc in locators if is_existing(loc) is return_existing]
+
     def get_client(self) -> TNClient:
         """Mock to prevent real client creation. Raises an exception if accessed."""
         raise RuntimeError("Access to real TNClient is not allowed in tests.")
@@ -339,12 +347,14 @@ class TestHistoricalFlow:
             side_effect=get_earliest_data_date.with_options(retries=0),
         )
 
-        # Flow should complete without raising an exception
-        await historical_flow(
-            fmp_block=error_fmp_block,
-            psd_block=fake_psd_block,
-            tn_block=fake_tn_block,
-        )
+        # Flow should raise so Prefect marks the run FAILED — silent
+        # `success=False` returns hide outages from the dashboard.
+        with pytest.raises(HistoricalFlowError, match="API Error"):
+            await historical_flow(
+                fmp_block=error_fmp_block,
+                psd_block=fake_psd_block,
+                tn_block=fake_tn_block,
+            )
 
         # Verify that no records were inserted for the failed ticker
         assert len(fake_tn_block.inserted_records) == 0
