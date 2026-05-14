@@ -21,6 +21,7 @@ dependencies = [
     "prefect-aws",
     "bs4",
     "tqdm",
+    "yfinance>=0.2",
 ]
 
 [project.optional-dependencies]

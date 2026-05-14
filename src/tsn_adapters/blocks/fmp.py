@@ -231,6 +231,25 @@ class ExchangeQuote(DataFrameModel):
         coerce = True
 
 
+class EarningsData(DataFrameModel):
+    """Schema for FMP earnings data.
+
+    Covers /stable/earnings (per-ticker history) and /stable/earnings-calendar
+    (date-range batch). epsActual already reflects the correct GAAP/non-GAAP
+    convention per ticker as reported by FMP.
+    """
+
+    symbol: Series[str]
+    date: Series[str]
+    epsEstimated: Series[pd.Float64Dtype] = Field(nullable=True)
+    epsActual: Series[pd.Float64Dtype] = Field(nullable=True)
+    lastUpdated: Series[str] = Field(nullable=True)
+
+    class Config(DataFrameModel.Config):
+        strict = "filter"
+        coerce = True
+
+
 class FMPBlock(Block):
     api_key: SecretStr
 
@@ -496,4 +515,16 @@ class FMPBlock(Block):
             endpoint=FMPEndpoint(FMPAPI.STABLE, "index-list"),
             model_type=IndexInfo,
             log_entity_name="stock market indexes",
+        )
+
+    def get_historical_earnings(self, symbol: str, limit: int = 40) -> DataFrame[EarningsData]:
+        """Per-ticker earnings history with estimates and actuals.
+
+        Uses /stable/earnings. limit=40 covers ~10 years of quarterly data.
+        epsActual already uses GAAP or non-GAAP per ticker as FMP reports it.
+        """
+        return self._fetch_fmp_list_data(
+            endpoint=FMPEndpoint(FMPAPI.STABLE, "earnings", {"symbol": symbol, "limit": limit}),
+            model_type=EarningsData,
+            log_entity_name=f"{symbol} historical earnings",
         )
