@@ -35,7 +35,7 @@ from tsn_adapters.tasks.argentina.utils.weighted_average import combine_weighted
 from tsn_adapters.utils.deroutine import force_sync
 
 
-@task(name="Process Raw Data in Batches")
+@task(name="Process Raw Data in Batches", cache_policy=CachePolicies.NO_CACHE)
 def process_raw_data_streaming(
     raw_data_stream: Iterator[SepaDF],
     category_map_df: CategoryMapDF,
@@ -137,7 +137,7 @@ def process_raw_data_streaming(
 
 
 # Keep the old function for backward compatibility but mark as deprecated
-@task(name="Process Raw Data")
+@task(name="Process Raw Data", cache_policy=CachePolicies.NO_CACHE)
 def process_raw_data(
     raw_data: SepaDF,
     category_map_df: CategoryMapDF,
