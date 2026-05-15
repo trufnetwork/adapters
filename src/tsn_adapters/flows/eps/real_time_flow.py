@@ -48,7 +48,6 @@ from tsn_adapters.tasks.eps.config import (
     EPS_STREAM_IDS,
     FMP_EPS_STREAM_IDS,
     MAG7,
-    SOURCE_PRIORITY,
     YAHOO_EPS_STREAM_IDS,
 )
 from tsn_adapters.tasks.eps.reconciler import SourceReading, reconcile
@@ -59,16 +58,17 @@ RECENT_QUARTERS = 4
 
 
 def _is_published(tn_block: TNAccessBlock, stream_id: str, date_unix: int) -> bool:
-    """Return True if a record for this exact date already exists in TN."""
-    try:
-        df = tn_block.read_records(
-            stream_id=stream_id,
-            date_from=date_unix,
-            date_to=date_unix,
-        )
-        return not df.empty
-    except Exception:
-        return False
+    """Return True if a record for this exact date already exists in TN.
+
+    Raises on TN errors (fail-closed) — callers are retried by Prefect so a
+    transient failure never silently breaks the read-before-write guarantee.
+    """
+    df = tn_block.read_records(
+        stream_id=stream_id,
+        date_from=date_unix,
+        date_to=date_unix,
+    )
+    return not df.empty
 
 
 @task(retries=3, retry_delay_seconds=30)
@@ -81,12 +81,14 @@ def detect_and_prepare_eps(
     """Detect new EPS prints for one symbol and return all TN rows to insert.
 
     Returns records for:
-    - the FMP primitive stream (raw value, always when new)
-    - the Yahoo primitive stream (raw value, when Yahoo has reported)
+    - the FMP primitive stream (raw value, when FMP has the data)
+    - the Yahoo primitive stream (raw value, when Yahoo has the data)
     - the consensus stream (exact primary-source value, when ≥2 agree)
 
-    Per spec §3: readings are passed to the reconciler in source-priority
-    order (fmp first) so the committed consensus value is FMP's exact figure.
+    Workset is the union of quarter dates from both sources so a quarter
+    reported by only one source is still processed. Per spec §3: readings
+    are passed to the reconciler in source-priority order (fmp first) so
+    the committed consensus value is FMP's exact figure.
     """
     logger = get_logger_safe(__name__)
     consensus_stream = EPS_STREAM_IDS[symbol]
@@ -94,50 +96,56 @@ def detect_and_prepare_eps(
     yahoo_stream = YAHOO_EPS_STREAM_IDS[symbol]
 
     earnings_df = fmp_block.get_historical_earnings(symbol, limit=RECENT_QUARTERS)
-    if earnings_df.empty:
-        return []
-
-    # Fetch Yahoo data for the symbol once (covers all recent quarters)
     yahoo_df = yahoo_block.get_historical_earnings(symbol, limit=RECENT_QUARTERS)
+
+    # Build per-date lookup dicts for O(1) access inside the loop
+    fmp_by_date: dict[str, float] = {}
+    fmp_retrieved: dict[str, str] = {}
+    for _, row in earnings_df.iterrows():
+        if not pd.isna(row.get("epsActual")):
+            d = str(row["date"])
+            fmp_by_date[d] = float(row["epsActual"])
+            fmp_retrieved[d] = str(row.get("lastUpdated") or datetime.now(timezone.utc).isoformat())
+
+    yahoo_by_date: dict[str, float] = {}
+    for _, row in yahoo_df.iterrows():
+        raw = row.get("epsActual")
+        if raw is not None and not pd.isna(raw):
+            yahoo_by_date[str(row["date"])] = float(raw)
+
+    # Union of all quarter dates with at least one source reporting
+    all_dates = sorted(set(fmp_by_date) | set(yahoo_by_date))
 
     records: list[dict] = []
 
-    for _, row in earnings_df.iterrows():
-        if pd.isna(row.get("epsActual")):
-            continue  # quarter not yet reported by FMP
-
-        date_str = str(row["date"])
+    for date_str in all_dates:
         date_unix = date_string_to_unix(date_str)
 
         # Skip entirely if consensus is already committed
         if _is_published(tn_block, consensus_stream, date_unix):
             continue
 
-        fmp_eps = float(row["epsActual"])
-        retrieved_fmp = str(row.get("lastUpdated") or datetime.now(timezone.utc).isoformat())
-
-        # --- FMP primitive stream ---
-        if not _is_published(tn_block, fmp_stream, date_unix):
-            records.append({
-                "stream_id": fmp_stream,
-                "date": date_unix,
-                "value": str(fmp_eps),
-                "data_provider": None,
-            })
-
         # Build readings in priority order (spec §3: fmp first)
-        readings: list[SourceReading] = [
-            SourceReading(source="fmp", eps_actual=fmp_eps, retrieved_at=retrieved_fmp),
-        ]
+        readings: list[SourceReading] = []
 
-        # --- Yahoo primitive stream ---
-        yahoo_row = yahoo_df[yahoo_df["date"] == date_str] if not yahoo_df.empty else pd.DataFrame()
-        yahoo_eps: float | None = None
-        if not yahoo_row.empty:
-            raw = yahoo_row.iloc[0].get("epsActual")
-            if raw is not None and not pd.isna(raw):
-                yahoo_eps = float(raw)
+        fmp_eps = fmp_by_date.get(date_str)
+        if fmp_eps is not None:
+            if not _is_published(tn_block, fmp_stream, date_unix):
+                records.append({
+                    "stream_id": fmp_stream,
+                    "date": date_unix,
+                    "value": str(fmp_eps),
+                    "data_provider": None,
+                })
+            readings.append(
+                SourceReading(
+                    source="fmp",
+                    eps_actual=fmp_eps,
+                    retrieved_at=fmp_retrieved[date_str],
+                )
+            )
 
+        yahoo_eps = yahoo_by_date.get(date_str)
         if yahoo_eps is not None:
             if not _is_published(tn_block, yahoo_stream, date_unix):
                 records.append({
@@ -155,16 +163,13 @@ def detect_and_prepare_eps(
             )
 
         # --- Reconcile & write consensus ---
-        # readings are already in SOURCE_PRIORITY order (fmp → yahoo)
-        assert [r.source for r in readings] == SOURCE_PRIORITY[:len(readings)], \
-            "readings must be in source priority order"
         result = reconcile(readings)
 
         if result.status == "settled":
             records.append({
                 "stream_id": consensus_stream,
                 "date": date_unix,
-                "value": str(result.value),  # exact FMP figure, no averaging
+                "value": str(result.value),  # exact primary-source figure
                 "data_provider": None,
             })
             logger.info(
@@ -172,7 +177,6 @@ def detect_and_prepare_eps(
                 f"(agreed: {result.sources_agree})"
             )
         elif result.status == "disputed":
-            # Spec §4: flag for manual review; do not commit consensus
             logger.warning(
                 f"{symbol} {date_str}: DISPUTED — "
                 f"fmp={fmp_eps}, yahoo={yahoo_eps}; manual review required"

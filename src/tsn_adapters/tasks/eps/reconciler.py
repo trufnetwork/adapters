@@ -52,24 +52,30 @@ def reconcile(readings: list[SourceReading]) -> ReconcileResult:
             sources_disagree=[],
         )
 
-    # Find the largest group of readings that all agree within TOLERANCE.
-    # Iterating in caller priority order means the first maximum group uses
-    # the highest-priority source as reference — its exact value is committed.
+    # Find the largest contiguous window (by sorted eps_actual) where
+    # max - min <= TOLERANCE. Using a sorted window avoids transitive joins
+    # (e.g. 1.00/1.01/1.02 would falsely settle under the pairwise approach).
+    # Caller priority order is preserved by indexing back into `readings`.
+    sorted_readings = sorted(readings, key=lambda r: r.eps_actual)
     best_group: list[SourceReading] = []
     best_ref_value: float = 0.0
 
-    for ref in readings:
-        group = [r for r in readings if round(abs(r.eps_actual - ref.eps_actual), 10) <= TOLERANCE]
-        if len(group) > len(best_group):
-            best_group = group
-            best_ref_value = ref.eps_actual  # exact figure, no averaging
+    lo = 0
+    for hi in range(len(sorted_readings)):
+        while round(sorted_readings[hi].eps_actual - sorted_readings[lo].eps_actual, 10) > TOLERANCE:
+            lo += 1
+        window = sorted_readings[lo : hi + 1]
+        if len(window) > len(best_group):
+            best_group = window
+            # Committed value = exact figure from the highest-priority source
+            # in the window (earliest position in original `readings` list).
+            best_ref_value = min(window, key=lambda r: readings.index(r)).eps_actual
 
     if len(best_group) >= 2:
         outliers = [r.source for r in readings if r not in best_group]
-        value = round(best_ref_value, 2)
         return ReconcileResult(
             status="settled",
-            value=value,
+            value=best_ref_value,
             sources_agree=[r.source for r in best_group],
             sources_disagree=outliers,
         )

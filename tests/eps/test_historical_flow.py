@@ -115,11 +115,8 @@ def test_historical_flow_no_insert_when_all_published():
     fmp_block = make_fmp_block({"AAPL": [AAPL_FMP_ROW]})
     yahoo_block = make_yahoo_block({"AAPL": [AAPL_YAHOO_ROW]})
     tn_block = FakeTNAccessBlock()
-
-    def fake_read_records(stream_id, date_from=None, date_to=None):
-        return pd.DataFrame({"date": [already_unix]})
-
-    tn_block.read_records = fake_read_records  # type: ignore[assignment]
+    tn_block.seed_records(FMP_EPS_STREAM_IDS["AAPL"], [already_unix])
+    tn_block.seed_records(YAHOO_EPS_STREAM_IDS["AAPL"], [already_unix])
 
     eps_historical_flow(fmp_block=fmp_block, yahoo_block=yahoo_block, tn_block=tn_block, symbols=["AAPL"])
 

@@ -38,7 +38,6 @@ from tsn_adapters.utils.time_utils import date_string_to_unix
 
 # FMP earnings endpoint returns up to `limit` quarters. 50 covers ~12.5 years.
 EARNINGS_LIMIT = 50
-BACKFILL_START = "2015-01-01"
 
 
 @task(retries=3, retry_delay_seconds=30)
@@ -51,17 +50,16 @@ def fetch_yahoo_earnings(yahoo_block: YahooBlock, symbol: str) -> DataFrame[Earn
     return yahoo_block.get_historical_earnings(symbol, limit=EARNINGS_LIMIT)
 
 
-@task
+@task(retries=3, retry_delay_seconds=30)
 def read_published_dates(tn_block: TNAccessBlock, stream_id: str) -> set[int]:
-    """Return unix timestamps already in TN for the given stream."""
-    try:
-        df = tn_block.read_records(
-            stream_id=stream_id,
-            date_from=date_string_to_unix(BACKFILL_START),
-        )
-        return set(df["date"].tolist())
-    except Exception:
-        return set()
+    """Return unix timestamps already in TN for the given stream.
+
+    No date filter — covers the full history returned by EARNINGS_LIMIT so
+    quarters fetched before BACKFILL_START are not re-inserted on reruns.
+    Raises on TN errors (fail-closed); Prefect retries handle transient faults.
+    """
+    df = tn_block.read_records(stream_id=stream_id)
+    return set(df["date"].tolist())
 
 
 @task
