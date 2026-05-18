@@ -1,5 +1,5 @@
 from math import ceil
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import pandas as pd
 from pandera.typing import DataFrame as PanderaDataFrame
@@ -11,7 +11,7 @@ from tsn_adapters.blocks.tn_access import (
     StreamAlreadyExistsError,
     TNAccessBlock,
 )
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
+from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
 
 
 class FakeInternalTNClient(tn_client.TNClient):
@@ -168,6 +168,8 @@ class FakeTNAccessBlock(TNAccessBlock):
         self._block_error_on: dict[str, Any] = error_on_block_method or {}
         # _inserted_records_df_history is now managed by FakeInternalTNClient
         self._init_calls: list[str] = []
+        # Per-stream pre-seeded records for read_records(); keyed by stream_id
+        self._seeded_records: dict[str, list[dict]] = {}
 
     @property
     def client(self) -> tn_client.TNClient:  # Ensures this FakeTNAccessBlock uses the FakeInternalTNClient
@@ -266,3 +268,23 @@ class FakeTNAccessBlock(TNAccessBlock):
     def set_client(self, client: Any) -> None:
         """Set the internal client for testing."""
         self._client = client
+
+    def seed_records(self, stream_id: str, dates: list[int]) -> None:
+        """Pre-populate read_records responses for a stream (unix timestamps)."""
+        self._seeded_records[stream_id] = [{"date": d, "value": "0"} for d in dates]
+
+    def read_records(
+        self,
+        stream_id: str,
+        data_provider: Optional[str] = None,
+        date_from: Union[int, None] = None,
+        date_to: Union[int, None] = None,
+    ) -> PanderaDataFrame[TnRecordModel]:
+        rows = self._seeded_records.get(stream_id, [])
+        if date_from is not None:
+            rows = [r for r in rows if r["date"] >= date_from]
+        if date_to is not None:
+            rows = [r for r in rows if r["date"] <= date_to]
+        if not rows:
+            return PanderaDataFrame[TnRecordModel](pd.DataFrame({"date": pd.Series([], dtype=int), "value": pd.Series([], dtype=str)}))
+        return PanderaDataFrame[TnRecordModel](pd.DataFrame(rows))
