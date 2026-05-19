@@ -209,6 +209,11 @@ async def insert_argentina_products_flow(
     try:
         descriptor_df: DataFrame[PrimitiveSourceDataModel] = descriptor_block.get_descriptor()
         logger.info(f"Successfully loaded product descriptor with {len(descriptor_df)} entries from block.")
+        # Apply the same `.0`-stripping the daily-averages reader does so the
+        # descriptor's source_id and the daily id_producto stay in one shape.
+        descriptor_df["source_id"] = (
+            descriptor_df["source_id"].astype("string").str.replace(r"\.0$", "", regex=True)
+        )
     except Exception as e_desc:
         # load_product_descriptor already logs critically and raises DescriptorError
         logger.critical(
