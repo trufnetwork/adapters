@@ -85,9 +85,8 @@ class SepaS3BaseProvider(ABC, Generic[T]):
         content_in_bytes = force_sync(self.s3_block.read_path)(self.get_full_path(file_key))
         buffer = io.BytesIO(content_in_bytes)
         df = pd.read_csv(buffer, compression="zip")
-        # Pandas infers `id_producto` as float64 when even one row carries a `.0`
-        # suffix (upstream preprocessing artifact). Downstream `astype(str)` then
-        # strands every value with `.0` and breaks the descriptor join.
+        # A `.0` suffix in even one row widens id_producto to float64 — normalize
+        # all values to integer-strings so downstream consumers see one shape.
         if "id_producto" in df.columns:
             df["id_producto"] = (
                 df["id_producto"].astype("string").str.replace(r"\.0$", "", regex=True)

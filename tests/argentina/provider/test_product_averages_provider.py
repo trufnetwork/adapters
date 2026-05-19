@@ -114,9 +114,6 @@ def _build_zip_csv_bytes(csv_text: str) -> bytes:
 
 
 def test_read_csv_strips_dot_zero_from_id_producto(provider: ProductAveragesProvider, mock_s3_block: MagicMock):
-    # Real-world fingerprint: one `.0`-tainted row poisons pandas dtype inference
-    # for the whole column. The reader must normalize so the downstream join
-    # against the descriptor's clean integer-strings does not collapse.
     csv_text = (
         "id_producto,productos_descripcion,productos_precio_lista_avg,date,product_count\n"
         "100119,Item A,10.5,2025-12-23,1\n"
