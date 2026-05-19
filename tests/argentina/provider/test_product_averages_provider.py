@@ -1,3 +1,4 @@
+import io
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -103,4 +104,54 @@ def test_exists_false(mock_path_exists: MagicMock, provider: ProductAveragesProv
     result = provider.exists(test_date)
 
     mock_path_exists.assert_called_once_with(expected_relative_key) # Assert relative key
-    assert result is False 
+    assert result is False
+
+
+def _build_zip_csv_bytes(csv_text: str) -> bytes:
+    buf = io.BytesIO()
+    pd.read_csv(io.StringIO(csv_text)).to_csv(buf, index=False, compression="zip")
+    return buf.getvalue()
+
+
+def test_read_csv_strips_dot_zero_from_id_producto(provider: ProductAveragesProvider, mock_s3_block: MagicMock):
+    # Real-world fingerprint: one `.0`-tainted row poisons pandas dtype inference
+    # for the whole column. The reader must normalize so the downstream join
+    # against the descriptor's clean integer-strings does not collapse.
+    csv_text = (
+        "id_producto,productos_descripcion,productos_precio_lista_avg,date,product_count\n"
+        "100119,Item A,10.5,2025-12-23,1\n"
+        "7790260013058.0,Item B,20.0,2025-12-23,2\n"
+        "7791290795013.0,Item C,30.0,2025-12-23,3\n"
+    )
+    mock_s3_block.read_path = MagicMock(return_value=_build_zip_csv_bytes(csv_text))
+
+    df = provider.read_csv("2025-12-23/product_averages.zip")
+
+    assert df["id_producto"].tolist() == ["100119", "7790260013058", "7791290795013"]
+
+
+def test_read_csv_passes_clean_integer_ids_through_unchanged(
+    provider: ProductAveragesProvider, mock_s3_block: MagicMock
+):
+    csv_text = (
+        "id_producto,productos_descripcion,productos_precio_lista_avg,date,product_count\n"
+        "100119,Item A,10.5,2025-11-19,1\n"
+        "100121,Item B,20.0,2025-11-19,2\n"
+    )
+    mock_s3_block.read_path = MagicMock(return_value=_build_zip_csv_bytes(csv_text))
+
+    df = provider.read_csv("2025-11-19/product_averages.zip")
+
+    assert df["id_producto"].tolist() == ["100119", "100121"]
+
+
+def test_read_csv_without_id_producto_column_is_unchanged(
+    provider: ProductAveragesProvider, mock_s3_block: MagicMock
+):
+    csv_text = "some_other_col,value\nalpha,1\nbeta,2\n"
+    mock_s3_block.read_path = MagicMock(return_value=_build_zip_csv_bytes(csv_text))
+
+    df = provider.read_csv("anything.zip")
+
+    assert "id_producto" not in df.columns
+    assert df["some_other_col"].tolist() == ["alpha", "beta"]

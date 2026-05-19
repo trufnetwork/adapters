@@ -84,7 +84,15 @@ class SepaS3BaseProvider(ABC, Generic[T]):
         """Read a CSV file from S3."""
         content_in_bytes = force_sync(self.s3_block.read_path)(self.get_full_path(file_key))
         buffer = io.BytesIO(content_in_bytes)
-        return pd.read_csv(buffer, compression="zip")
+        df = pd.read_csv(buffer, compression="zip")
+        # Pandas infers `id_producto` as float64 when even one row carries a `.0`
+        # suffix (upstream preprocessing artifact). Downstream `astype(str)` then
+        # strands every value with `.0` and breaks the descriptor join.
+        if "id_producto" in df.columns:
+            df["id_producto"] = (
+                df["id_producto"].astype("string").str.replace(r"\.0$", "", regex=True)
+            )
+        return df
 
     def write_csv(self, file_key: str, data: PandasDataFrame) -> None:
         """Write a CSV file to S3."""
