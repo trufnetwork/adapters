@@ -37,6 +37,7 @@ from tsn_adapters.tasks.eps.config import (
     truf_eps_stream_name,
     yahoo_eps_stream_name,
 )
+from tsn_adapters.utils.logging import get_logger_safe
 
 ALL_EPS_SOURCE_TYPES: tuple[str, ...] = ("fmp_eps", "yahoo_eps", "truf_eps")
 
@@ -101,7 +102,20 @@ def eps_deploy_flow(
     DeploymentStateBlock to persist deployment state across runs and
     avoid redundant TN existence checks.
     """
+    logger = get_logger_safe(__name__)
     descriptor = EpsSourceDescriptor(source_types=source_types)
+
+    # Log the symbol → stream_id mapping under the active wallet so the
+    # operator can paste a (data_provider, label, stream_id) table
+    # straight from the Prefect run into deployment documentation.
+    mapping_df = descriptor.get_descriptor()
+    wallet = tn_block.current_account
+    logger.info(f"EPS deploy mapping (wallet={wallet}, source_types={source_types}):")
+    for _, row in mapping_df.iterrows():
+        logger.info(
+            f"  {row['source_id']:<6} {row['source_display_name']:<28} {row['stream_id']}"
+        )
+
     return deploy_streams_flow(
         psd_block=descriptor,
         tna_block=tn_block,
