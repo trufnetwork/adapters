@@ -18,8 +18,12 @@ Usage (single-shot, idempotent — already-published dates are skipped):
     eps_historical_flow(
         fmp_block=FMPBlock.load("default"),
         yahoo_block=YahooBlock.load("default"),
-        tn_block=TNAccessBlock.load("default"),
+        fmp_tn_block=TNAccessBlock.load("fmp-eps"),
+        yahoo_tn_block=TNAccessBlock.load("yahoo-eps"),
     )
+
+`fmp_tn_block` and `yahoo_tn_block` may point at the same TN wallet
+when source identities are not split.
 """
 from __future__ import annotations
 
@@ -98,10 +102,15 @@ def build_new_records(
 def eps_historical_flow(
     fmp_block: FMPBlock,
     yahoo_block: YahooBlock,
-    tn_block: TNAccessBlock,
+    fmp_tn_block: TNAccessBlock,
+    yahoo_tn_block: TNAccessBlock,
     symbols: list[str] = MAG7,
 ) -> None:
     """Backfill Mag-7 historical EPS into FMP and Yahoo primitive streams on TN.
+
+    Each source writes via its own TN block: `fmp_tn_block` owns the
+    `fmp_eps_*` streams, `yahoo_tn_block` owns the `yahoo_eps_*` streams.
+    Pass the same block for both when source identities share a wallet.
 
     Safe to re-run: already-published dates are skipped. Both the FMP and Yahoo
     primitive streams must be deployed before running.
@@ -109,7 +118,8 @@ def eps_historical_flow(
     logger = get_logger_safe(__name__)
     logger.info(f"Starting EPS historical backfill for {symbols}")
 
-    all_records = pd.DataFrame(columns=["stream_id", "date", "value", "data_provider"])
+    fmp_records = pd.DataFrame(columns=["stream_id", "date", "value", "data_provider"])
+    yahoo_records = pd.DataFrame(columns=["stream_id", "date", "value", "data_provider"])
 
     for symbol in symbols:
         fmp_stream_id = FMP_EPS_STREAM_IDS[symbol]
@@ -117,7 +127,7 @@ def eps_historical_flow(
 
         # --- FMP source ---
         fmp_earnings = fetch_fmp_earnings(fmp_block=fmp_block, symbol=symbol)
-        fmp_published = read_published_dates(tn_block=tn_block, stream_id=fmp_stream_id)
+        fmp_published = read_published_dates(tn_block=fmp_tn_block, stream_id=fmp_stream_id)
         fmp_new = build_new_records(
             earnings_df=fmp_earnings,
             stream_id=fmp_stream_id,
@@ -127,7 +137,7 @@ def eps_historical_flow(
 
         # --- Yahoo source ---
         yahoo_earnings = fetch_yahoo_earnings(yahoo_block=yahoo_block, symbol=symbol)
-        yahoo_published = read_published_dates(tn_block=tn_block, stream_id=yahoo_stream_id)
+        yahoo_published = read_published_dates(tn_block=yahoo_tn_block, stream_id=yahoo_stream_id)
         yahoo_new = build_new_records(
             earnings_df=yahoo_earnings,
             stream_id=yahoo_stream_id,
@@ -135,17 +145,26 @@ def eps_historical_flow(
         )
         logger.info(f"{symbol}: {len(yahoo_new)} new Yahoo record(s)")
 
-        all_records = pd.concat([all_records, fmp_new, yahoo_new], ignore_index=True)
+        fmp_records = pd.concat([fmp_records, fmp_new], ignore_index=True)
+        yahoo_records = pd.concat([yahoo_records, yahoo_new], ignore_index=True)
 
-    if all_records.empty:
+    if fmp_records.empty and yahoo_records.empty:
         logger.info("No new EPS records to insert — backfill already up-to-date")
         return
 
-    task_split_and_insert_records(
-        block=tn_block,
-        records=DataFrame[TnDataRowModel](all_records),
-    )
-    logger.info(f"Inserted {len(all_records)} EPS records across FMP + Yahoo streams")
+    if not fmp_records.empty:
+        task_split_and_insert_records(
+            block=fmp_tn_block,
+            records=DataFrame[TnDataRowModel](fmp_records),
+        )
+        logger.info(f"Inserted {len(fmp_records)} EPS records into FMP streams")
+
+    if not yahoo_records.empty:
+        task_split_and_insert_records(
+            block=yahoo_tn_block,
+            records=DataFrame[TnDataRowModel](yahoo_records),
+        )
+        logger.info(f"Inserted {len(yahoo_records)} EPS records into Yahoo streams")
 
 
 if __name__ == "__main__":
@@ -155,7 +174,13 @@ if __name__ == "__main__":
     async def main() -> None:
         fmp_block = deroutine(FMPBlock.load("default"))
         yahoo_block = deroutine(YahooBlock.load("default"))
-        tn_block = deroutine(TNAccessBlock.load("default"))
-        eps_historical_flow(fmp_block=fmp_block, yahoo_block=yahoo_block, tn_block=tn_block)
+        fmp_tn_block = deroutine(TNAccessBlock.load("fmp-eps"))
+        yahoo_tn_block = deroutine(TNAccessBlock.load("yahoo-eps"))
+        eps_historical_flow(
+            fmp_block=fmp_block,
+            yahoo_block=yahoo_block,
+            fmp_tn_block=fmp_tn_block,
+            yahoo_tn_block=yahoo_tn_block,
+        )
 
     asyncio.run(main())
