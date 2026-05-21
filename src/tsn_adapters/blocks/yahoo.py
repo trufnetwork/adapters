@@ -13,9 +13,9 @@ from tsn_adapters.blocks.fmp import EarningsData
 from tsn_adapters.utils.logging import get_logger_safe
 
 # Yahoo aggressively rate-limits non-residential IPs (notably AWS).
-# yfinance hides 429s — get_earnings_dates returns None and prints
-# "$SYM: possibly delisted; no earnings dates found" via its own logger.
-# We retry inside the block so the caller's @task retry stays a backstop.
+# On HTTP 429, yfinance.Ticker.get_earnings_dates returns None without
+# raising — so empty/None results must be treated as failures to retry.
+# We retry inside the block; the caller's @task retry stays a backstop.
 _PRE_CALL_JITTER_S: tuple[float, float] = (0.5, 2.0)
 _BACKOFF_BASE_S: float = 5.0
 _BACKOFF_JITTER_S: tuple[float, float] = (0.0, 3.0)
