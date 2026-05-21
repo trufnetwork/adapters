@@ -9,7 +9,8 @@ description = "A collection of prefect tasks and examples ingesting data into TS
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "prefect-client>=3.4.10",
+    "prefect==3.6.29",
+    "prefect-client==3.6.29",
     "truflation-data@git+https://github.com/truflation/truflation.git@deploy-production-20250618",
     "trufnetwork-sdk-py@git+https://github.com/trufnetwork/sdk-py.git@v0.7.4",
     "PyGithub",
@@ -34,7 +35,7 @@ argentina = [
 ]
 dev = [
     # we need this for the testing harness
-    "prefect>=3.4.10",
+    "prefect==3.6.29",
     "pytest-timeout",
     "pytest-mock",
     "black",
