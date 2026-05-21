@@ -28,8 +28,14 @@ Usage:
     eps_real_time_flow(
         fmp_block=FMPBlock.load("default"),
         yahoo_block=YahooBlock.load("default"),
-        tn_block=TNAccessBlock.load("default"),
+        fmp_tn_block=TNAccessBlock.load("fmp-eps"),
+        yahoo_tn_block=TNAccessBlock.load("yahoo-eps"),
+        truf_tn_block=TNAccessBlock.load("truf-eps"),
     )
+
+Each source identity owns a distinct TN wallet so the on-chain
+`data_provider` field reflects who produced the data. Pass the same
+block for all three when source identities share a wallet.
 """
 from __future__ import annotations
 
@@ -75,15 +81,22 @@ def _is_published(tn_block: TNAccessBlock, stream_id: str, date_unix: int) -> bo
 def detect_and_prepare_eps(
     fmp_block: FMPBlock,
     yahoo_block: YahooBlock,
-    tn_block: TNAccessBlock,
+    fmp_tn_block: TNAccessBlock,
+    yahoo_tn_block: TNAccessBlock,
+    truf_tn_block: TNAccessBlock,
     symbol: str,
-) -> list[dict]:
-    """Detect new EPS prints for one symbol and return all TN rows to insert.
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Detect new EPS prints for one symbol and return per-wallet TN rows.
 
-    Returns records for:
-    - the FMP primitive stream (raw value, when FMP has the data)
-    - the Yahoo primitive stream (raw value, when Yahoo has the data)
-    - the consensus stream (exact primary-source value, when ≥2 agree)
+    Returns a tuple `(fmp_rows, yahoo_rows, truf_rows)` where each list is
+    destined for the matching wallet's TN block:
+    - fmp_rows  → FMP primitive stream (raw value, when FMP has the data)
+    - yahoo_rows → Yahoo primitive stream (raw value, when Yahoo has the data)
+    - truf_rows → consensus stream (exact primary-source value, when ≥2 agree)
+
+    Read scoping: each stream's "already-published?" check uses the block
+    that owns it, so the underlying `read_records` query resolves to the
+    correct on-chain `data_provider`.
 
     Workset is the union of quarter dates from both sources so a quarter
     reported by only one source is still processed. Per spec §3: readings
@@ -116,13 +129,15 @@ def detect_and_prepare_eps(
     # Union of all quarter dates with at least one source reporting
     all_dates = sorted(set(fmp_by_date) | set(yahoo_by_date))
 
-    records: list[dict] = []
+    fmp_rows: list[dict] = []
+    yahoo_rows: list[dict] = []
+    truf_rows: list[dict] = []
 
     for date_str in all_dates:
         date_unix = date_string_to_unix(date_str)
 
         # Skip entirely if consensus is already committed
-        if _is_published(tn_block, consensus_stream, date_unix):
+        if _is_published(truf_tn_block, consensus_stream, date_unix):
             continue
 
         # Build readings in priority order (spec §3: fmp first)
@@ -130,8 +145,8 @@ def detect_and_prepare_eps(
 
         fmp_eps = fmp_by_date.get(date_str)
         if fmp_eps is not None:
-            if not _is_published(tn_block, fmp_stream, date_unix):
-                records.append({
+            if not _is_published(fmp_tn_block, fmp_stream, date_unix):
+                fmp_rows.append({
                     "stream_id": fmp_stream,
                     "date": date_unix,
                     "value": str(fmp_eps),
@@ -147,8 +162,8 @@ def detect_and_prepare_eps(
 
         yahoo_eps = yahoo_by_date.get(date_str)
         if yahoo_eps is not None:
-            if not _is_published(tn_block, yahoo_stream, date_unix):
-                records.append({
+            if not _is_published(yahoo_tn_block, yahoo_stream, date_unix):
+                yahoo_rows.append({
                     "stream_id": yahoo_stream,
                     "date": date_unix,
                     "value": str(yahoo_eps),
@@ -166,7 +181,7 @@ def detect_and_prepare_eps(
         result = reconcile(readings)
 
         if result.status == "settled":
-            records.append({
+            truf_rows.append({
                 "stream_id": consensus_stream,
                 "date": date_unix,
                 "value": str(result.value),  # exact primary-source figure
@@ -187,42 +202,71 @@ def detect_and_prepare_eps(
                 f"{len(readings)} source(s) available, need ≥2 to settle"
             )
 
-    return records
+    return fmp_rows, yahoo_rows, truf_rows
 
 
 @flow(name="EPS Real-Time Detection Flow")
 def eps_real_time_flow(
     fmp_block: FMPBlock,
     yahoo_block: YahooBlock,
-    tn_block: TNAccessBlock,
+    fmp_tn_block: TNAccessBlock,
+    yahoo_tn_block: TNAccessBlock,
+    truf_tn_block: TNAccessBlock,
     symbols: list[str] = MAG7,
 ) -> None:
     """Detect and publish Mag-7 EPS prints to TN.
 
     Writes raw values to per-source primitive streams and, when ≥2 sources
     agree within $0.01, commits the consensus value to the truf_eps stream.
-    Single-shot — driven by external scheduler.
+    Each destination uses its own wallet block so the on-chain `data_provider`
+    reflects the identity that produced the data. Single-shot — driven by
+    external scheduler.
     """
     logger = get_logger_safe(__name__)
     logger.info(f"EPS real-time detection starting for {symbols}")
 
-    all_rows: list[dict] = []
+    fmp_rows: list[dict] = []
+    yahoo_rows: list[dict] = []
+    truf_rows: list[dict] = []
+
     for symbol in symbols:
-        new_rows = detect_and_prepare_eps(
+        fmp_new, yahoo_new, truf_new = detect_and_prepare_eps(
             fmp_block=fmp_block,
             yahoo_block=yahoo_block,
-            tn_block=tn_block,
+            fmp_tn_block=fmp_tn_block,
+            yahoo_tn_block=yahoo_tn_block,
+            truf_tn_block=truf_tn_block,
             symbol=symbol,
         )
-        all_rows.extend(new_rows)
+        fmp_rows.extend(fmp_new)
+        yahoo_rows.extend(yahoo_new)
+        truf_rows.extend(truf_new)
 
-    if not all_rows:
+    total = len(fmp_rows) + len(yahoo_rows) + len(truf_rows)
+    if total == 0:
         logger.info("No new EPS records to publish")
         return
 
-    records_df = DataFrame[TnDataRowModel](pd.DataFrame(all_rows))
-    task_split_and_insert_records(block=tn_block, records=records_df)
-    logger.info(f"Published {len(all_rows)} EPS record(s) across source + consensus streams")
+    if fmp_rows:
+        task_split_and_insert_records(
+            block=fmp_tn_block,
+            records=DataFrame[TnDataRowModel](pd.DataFrame(fmp_rows)),
+        )
+        logger.info(f"Published {len(fmp_rows)} record(s) to FMP streams")
+
+    if yahoo_rows:
+        task_split_and_insert_records(
+            block=yahoo_tn_block,
+            records=DataFrame[TnDataRowModel](pd.DataFrame(yahoo_rows)),
+        )
+        logger.info(f"Published {len(yahoo_rows)} record(s) to Yahoo streams")
+
+    if truf_rows:
+        task_split_and_insert_records(
+            block=truf_tn_block,
+            records=DataFrame[TnDataRowModel](pd.DataFrame(truf_rows)),
+        )
+        logger.info(f"Published {len(truf_rows)} record(s) to Truf consensus streams")
 
 
 if __name__ == "__main__":
@@ -232,7 +276,15 @@ if __name__ == "__main__":
     async def main() -> None:
         fmp_block = deroutine(FMPBlock.load("default"))
         yahoo_block = deroutine(YahooBlock.load("default"))
-        tn_block = deroutine(TNAccessBlock.load("default"))
-        eps_real_time_flow(fmp_block=fmp_block, yahoo_block=yahoo_block, tn_block=tn_block)
+        fmp_tn_block = deroutine(TNAccessBlock.load("fmp-eps"))
+        yahoo_tn_block = deroutine(TNAccessBlock.load("yahoo-eps"))
+        truf_tn_block = deroutine(TNAccessBlock.load("truf-eps"))
+        eps_real_time_flow(
+            fmp_block=fmp_block,
+            yahoo_block=yahoo_block,
+            fmp_tn_block=fmp_tn_block,
+            yahoo_tn_block=yahoo_tn_block,
+            truf_tn_block=truf_tn_block,
+        )
 
     asyncio.run(main())

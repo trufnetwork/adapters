@@ -37,55 +37,85 @@ from tsn_adapters.tasks.eps.config import (
     truf_eps_stream_name,
     yahoo_eps_stream_name,
 )
+from tsn_adapters.utils.logging import get_logger_safe
+
+ALL_EPS_SOURCE_TYPES: tuple[str, ...] = ("fmp_eps", "yahoo_eps", "truf_eps")
 
 
 class EpsSourceDescriptor(PrimitiveSourcesDescriptorBlock):
     """In-memory descriptor for EPS streams — no external storage needed.
 
-    Generates all 21 EPS stream definitions (7 tickers × 3 source types)
-    deterministically from config. Stream IDs are computed via generate_stream_id
-    and never change for a given ticker/convention pair.
+    Generates EPS stream definitions (MAG7 × `source_types`) deterministically
+    from config. Stream IDs are computed via generate_stream_id and never
+    change for a given ticker/convention pair.
+
+    `source_types` selects which of {"fmp_eps", "yahoo_eps", "truf_eps"} to
+    include — useful when each source identity lives on its own TN wallet
+    and deployment must be routed accordingly.
     """
 
     _block_type_name = "EPS Source Descriptor"
     _block_type_slug = "eps-source-descriptor"
 
+    source_types: tuple[str, ...] = ALL_EPS_SOURCE_TYPES
+
     def get_descriptor(self) -> DataFrame[PrimitiveSourceDataModel]:
         rows = []
         for symbol in MAG7:
-            rows.append({
-                "stream_id": FMP_EPS_STREAM_IDS[symbol],
-                "source_id": symbol,
-                "source_type": "fmp_eps",
-                "source_display_name": fmp_eps_stream_name(symbol),
-            })
-            rows.append({
-                "stream_id": YAHOO_EPS_STREAM_IDS[symbol],
-                "source_id": symbol,
-                "source_type": "yahoo_eps",
-                "source_display_name": yahoo_eps_stream_name(symbol),
-            })
-            rows.append({
-                "stream_id": EPS_STREAM_IDS[symbol],
-                "source_id": symbol,
-                "source_type": "truf_eps",
-                "source_display_name": truf_eps_stream_name(symbol),
-            })
+            if "fmp_eps" in self.source_types:
+                rows.append({
+                    "stream_id": FMP_EPS_STREAM_IDS[symbol],
+                    "source_id": symbol,
+                    "source_type": "fmp_eps",
+                    "source_display_name": fmp_eps_stream_name(symbol),
+                })
+            if "yahoo_eps" in self.source_types:
+                rows.append({
+                    "stream_id": YAHOO_EPS_STREAM_IDS[symbol],
+                    "source_id": symbol,
+                    "source_type": "yahoo_eps",
+                    "source_display_name": yahoo_eps_stream_name(symbol),
+                })
+            if "truf_eps" in self.source_types:
+                rows.append({
+                    "stream_id": EPS_STREAM_IDS[symbol],
+                    "source_id": symbol,
+                    "source_type": "truf_eps",
+                    "source_display_name": truf_eps_stream_name(symbol),
+                })
         return DataFrame[PrimitiveSourceDataModel](pd.DataFrame(rows))
 
 
 @flow(name="EPS Stream Deployment Flow")
 def eps_deploy_flow(
     tn_block: TNAccessBlock,
+    source_types: tuple[str, ...] = ALL_EPS_SOURCE_TYPES,
     deployment_state: Optional[DeploymentStateBlock] = None,
 ) -> DeployStreamResults:
-    """Deploy all 21 EPS primitive streams to TN.
+    """Deploy EPS primitive streams to TN.
+
+    Streams written go to `tn_block.current_account`. Pass `source_types`
+    to restrict the descriptor to a single source identity per wallet
+    (e.g. `("fmp_eps",)` on the FMP wallet block).
 
     Idempotent — already-deployed streams are skipped. Pass a
     DeploymentStateBlock to persist deployment state across runs and
     avoid redundant TN existence checks.
     """
-    descriptor = EpsSourceDescriptor()
+    logger = get_logger_safe(__name__)
+    descriptor = EpsSourceDescriptor(source_types=source_types)
+
+    # Log the symbol → stream_id mapping under the active wallet so the
+    # operator can paste a (data_provider, label, stream_id) table
+    # straight from the Prefect run into deployment documentation.
+    mapping_df = descriptor.get_descriptor()
+    wallet = tn_block.current_account
+    logger.info(f"EPS deploy mapping (wallet={wallet}, source_types={source_types}):")
+    for _, row in mapping_df.iterrows():
+        logger.info(
+            f"  {row['source_id']:<6} {row['source_display_name']:<28} {row['stream_id']}"
+        )
+
     return deploy_streams_flow(
         psd_block=descriptor,
         tna_block=tn_block,

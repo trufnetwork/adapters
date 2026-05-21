@@ -97,15 +97,25 @@ AAPL_YAHOO_ROW = {"symbol": "AAPL", "date": "2024-03-31", "epsActual": 1.53, "ep
 def test_historical_flow_inserts_fmp_and_yahoo_records():
     fmp_block = make_fmp_block({"AAPL": [AAPL_FMP_ROW]})
     yahoo_block = make_yahoo_block({"AAPL": [AAPL_YAHOO_ROW]})
-    tn_block = FakeTNAccessBlock(existing_streams={FMP_EPS_STREAM_IDS["AAPL"], YAHOO_EPS_STREAM_IDS["AAPL"]})
+    fmp_tn_block = FakeTNAccessBlock(existing_streams={FMP_EPS_STREAM_IDS["AAPL"]})
+    yahoo_tn_block = FakeTNAccessBlock(existing_streams={YAHOO_EPS_STREAM_IDS["AAPL"]})
 
-    eps_historical_flow(fmp_block=fmp_block, yahoo_block=yahoo_block, tn_block=tn_block, symbols=["AAPL"])
+    eps_historical_flow(
+        fmp_block=fmp_block,
+        yahoo_block=yahoo_block,
+        fmp_tn_block=fmp_tn_block,
+        yahoo_tn_block=yahoo_tn_block,
+        symbols=["AAPL"],
+    )
 
-    all_inserted = pd.concat(tn_block.inserted_records, ignore_index=True)
-    inserted_streams = set(all_inserted["stream_id"].tolist())
+    fmp_inserted = pd.concat(fmp_tn_block.inserted_records, ignore_index=True)
+    yahoo_inserted = pd.concat(yahoo_tn_block.inserted_records, ignore_index=True)
 
-    assert FMP_EPS_STREAM_IDS["AAPL"] in inserted_streams
-    assert YAHOO_EPS_STREAM_IDS["AAPL"] in inserted_streams
+    assert FMP_EPS_STREAM_IDS["AAPL"] in set(fmp_inserted["stream_id"].tolist())
+    assert YAHOO_EPS_STREAM_IDS["AAPL"] in set(yahoo_inserted["stream_id"].tolist())
+    # Each wallet only receives its own source's records — no cross-wallet leak
+    assert YAHOO_EPS_STREAM_IDS["AAPL"] not in set(fmp_inserted["stream_id"].tolist())
+    assert FMP_EPS_STREAM_IDS["AAPL"] not in set(yahoo_inserted["stream_id"].tolist())
 
 
 @pytest.mark.timeout(30, func_only=True)
@@ -114,10 +124,18 @@ def test_historical_flow_no_insert_when_all_published():
 
     fmp_block = make_fmp_block({"AAPL": [AAPL_FMP_ROW]})
     yahoo_block = make_yahoo_block({"AAPL": [AAPL_YAHOO_ROW]})
-    tn_block = FakeTNAccessBlock()
-    tn_block.seed_records(FMP_EPS_STREAM_IDS["AAPL"], [already_unix])
-    tn_block.seed_records(YAHOO_EPS_STREAM_IDS["AAPL"], [already_unix])
+    fmp_tn_block = FakeTNAccessBlock()
+    yahoo_tn_block = FakeTNAccessBlock()
+    fmp_tn_block.seed_records(FMP_EPS_STREAM_IDS["AAPL"], [already_unix])
+    yahoo_tn_block.seed_records(YAHOO_EPS_STREAM_IDS["AAPL"], [already_unix])
 
-    eps_historical_flow(fmp_block=fmp_block, yahoo_block=yahoo_block, tn_block=tn_block, symbols=["AAPL"])
+    eps_historical_flow(
+        fmp_block=fmp_block,
+        yahoo_block=yahoo_block,
+        fmp_tn_block=fmp_tn_block,
+        yahoo_tn_block=yahoo_tn_block,
+        symbols=["AAPL"],
+    )
 
-    assert tn_block.inserted_records == []
+    assert fmp_tn_block.inserted_records == []
+    assert yahoo_tn_block.inserted_records == []

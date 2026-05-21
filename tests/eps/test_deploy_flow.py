@@ -38,3 +38,32 @@ def test_descriptor_stream_ids_match_config():
         ids = set(sym_rows["stream_id"].tolist())
         expected = {FMP_EPS_STREAM_IDS[symbol], YAHOO_EPS_STREAM_IDS[symbol], EPS_STREAM_IDS[symbol]}
         assert ids == expected, f"Stream IDs mismatch for {symbol}"
+
+
+# --- source_types filter ---
+
+@pytest.mark.parametrize(
+    "source_types,expected_count,expected_ids_fn",
+    [
+        (("fmp_eps",), 7, lambda sym: FMP_EPS_STREAM_IDS[sym]),
+        (("yahoo_eps",), 7, lambda sym: YAHOO_EPS_STREAM_IDS[sym]),
+        (("truf_eps",), 7, lambda sym: EPS_STREAM_IDS[sym]),
+    ],
+)
+def test_descriptor_single_source_type(source_types, expected_count, expected_ids_fn):
+    df = EpsSourceDescriptor(source_types=source_types).get_descriptor()
+    assert len(df) == expected_count
+    assert set(df["source_type"].unique()) == set(source_types)
+    assert set(df["stream_id"].tolist()) == {expected_ids_fn(sym) for sym in MAG7}
+
+
+def test_descriptor_two_source_types():
+    df = EpsSourceDescriptor(source_types=("fmp_eps", "yahoo_eps")).get_descriptor()
+    assert len(df) == 14
+    assert set(df["source_type"].unique()) == {"fmp_eps", "yahoo_eps"}
+
+
+def test_descriptor_default_includes_all_three():
+    df = EpsSourceDescriptor().get_descriptor()
+    assert len(df) == 21
+    assert set(df["source_type"].unique()) == {"fmp_eps", "yahoo_eps", "truf_eps"}
