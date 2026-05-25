@@ -14,25 +14,53 @@ Caller ordering contract: pass readings sorted by source priority
 (primary source first, e.g. fmp → yahoo → edgar). The first reading in
 the largest agreeing group determines the committed value.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Literal, Optional
 
 TOLERANCE = 0.01  # sources must agree within $0.01 to settle
 
 
+def canonical_key(symbol: str, period_end_date_str: str) -> tuple[str, int, int]:
+    """Map a fiscal-period-end date to (symbol, calendar_year, calendar_quarter).
+
+    This is the canonical event identity for cross-source EPS reconciliation:
+    the key that two sources reporting on the same fiscal quarter will reduce
+    to even when their raw date strings differ.
+
+    Why this exists: FMP's /stable/earnings returns the announcement date as
+    its `date` field, while Yahoo's earnings_history returns the
+    fiscal-period-end. Joining on raw date strings treats the same event as
+    two separate entries. Both sources are describing the same fiscal
+    quarter — the canonical key reduces them to the same tuple.
+
+    Calendar-quarter keying avoids per-ticker fiscal-calendar lookups: it
+    works the same for NVDA's Jan-ending fiscal, AAPL's Sep-ending fiscal,
+    and the calendar-quarter reporters (META/GOOGL/AMZN/TSLA).
+
+    Correctness check across known Mag-7 earnings (the events #3936 cites):
+      NVDA Q1 FY27:  2026-04-26 → (NVDA, 2026, 2)  (Yahoo's 2026-04-30 → same)
+      AAPL Q2 FY26:  2026-03-28 → (AAPL, 2026, 1)  (Yahoo's 2026-03-31 → same)
+      META Q4 FY25:  2025-12-31 → (META, 2025, 4)  (Yahoo's 2025-12-31 → same)
+    """
+    d = date.fromisoformat(period_end_date_str)
+    return (symbol, d.year, (d.month - 1) // 3 + 1)
+
+
 @dataclass(frozen=True)
 class SourceReading:
-    source: str         # e.g. "fmp", "yahoo", "edgar"
+    source: str  # e.g. "fmp", "yahoo", "edgar"
     eps_actual: float
-    retrieved_at: str   # ISO datetime string
+    retrieved_at: str  # ISO datetime string
 
 
 @dataclass
 class ReconcileResult:
     status: Literal["settled", "disputed", "pending"]
-    value: Optional[float]       # exact figure; only set when settled
+    value: Optional[float]  # exact figure; only set when settled
     sources_agree: list[str]
     sources_disagree: list[str]
 
