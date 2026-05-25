@@ -2,31 +2,105 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 
 import pandas as pd
+import platformdirs
 from pandera.typing import DataFrame
 from prefect.blocks.core import Block
+from pydantic import Field
 
 from tsn_adapters.blocks.fmp import EarningsData
 from tsn_adapters.utils.logging import get_logger_safe
 
-# Yahoo aggressively rate-limits non-residential IPs (notably AWS).
-# On HTTP 429, yfinance.Ticker.get_earnings_dates returns None without
-# raising — so empty/None results must be treated as failures to retry.
-# We retry inside the block; the caller's @task retry stays a backstop.
 _PRE_CALL_JITTER_S: tuple[float, float] = (0.5, 2.0)
 _BACKOFF_BASE_S: float = 5.0
 _BACKOFF_JITTER_S: tuple[float, float] = (0.0, 3.0)
 _MAX_ATTEMPTS: int = 3
+
+_MODERN_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+_COOKIE_CACHE_PATH = os.path.join(platformdirs.user_cache_dir(), "py-yfinance", "cookies.db")
+
+_yfinance_patched = False
+
+
+def _patch_yfinance(logger: logging.Logger | None = None) -> None:
+    """Apply one-time monkey-patches to yfinance.
+
+    1. Replaces the ancient Chrome/39 UA with a modern one (Yahoo blocks the
+       2014-era string even from non-AWS IPs).
+    2. Guards ``get_earnings_dates`` against a missing ``Surprise(%)`` column
+       that yfinance 0.2.49 expects but Yahoo's HTML no longer includes.
+
+    Safe to call multiple times — only patches once per process.
+    """
+    global _yfinance_patched
+    if _yfinance_patched:
+        return
+
+    import yfinance.data as yfdata
+
+    yfdata.YfData.user_agent_headers = property(lambda self: {"User-Agent": _MODERN_UA})
+
+    import yfinance as yf
+
+    _orig_get_earnings_dates = yf.Ticker.get_earnings_dates
+
+    def _safe_get_earnings_dates(self: yf.Ticker, limit: int = 12, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            return _orig_get_earnings_dates(self, limit=limit, **kwargs)
+        except KeyError as exc:
+            if "Surprise" in str(exc):
+                if logger:
+                    logger.warning("yfinance Surprise(%%) column missing — falling back to JSON")
+                return None
+            raise
+
+    yf.Ticker.get_earnings_dates = _safe_get_earnings_dates  # type: ignore[assignment]
+
+    _yfinance_patched = True
+
+
+def _clear_stale_cookie_cache() -> None:
+    """Delete yfinance's persistent cookie cache.
+
+    yfinance caches cookies in SQLite. If those were created without a proxy,
+    reusing them through a proxy still gets 429'd. Clearing once on startup
+    forces a fresh cookie fetch through the proxy.
+    """
+    try:
+        os.remove(_COOKIE_CACHE_PATH)
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
 
 
 class YahooBlock(Block):
     """Prefect block wrapping yfinance for EPS data.
 
     No API key required — yfinance uses Yahoo Finance's public endpoints.
+
+    When ``proxy_url`` is set, all yfinance traffic is routed through the
+    proxy via ``HTTP_PROXY``/``HTTPS_PROXY`` env vars, the User-Agent is
+    patched to a modern browser string, and any stale cookie cache is cleared.
     """
+
+    proxy_url: str | None = Field(
+        default=None,
+        description=(
+            "HTTP proxy URL for Yahoo Finance requests. "
+            "Required from AWS/cloud IPs where Yahoo aggressively rate-limits. "
+            "Example: http://user:pass@proxy.example.com:823"
+        ),
+    )
+
+    _proxy_initialized: bool = False
 
     @property
     def logger(self) -> logging.Logger:
@@ -34,42 +108,74 @@ class YahooBlock(Block):
             self._logger = get_logger_safe(__name__)
         return self._logger
 
+    def _ensure_proxy(self) -> None:
+        if self._proxy_initialized:
+            return
+
+        proxy = self.proxy_url or os.environ.get("YAHOO_PROXY_URL")
+        if proxy:
+            os.environ["HTTP_PROXY"] = proxy
+            os.environ["HTTPS_PROXY"] = proxy
+            _clear_stale_cookie_cache()
+            self.logger.info("Yahoo proxy configured — routing yfinance through proxy")
+
+        _patch_yfinance(self.logger)
+        self._proxy_initialized = True
+
     def get_historical_earnings(self, symbol: str, limit: int = 40) -> DataFrame[EarningsData]:
         """Fetch earnings history for `symbol` from Yahoo Finance.
 
-        Uses yfinance.Ticker.get_earnings_dates(limit=N).
-        limit=40 covers ~10 years of quarterly data.
-        Returns an EarningsData-compatible DataFrame; epsActual is NaN
-        for future (not-yet-reported) quarters.
+        Tries ``yfinance.Ticker.get_earnings_dates(limit=N)`` first (HTML scrape,
+        up to 10 years of quarterly data). Falls back to the JSON-based
+        ``earnings_history`` accessor (last 4 quarters) when the scraper
+        returns empty — e.g. when yfinance 0.2.49 encounters a column
+        Yahoo no longer serves.
 
-        Raises on persistent yfinance failures so the calling @task retry
-        decorator can take over. An empty result after _MAX_ATTEMPTS is
-        treated as a failure and raised — yfinance returns None on HTTP 429
-        without surfacing an exception.
+        Raises on persistent failures so the calling @task retry decorator can
+        take over.
         """
         import yfinance as yf
+
+        self._ensure_proxy()
 
         time.sleep(random.uniform(*_PRE_CALL_JITTER_S))
 
         last_exc: Exception | None = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                df = yf.Ticker(symbol).get_earnings_dates(limit=limit)
+                ticker = yf.Ticker(symbol)
+                df = ticker.get_earnings_dates(limit=limit)
             except Exception as exc:
                 last_exc = exc
                 self.logger.error(
-                    f"yfinance fetch raised for {symbol} (attempt {attempt}/{_MAX_ATTEMPTS}): {exc}"
+                    f"yfinance scrape raised for {symbol} (attempt {attempt}/{_MAX_ATTEMPTS}): {exc}"
                 )
                 df = None
 
             if df is not None and not df.empty:
-                return self._normalize(df, symbol)
+                return self._normalize_scrape(df, symbol)
+
+            # Fallback: JSON-based earnings_history (last 4 quarters only)
+            try:
+                ticker = yf.Ticker(symbol)
+                eh = ticker.earnings_history
+                if eh is not None and hasattr(eh, "empty") and not eh.empty:
+                    self.logger.info(
+                        f"Scrape empty for {symbol} — using JSON earnings_history fallback"
+                    )
+                    return self._normalize_json(eh, symbol)
+            except Exception as fallback_exc:
+                self.logger.warning(
+                    f"JSON fallback also failed for {symbol}: {fallback_exc}"
+                )
+                if last_exc is None:
+                    last_exc = fallback_exc
 
             if attempt < _MAX_ATTEMPTS:
                 delay = _BACKOFF_BASE_S * (2 ** (attempt - 1)) + random.uniform(*_BACKOFF_JITTER_S)
                 self.logger.warning(
-                    f"yfinance returned no data for {symbol} (attempt {attempt}/{_MAX_ATTEMPTS}) — "
-                    f"likely HTTP 429; sleeping {delay:.1f}s before retry"
+                    f"No data for {symbol} (attempt {attempt}/{_MAX_ATTEMPTS}) — "
+                    f"sleeping {delay:.1f}s before retry"
                 )
                 time.sleep(delay)
 
@@ -83,15 +189,34 @@ class YahooBlock(Block):
         raise RuntimeError(msg)
 
     @staticmethod
-    def _normalize(df: pd.DataFrame, symbol: str) -> DataFrame[EarningsData]:
+    def _normalize_scrape(df: pd.DataFrame, symbol: str) -> DataFrame[EarningsData]:
+        """Normalize output from ``get_earnings_dates`` (HTML scrape)."""
         df = df.reset_index()
-        date_col = df.columns[0]  # "Earnings Date" — timezone-aware DatetimeTZDtype
+        date_col = df.columns[0]  # "Earnings Date" — timezone-aware
         df["date"] = pd.to_datetime(df[date_col]).dt.strftime("%Y-%m-%d")
         df["symbol"] = symbol
         df = df.rename(columns={
             "Reported EPS": "epsActual",
             "EPS Estimate": "epsEstimated",
         })
+        df["lastUpdated"] = None
+
+        return DataFrame[EarningsData](
+            df[["symbol", "date", "epsEstimated", "epsActual", "lastUpdated"]]
+        )
+
+    @staticmethod
+    def _normalize_json(df: pd.DataFrame, symbol: str) -> DataFrame[EarningsData]:
+        """Normalize output from ``Ticker.earnings_history`` (JSON quoteSummary).
+
+        The DataFrame has a DatetimeIndex (quarter-end dates) with columns
+        ``epsActual`` and ``epsEstimate``.
+        """
+        df = df.copy()
+        df["date"] = pd.to_datetime(df.index).strftime("%Y-%m-%d")
+        df = df.reset_index(drop=True)
+        df["symbol"] = symbol
+        df = df.rename(columns={"epsEstimate": "epsEstimated"})
         df["lastUpdated"] = None
 
         return DataFrame[EarningsData](
