@@ -112,10 +112,11 @@ class YahooBlock(Block):
         if self._proxy_initialized:
             return
 
-        proxy = self.proxy_url or os.environ.get("YAHOO_PROXY_URL")
+        proxy = self.proxy_url
         if proxy:
             os.environ["HTTP_PROXY"] = proxy
             os.environ["HTTPS_PROXY"] = proxy
+            os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,172.17.0.1,169.254.169.254")
             _clear_stale_cookie_cache()
             self.logger.info("Yahoo proxy configured — routing yfinance through proxy")
 
