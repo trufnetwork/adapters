@@ -19,11 +19,6 @@ from tsn_adapters.utils.logging import get_logger_safe
 PanderaModelType = TypeVar("PanderaModelType", bound=DataFrameModel)
 
 
-
-
-
-
-
 class FMPExchange(Enum):
     NYSE = "nyse"
     NASDAQ = "nasdaq"
@@ -32,9 +27,11 @@ class FMPExchange(Enum):
     NYMEX = "NYMEX"
     COMEX = "COMEX"
 
+
 class FMPAPI(Enum):
     LEGACY = "api/v3/"
     STABLE = "stable/"
+
 
 CME_GROUP_EXCHANGES: set[str] = {
     FMPExchange.CME.value,
@@ -49,10 +46,9 @@ class FMPEndpoint:
         self.api = api
         self.path = path
         self.params = params
-    
+
     def get_url(self, base_url: str) -> str:
         return base_url + self.api.value + self.path + (f"?{urlencode(self.params)}" if self.params else "")
-
 
 
 class ActiveTicker(DataFrameModel):
@@ -157,6 +153,7 @@ class IndexConstituent(DataFrameModel):
     Schema for S&P 500 constituents from FMP API.
     https://site.financialmodelingprep.com/developer/docs/stable/sp-500
     """
+
     symbol: Series[str]
     name: Series[str] = Field(nullable=True)
     sector: Series[str] = Field(nullable=True)
@@ -173,8 +170,9 @@ class IndexConstituent(DataFrameModel):
 
 class CommodityInfo(DataFrameModel):
     """
-    https://site.financialmodelingprep.com/developer/docs/stable/commodities-list 
+    https://site.financialmodelingprep.com/developer/docs/stable/commodities-list
     """
+
     symbol: Series[str]
     name: Series[str]
     exchange: Series[str] = Field(nullable=True)
@@ -191,6 +189,7 @@ class IndexInfo(DataFrameModel):
     Schema for stock market indexes from FMP API.
     https://site.financialmodelingprep.com/developer/docs/stable/indexes-list
     """
+
     symbol: Series[str]
     name: Series[str] = Field(nullable=True)
     exchange: Series[str] = Field(nullable=True)
@@ -206,6 +205,7 @@ class CommodityQuote(DataFrameModel):
     Schema for commodity quotes from legacy FMP API endpoint /api/v3/quotes/commodity.
     https://site.financialmodelingprep.com/developer/docs/commodities-prices-api
     """
+
     symbol: Series[str]
     price: Series[pd.Float64Dtype]
     change: Series[pd.Float64Dtype] = Field(nullable=True)
@@ -221,6 +221,7 @@ class ExchangeQuote(DataFrameModel):
     Schema for bulk exchange quotes from FMP API endpoint /stable/batch-exchange-quote.
     Only relevant fields are captured; extras are filtered out by strict="filter".
     """
+
     symbol: Series[str]
     price: Series[pd.Float64Dtype] = Field(nullable=True)
     volume: Series[pd.Int64Dtype] = Field(nullable=True)
@@ -250,6 +251,38 @@ class EarningsData(DataFrameModel):
         coerce = True
 
 
+class QuarterlyIncomeStatementData(DataFrameModel):
+    """Schema for FMP /stable/income-statement?period=quarter rows.
+
+    Captures only the temporal/identity fields needed for cross-source EPS
+    reconciliation. The full FMP response carries ~40 line-item fields
+    (revenue, costs, eps, etc.); we filter the schema down to what the
+    reconciler actually consumes.
+
+    `filingDate` matches FMP's /stable/earnings `date` field exactly for the
+    same earnings event — that's the join column when enriching earnings
+    data with the fiscal-period-end. `date` is the fiscal-period-end itself,
+    used to derive a canonical (symbol, calendar_year, calendar_quarter)
+    join key that aligns FMP (announcement-date-keyed) with Yahoo
+    (period-end-keyed) for the same fiscal event.
+
+    Verified May 25 2026: this endpoint is populated within hours of the 8-K
+    earnings filing, not weeks later when the 10-Q lands — so it's usable
+    at real-time-reconciliation time.
+    """
+
+    symbol: Series[str]
+    period: Series[str]  # 'Q1' | 'Q2' | 'Q3' | 'Q4' | 'FY'
+    fiscalYear: Series[str] = Field(nullable=True)
+    date: Series[str]  # fiscal-period-end, ISO 'YYYY-MM-DD'
+    filingDate: Series[str] = Field(nullable=True)
+    acceptedDate: Series[str] = Field(nullable=True)
+
+    class Config(DataFrameModel.Config):
+        strict = "filter"
+        coerce = True
+
+
 class FMPBlock(Block):
     api_key: SecretStr
 
@@ -260,7 +293,6 @@ class FMPBlock(Block):
         if not hasattr(self, "_logger"):
             self._logger = get_logger_safe(__name__)
         return self._logger
-    
 
     def _get_jsonparsed_data(self, endpoint: FMPEndpoint) -> Union[dict[str, Any], list[dict[str, Any]]]:
         base_endpoint_url = endpoint.get_url(self.base_url)
@@ -441,7 +473,7 @@ class FMPBlock(Block):
                 if not processed_data:
                     self.logger.info(f"All records for {log_entity_name} were filtered out client-side.")
                     return create_empty_df(model_type)
-            
+
             # Convert list of dicts directly to a typed Pandera DataFrame
             self.logger.info(f"Successfully fetched {len(processed_data)} {log_entity_name} records.")
             try:
@@ -453,13 +485,15 @@ class FMPBlock(Block):
                 df_validated = model_type.validate(df_for_validation, lazy=True)
                 self.logger.info(f"Successfully fetched & validated {len(df_validated)} {log_entity_name} records.")
                 return df_validated
-            except Exception as e: # Catch PanderaError or other validation issues
-                self.logger.error(f"Schema validation failed for {log_entity_name} after processing: {e}", exc_info=True)
-                raise # Re-raise validation errors
+            except Exception as e:  # Catch PanderaError or other validation issues
+                self.logger.error(
+                    f"Schema validation failed for {log_entity_name} after processing: {e}", exc_info=True
+                )
+                raise  # Re-raise validation errors
 
-        except Exception as e: # Catch issues from _get_jsonparsed_data or other initial errors
+        except Exception as e:  # Catch issues from _get_jsonparsed_data or other initial errors
             self.logger.error(f"Error fetching or processing {log_entity_name}: {e}", exc_info=True)
-            raise # Re-raise fetching/processing errors
+            raise  # Re-raise fetching/processing errors
 
     def get_equities(self, exchange: FMPExchange) -> DataFrame[ExchangeQuote]:
         """
@@ -527,4 +561,28 @@ class FMPBlock(Block):
             endpoint=FMPEndpoint(FMPAPI.STABLE, "earnings", {"symbol": symbol, "limit": limit}),
             model_type=EarningsData,
             log_entity_name=f"{symbol} historical earnings",
+        )
+
+    def get_quarterly_income_statements(self, symbol: str, limit: int = 8) -> DataFrame[QuarterlyIncomeStatementData]:
+        """Per-ticker quarterly income statements.
+
+        Uses /stable/income-statement?period=quarter. The response includes
+        both `filingDate` (matches the /stable/earnings `date` for the same
+        earnings event) and `date` (the fiscal-period-end). Together they
+        let cross-source reconciliation derive a canonical event key that
+        aligns FMP earnings rows (keyed by announcement date) with Yahoo
+        rows (keyed by fiscal-period-end).
+
+        Verified May 25 2026: the endpoint is populated within hours of the
+        8-K earnings filing — usable at real-time-reconciliation time, not
+        only after the 10-Q lands weeks later.
+        """
+        return self._fetch_fmp_list_data(
+            endpoint=FMPEndpoint(
+                FMPAPI.STABLE,
+                "income-statement",
+                {"symbol": symbol, "period": "quarter", "limit": limit},
+            ),
+            model_type=QuarterlyIncomeStatementData,
+            log_entity_name=f"{symbol} quarterly income statements",
         )
