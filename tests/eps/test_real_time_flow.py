@@ -262,9 +262,10 @@ def test_pending_when_only_yahoo_has_event():
 def test_skips_fmp_event_when_income_statement_not_yet_published():
     """Rare race at the moment of an earnings announcement: FMP /stable/earnings
     has the new actual but /stable/income-statement hasn't yet been populated
-    for that filing. The FMP entry is skipped (we can't derive canonical key
-    without a period-end). Yahoo still writes its primitive. Consensus
-    pending — will resolve on the next cycle once income-statement catches up.
+    for that filing. The raw FMP primitive still emits under the announcement
+    date — the income-statement is only needed to derive the canonical key
+    for reconciliation. Yahoo still writes its primitive. Consensus is
+    pending and resolves on the next cycle once income-statement catches up.
     """
     fmp = _make_fmp(
         earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
@@ -281,18 +282,25 @@ def test_skips_fmp_event_when_income_statement_not_yet_published():
         symbol="NVDA",
     )
 
-    # FMP earnings entry is silently skipped — no canonical key derivable
-    assert len(fmp_rows) == 0
+    # FMP primitive still emits under the announcement date — primitive
+    # emission is decoupled from reconciliation
+    assert len(fmp_rows) == 1
+    assert fmp_rows[0]["value"] == "1.87"
+    assert fmp_rows[0]["date"] == date_string_to_unix("2026-05-20")
     # Yahoo still publishes its primitive
     assert len(yahoo_rows) == 1
-    # No consensus possible with single source
+    # No consensus possible — FMP entry isn't in the canonical-key dict
+    # without a period-end lookup, so reconciliation defers to next cycle
     assert len(truf_rows) == 0
 
 
 def test_idempotent_skips_already_published_consensus():
-    """If consensus is already on-chain for this canonical event, the whole
-    iteration is skipped — no primitive rows, no consensus row. Mirrors the
-    existing _is_published guard."""
+    """Per-stream idempotency: when only consensus is already on-chain
+    but the primitive streams are not, the primitives still emit. The
+    _is_published guard is independent per stream — consensus state
+    doesn't gate primitive emission. This is the property required by
+    CodeRabbit's review on #229.
+    """
     fmp = _make_fmp(
         earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
         income_statements={"NVDA": [NVDA_Q1_FY27_INCOME_STMT]},
@@ -300,8 +308,7 @@ def test_idempotent_skips_already_published_consensus():
     yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
 
     truf_tn = FakeTNAccessBlock()
-    # Seed the consensus stream with the date we're about to compute —
-    # FMP announcement date 2026-05-20 → unix
+    # Seed ONLY the consensus stream with the FMP announcement date
     from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS
 
     truf_tn.seed_records(
@@ -318,7 +325,47 @@ def test_idempotent_skips_already_published_consensus():
         symbol="NVDA",
     )
 
-    # Existing _is_published guard short-circuits the whole iteration
+    # Primitive streams aren't seeded → they emit
+    assert len(fmp_rows) == 1
+    assert len(yahoo_rows) == 1
+    # Consensus stream is seeded → it's skipped
+    assert len(truf_rows) == 0
+
+
+def test_idempotent_when_all_streams_already_published():
+    """Full idempotency: when every stream's date is already on-chain,
+    a re-run produces no writes anywhere. Mirrors the steady-state
+    behaviour of the scheduled flow re-encountering the same recent
+    earnings rows on subsequent ticks.
+    """
+    from tsn_adapters.tasks.eps.config import (
+        EPS_STREAM_IDS,
+        FMP_EPS_STREAM_IDS,
+        YAHOO_EPS_STREAM_IDS,
+    )
+
+    fmp = _make_fmp(
+        earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
+        income_statements={"NVDA": [NVDA_Q1_FY27_INCOME_STMT]},
+    )
+    yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
+
+    fmp_tn = FakeTNAccessBlock()
+    yahoo_tn = FakeTNAccessBlock()
+    truf_tn = FakeTNAccessBlock()
+    fmp_tn.seed_records(FMP_EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-05-20")])
+    yahoo_tn.seed_records(YAHOO_EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-04-30")])
+    truf_tn.seed_records(EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-05-20")])
+
+    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=fmp_tn,
+        yahoo_tn_block=yahoo_tn,
+        truf_tn_block=truf_tn,
+        symbol="NVDA",
+    )
+
     assert len(fmp_rows) == 0
     assert len(yahoo_rows) == 0
     assert len(truf_rows) == 0

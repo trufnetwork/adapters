@@ -116,6 +116,12 @@ def detect_and_prepare_eps(
       - yahoo_eps_* primitive stream: written under Yahoo's period-end date
       - truf_eps_* consensus stream: written under FMP's announcement date
         (preserves "consensus appears at announcement time" semantics)
+
+    Primitive emission is decoupled from reconciliation: each ingestion
+    loop emits its source's raw value as soon as fresh data is available,
+    even when reconciliation can't yet run (e.g. FMP's income-statement
+    hasn't been published for the current announcement). Only the
+    consensus write is gated on the reconciler verdict.
     """
     logger = get_logger_safe(__name__)
     consensus_stream = EPS_STREAM_IDS[symbol]
@@ -138,48 +144,76 @@ def detect_and_prepare_eps(
         if fd and pe and not pd.isna(fd) and not pd.isna(pe):
             filing_to_period_end[str(fd)] = str(pe)
 
-    # Build per-source dicts keyed by canonical event identity:
-    # (symbol, calendar_year_of_period_end, calendar_quarter_of_period_end).
-    # Value stores (eps_actual, source_date_str, retrieved_at) so we can
-    # write each primitive stream under its own source-specific date.
+    fmp_rows: list[dict] = []
+    yahoo_rows: list[dict] = []
+    truf_rows: list[dict] = []
+
+    # FMP ingestion. Always emit the raw primitive when fresh; populate the
+    # canonical-key dict only when income-statement provides the period-end.
+    # Decoupling lets the fmp_eps_* stream stay faithful to FMP's announcement
+    # even during the rare race window where the income-statement filing
+    # hasn't landed yet — reconciliation simply defers to the next cycle.
     fmp_by_key: dict[tuple[str, int, int], tuple[float, str, str]] = {}
     for _, row in earnings_df.iterrows():
         if pd.isna(row.get("epsActual")):
             continue
         announcement_date = str(row["date"])
+        eps = float(row["epsActual"])
+        retrieved_at = str(row.get("lastUpdated") or datetime.now(timezone.utc).isoformat())
+
+        # Emit primitive (always, when FMP has data and the date isn't published)
+        fmp_date_unix = date_string_to_unix(announcement_date)
+        if not _is_published(fmp_tn_block, fmp_stream, fmp_date_unix):
+            fmp_rows.append(
+                {
+                    "stream_id": fmp_stream,
+                    "date": fmp_date_unix,
+                    "value": str(eps),
+                    "data_provider": None,
+                }
+            )
+
+        # Populate canonical-key dict for reconciliation, only when income-
+        # statement lookup resolves. Missing income-statement is the rare
+        # race-at-announcement window; reconciliation retries next cycle.
         period_end = filing_to_period_end.get(announcement_date)
         if period_end is None:
-            # Income-statement hasn't been published yet for this earnings
-            # (rare edge case at the moment of announcement). Re-run later.
             logger.info(
                 f"{symbol} {announcement_date}: income-statement not yet "
-                f"published for this filing; skipping reconciliation cycle"
+                f"published for this filing; primitive emitted, "
+                f"reconciliation deferred to next cycle"
             )
             continue
-        key = canonical_key(symbol, period_end)
-        fmp_by_key[key] = (
-            float(row["epsActual"]),
-            announcement_date,
-            str(row.get("lastUpdated") or datetime.now(timezone.utc).isoformat()),
-        )
+        fmp_by_key[canonical_key(symbol, period_end)] = (eps, announcement_date, retrieved_at)
 
+    # Yahoo ingestion. Yahoo's `date` IS the fiscal-period-end (typically
+    # rounded to calendar-month-end), so no auxiliary lookup is needed —
+    # primitive emission and canonical-key population happen together.
     yahoo_by_key: dict[tuple[str, int, int], tuple[float, str]] = {}
     for _, row in yahoo_df.iterrows():
         raw = row.get("epsActual")
         if raw is None or pd.isna(raw):
             continue
         yahoo_date = str(row["date"])
-        # Yahoo's `date` IS the fiscal-period-end (typically rounded to
-        # calendar-month-end). Pass it directly to canonical_key.
-        key = canonical_key(symbol, yahoo_date)
-        yahoo_by_key[key] = (float(raw), yahoo_date)
+        eps = float(raw)
 
-    fmp_rows: list[dict] = []
-    yahoo_rows: list[dict] = []
-    truf_rows: list[dict] = []
+        # Emit primitive
+        yahoo_date_unix = date_string_to_unix(yahoo_date)
+        if not _is_published(yahoo_tn_block, yahoo_stream, yahoo_date_unix):
+            yahoo_rows.append(
+                {
+                    "stream_id": yahoo_stream,
+                    "date": yahoo_date_unix,
+                    "value": str(eps),
+                    "data_provider": None,
+                }
+            )
+        yahoo_by_key[canonical_key(symbol, yahoo_date)] = (eps, yahoo_date)
 
-    # Iterate over the union of canonical event keys so single-source quarters
-    # are still processed (they end up as `pending` from the reconciler).
+    # Reconciliation loop. Primitive writes were emitted above during
+    # ingestion; this loop only decides each event's consensus verdict.
+    # Iterate the union of canonical keys so single-source quarters are
+    # still surfaced (they resolve as `pending`).
     for key in sorted(set(fmp_by_key) | set(yahoo_by_key)):
         fmp_data = fmp_by_key.get(key)
         yahoo_data = yahoo_by_key.get(key)
@@ -192,7 +226,7 @@ def detect_and_prepare_eps(
         consensus_date_str = fmp_data[1] if fmp_data else yahoo_data[1]
         consensus_date_unix = date_string_to_unix(consensus_date_str)
 
-        # Skip entirely if consensus is already committed
+        # Skip if consensus is already committed
         if _is_published(truf_tn_block, consensus_stream, consensus_date_unix):
             continue
 
@@ -202,17 +236,7 @@ def detect_and_prepare_eps(
         yahoo_eps: float | None = None
 
         if fmp_data is not None:
-            fmp_eps, fmp_date_str, fmp_retrieved_at = fmp_data
-            fmp_date_unix = date_string_to_unix(fmp_date_str)
-            if not _is_published(fmp_tn_block, fmp_stream, fmp_date_unix):
-                fmp_rows.append(
-                    {
-                        "stream_id": fmp_stream,
-                        "date": fmp_date_unix,
-                        "value": str(fmp_eps),
-                        "data_provider": None,
-                    }
-                )
+            fmp_eps, _, fmp_retrieved_at = fmp_data
             readings.append(
                 SourceReading(
                     source="fmp",
@@ -222,17 +246,7 @@ def detect_and_prepare_eps(
             )
 
         if yahoo_data is not None:
-            yahoo_eps, yahoo_date_str = yahoo_data
-            yahoo_date_unix = date_string_to_unix(yahoo_date_str)
-            if not _is_published(yahoo_tn_block, yahoo_stream, yahoo_date_unix):
-                yahoo_rows.append(
-                    {
-                        "stream_id": yahoo_stream,
-                        "date": yahoo_date_unix,
-                        "value": str(yahoo_eps),
-                        "data_provider": None,
-                    }
-                )
+            yahoo_eps, _ = yahoo_data
             readings.append(
                 SourceReading(
                     source="yahoo",
@@ -241,7 +255,6 @@ def detect_and_prepare_eps(
                 )
             )
 
-        # --- Reconcile & write consensus ---
         result = reconcile(readings)
 
         if result.status == "settled":
