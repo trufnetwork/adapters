@@ -47,24 +47,21 @@ def _is_client_error_not_found(e: ClientError) -> bool:
 def determine_aggregation_dates(
     product_averages_provider: ProductAveragesProvider,
     force_reprocess: bool = False,
-) -> tuple[list[DateStr], str, str]:
+) -> tuple[list[DateStr], str]:
     """
     Determines the range of dates to aggregate based on available data and gating variables.
 
-    Uses the provider to list available dates and filters them based on:
-    - LAST_PREPROCESS_SUCCESS_DATE (Process only dates <= this variable)
-    - LAST_AGGREGATION_SUCCESS_DATE (Process only dates > this variable)
-    - force_reprocess flag (If True, ignore LAST_AGGREGATION_SUCCESS_DATE but still respect LAST_PREPROCESS_SUCCESS_DATE)
+    Processes all available dates in S3 that are after LAST_AGGREGATION_SUCCESS_DATE.
+    No preprocess gate — S3 data may be uploaded by external parties.
 
     Args:
         product_averages_provider: Provider instance to access product average data keys.
-        force_reprocess: If True, ignore the last aggregation date but still respect the last preprocess date.
+        force_reprocess: If True, ignore the last aggregation date and reprocess all available data.
 
     Returns:
         Tuple containing:
             - Sorted list of date strings (YYYY-MM-DD) to process.
             - The last aggregation success date used for filtering.
-            - The last preprocess success date used for filtering.
 
     Raises:
         Exception: Propagated from provider's list_available_keys or variable access.
@@ -72,22 +69,13 @@ def determine_aggregation_dates(
     logger = get_logger_safe(__name__)
     logger.info(f"Determining date range to process... Force reprocess: {force_reprocess}")
 
-    # 2. Fetch Gating Variables (Fetch PREPROCESS always, AGGREGATION conditionally)
     try:
-        last_preprocess_success_date = variables.Variable.get(
-            ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, default=ArgentinaFlowVariableNames.DEFAULT_DATE
-        )
-        assert isinstance(last_preprocess_success_date, str)
-        logger.info(f"Using {ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE}: {last_preprocess_success_date}")
-
         if force_reprocess:
-            # If forcing, ignore the actual last aggregation date, start from default
             last_aggregation_success_date = ArgentinaFlowVariableNames.DEFAULT_DATE
             logger.warning(
                 f"force_reprocess=True. Using default start date {last_aggregation_success_date} instead of actual last aggregation date."
             )
         else:
-            # If not forcing, use the actual last aggregation date
             last_aggregation_success_date = variables.Variable.get(
                 ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE,
                 default=ArgentinaFlowVariableNames.DEFAULT_DATE,
@@ -98,53 +86,31 @@ def determine_aggregation_dates(
             )
     except Exception as e:
         logger.error(f"Failed to retrieve gating Prefect variables: {e}", exc_info=True)
-        raise  # Cannot proceed without gating info
+        raise
 
-    # 1. Fetch available dates
     try:
         available_dates_str = product_averages_provider.list_available_keys()
         logger.debug(f"Found {len(available_dates_str)} available dates in S3 provider.")
         if not available_dates_str:
             logger.info("No available dates found in provider.")
-            # Need to fetch variables anyway to return context
-            return [], str(last_aggregation_success_date), str(last_preprocess_success_date)
-        available_dates_str.sort()  # Ensure chronological order
+            return [], str(last_aggregation_success_date)
+        available_dates_str.sort()
     except Exception as e:
         logger.error(f"Error listing available keys from provider: {e}", exc_info=True)
         raise
 
-    # 3. Filter Dates based on Gating Variables and Preprocess Limit
     dates_to_process = [
         date_str
         for date_str in available_dates_str
-        # Always respect the preprocess limit
-        if date_str <= last_preprocess_success_date
-        # Use the determined aggregation start date (actual or default)
-        and date_str > last_aggregation_success_date
+        if date_str > last_aggregation_success_date
     ]
 
-    # 4. Log Skipped Dates Information (using the *actual* variables fetched or used)
-    skipped_preprocess = sum(1 for d in available_dates_str if d > last_preprocess_success_date)
-    skipped_aggregation = sum(
-        1
-        for d in available_dates_str
-        # Count dates before or equal to the aggregation date *used* for filtering
-        if d <= last_aggregation_success_date
-        # And also ensure they are within the preprocess limit we considered
-        and d <= last_preprocess_success_date
-    )
-
-    if skipped_preprocess > 0:
-        logger.info(
-            f"Skipped {skipped_preprocess} dates later than {last_preprocess_success_date} ({ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE})."
-        )
-    # Use the value of last_aggregation_success_date determined in step 2 for logging
+    skipped_aggregation = sum(1 for d in available_dates_str if d <= last_aggregation_success_date)
     if skipped_aggregation > 0:
         logger.info(
             f"Skipped {skipped_aggregation} dates up to and including {last_aggregation_success_date} (based on {ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE} or default if forced)."
         )
 
-    # 5. Log Final Result and Return with Context
     if dates_to_process:
         logger.info(
             f"Determined {len(dates_to_process)} dates to process after gating: "
@@ -153,8 +119,7 @@ def determine_aggregation_dates(
     else:
         logger.info("No new dates to process after applying gating logic.")
 
-    # Return the list and the context dates used
-    return dates_to_process, last_aggregation_success_date, last_preprocess_success_date
+    return dates_to_process, last_aggregation_success_date
 
 
 # --- Single Date Processing Helpers ---

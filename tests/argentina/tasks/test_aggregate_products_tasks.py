@@ -218,34 +218,19 @@ def test_determine_dates_no_prior_state(mock_provider: MagicMock):
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11"), DateStr("2024-03-12")]
     mock_provider.list_available_keys.return_value = available_dates
     force_reprocess = False
-    
-    # Mock Prefect variables to simulate:
-    # - Preprocess date: far future (to include all dates)
-    # - Aggregation date: default 1970-01-01 (to process all dates after it)
+
     with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
-        def _mock_get(var_name: str, default: Any) -> str:
-            if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                return "2099-12-31"
-            elif var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
-                return "1970-01-01"
-            return default
-        mock_var_get.side_effect = _mock_get
-        
+        mock_var_get.return_value = "1970-01-01"
+
         # Act
-        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
-    
+        result, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+
         # Assert
         assert result == available_dates
-        # Use assert_called_once for synchronous mock
         mock_provider.list_available_keys.assert_called_once()
-        
-        # Verify variable calls
-        mock_var_get.assert_any_call(
-            ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE, 
-            default=ArgentinaFlowVariableNames.DEFAULT_DATE
-        )
-        mock_var_get.assert_any_call(
-            ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE, 
+
+        mock_var_get.assert_called_once_with(
+            ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE,
             default=ArgentinaFlowVariableNames.DEFAULT_DATE
         )
 
@@ -256,21 +241,13 @@ def test_determine_dates_force_reprocess(mock_provider: MagicMock):
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11"), DateStr("2024-03-12")]
     mock_provider.list_available_keys.return_value = available_dates
     force_reprocess = True
-    
-    # Mock Prefect variables
-    with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
-        def _mock_get(var_name: str, default: Any) -> str:
-            if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                return "2024-03-15"
-            return default
-        mock_var_get.side_effect = _mock_get
-        
-        # Act
-        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
-    
-        # Assert
-        assert result == available_dates
-        mock_provider.list_available_keys.assert_called_once()
+
+    # Act — force_reprocess bypasses Variable.get entirely
+    result, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+
+    # Assert
+    assert result == available_dates
+    mock_provider.list_available_keys.assert_called_once()
 
 
 def test_determine_dates_prior_state_exists(mock_provider: MagicMock):
@@ -280,20 +257,13 @@ def test_determine_dates_prior_state_exists(mock_provider: MagicMock):
     mock_provider.list_available_keys.return_value = available_dates
     force_reprocess = False
     expected_dates = [DateStr("2024-03-12"), DateStr("2024-03-13")]
-    
-    # Mock Prefect variables
+
     with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
-        def _mock_get(var_name: str, default: Any) -> str:
-            if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                return "2024-03-15"
-            elif var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
-                return "2024-03-11"
-            return default
-        mock_var_get.side_effect = _mock_get
-        
+        mock_var_get.return_value = "2024-03-11"
+
         # Act
-        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
-    
+        result, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+
         # Assert
         assert result == expected_dates
 
@@ -304,20 +274,13 @@ def test_determine_dates_no_new_dates(mock_provider: MagicMock):
     available_dates = [DateStr("2024-03-10"), DateStr("2024-03-11")]
     mock_provider.list_available_keys.return_value = available_dates
     force_reprocess = False
-    
-    # Mock Prefect variables - all available dates already processed
+
     with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
-        def _mock_get(var_name: str, default: Any) -> str:
-            if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                return "2024-03-15"
-            elif var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
-                return "2024-03-11"
-            return default
-        mock_var_get.side_effect = _mock_get
-        
+        mock_var_get.return_value = "2024-03-11"
+
         # Act
-        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
-    
+        result, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+
         # Assert
         assert result == []
         mock_provider.list_available_keys.assert_called_once()
@@ -330,20 +293,13 @@ def test_determine_dates_gaps_in_available_dates(mock_provider: MagicMock):
     mock_provider.list_available_keys.return_value = available_dates
     force_reprocess = False
     expected_dates = [DateStr("2024-03-12"), DateStr("2024-03-13")]
-    
-    # Mock Prefect variables
+
     with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
-        def _mock_get(var_name: str, default: Any) -> str:
-            if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                return "2024-03-15"
-            elif var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
-                return "2024-03-10"
-            return default
-        mock_var_get.side_effect = _mock_get
-        
+        mock_var_get.return_value = "2024-03-10"
+
         # Act
-        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
-    
+        result, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+
         # Assert
         assert result == expected_dates
         mock_provider.list_available_keys.assert_called_once()
@@ -354,14 +310,13 @@ def test_determine_dates_no_available_dates(mock_provider: MagicMock):
     # Arrange
     mock_provider.list_available_keys.return_value = []
     force_reprocess = False
-    
-    # Mock Prefect variables
+
     with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
-        mock_var_get.return_value = "2024-03-15"  # Any date
-        
+        mock_var_get.return_value = "2024-03-15"
+
         # Act
-        result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
-    
+        result, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+
         # Assert
         assert result == []
         mock_provider.list_available_keys.assert_called_once()
@@ -374,21 +329,14 @@ def test_determine_dates_invalid_metadata_date(mock_provider: MagicMock, caplog:
     mock_provider.list_available_keys.return_value = available_dates
     force_reprocess = False
     expected_dates = available_dates
-    
-    # Mock Prefect variables
+
     with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_var_get:
-        def _mock_get(var_name: str, default: Any) -> str:
-            if var_name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                return "2024-03-15"
-            elif var_name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
-                return "1970-01-01"
-            return default
-        mock_var_get.side_effect = _mock_get
-        
+        mock_var_get.return_value = "1970-01-01"
+
         # Act
-        with caplog.at_level(logging.WARNING):  # Use logging.WARNING
-            result, _, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
-    
+        with caplog.at_level(logging.WARNING):
+            result, _ = determine_aggregation_dates.fn(mock_provider, force_reprocess)
+
         # Assert
         assert result == expected_dates
 

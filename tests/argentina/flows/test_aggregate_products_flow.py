@@ -3,7 +3,6 @@ Integration tests for the Argentina SEPA Product Aggregation Flow.
 """
 
 import io
-from typing import Any
 from unittest.mock import (
     AsyncMock,
     MagicMock,
@@ -194,7 +193,7 @@ async def test_aggregate_flow_with_state_and_artifacts_simplified_mock(
     with (
         patch(
             "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.determine_aggregation_dates",
-            return_value=(dates_to_process, "1970-01-01", "1970-01-01"),
+            return_value=(dates_to_process, "1970-01-01"),
         ) as mock_date_range_task,
         patch(
             "tsn_adapters.tasks.argentina.flows.aggregate_products_flow.ProductAveragesProvider",
@@ -293,7 +292,7 @@ async def test_aggregate_flow_no_dates_to_process_with_artifact(
         ) as mock_create_artifact,
     ):
         # mock_load_state.return_value = (empty_aggregated_df, default_metadata)
-        mock_determine_range.return_value = ([], "1970-01-01", "1970-01-01")  # Return empty list in 3-tuple format
+        mock_determine_range.return_value = ([], "1970-01-01")
 
         # --- Flow Execution ---
         await aggregate_argentina_products_flow(
@@ -344,17 +343,7 @@ async def test_aggregate_flow_end_to_end_cold_start(
 
     # Mock Prefect Variables needed by determine_aggregation_dates
     with patch("tsn_adapters.tasks.argentina.tasks.aggregate_products_tasks.variables.Variable.get") as mock_variable_get:
-        
-        def get_variable_side_effect(name: str, default: Any = None) -> str:
-            if name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                # Set a date that allows our test dates (2024-03-10 to 12) to be processed
-                return "2024-03-12" 
-            elif name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
-                # For cold start, use the default (no previous aggregation)
-                return ArgentinaFlowVariableNames.DEFAULT_DATE
-            return default # Should not happen for these vars, but good practice
-            
-        mock_variable_get.side_effect = get_variable_side_effect
+        mock_variable_get.return_value = ArgentinaFlowVariableNames.DEFAULT_DATE
 
         # Act: Run the flow (first time)
         await aggregate_argentina_products_flow(
@@ -429,15 +418,7 @@ async def test_aggregate_flow_end_to_end_resume(
 
     # Mock Prefect Variables for gating (assuming resume after 2024-03-10)
     with patch("prefect.variables.Variable.get") as mock_variable_get:
-        # Configure side effect for different variable names
-        def get_side_effect(name: str, default: Any = None) -> Any:
-            if name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                return "2024-03-12"  # Allow processing up to 12th
-            if name == ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE:
-                return "2024-03-10"  # Resume after 10th
-            return default
-
-        mock_variable_get.side_effect = get_side_effect
+        mock_variable_get.return_value = "2024-03-10"
 
         # Act: Run the flow (should resume from 2024-03-11)
         await aggregate_argentina_products_flow(
@@ -501,22 +482,12 @@ async def test_aggregate_flow_end_to_end_force_reprocess(
     upload_sample_data(s3_bucket_block, DateStr("2024-03-11"), daily_data_2024_03_11)
     upload_sample_data(s3_bucket_block, DateStr("2024-03-12"), daily_data_2024_03_12)
 
-    # Mock Prefect Variables for gating (force_reprocess=True means LAST_AGGREGATION not fetched)
-    with patch("prefect.variables.Variable.get") as mock_variable_get:
-        # Only need to mock PREPROCESS date
-        def get_side_effect(name: str, default: Any = None) -> str | None:
-            if name == ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE:
-                return "2024-03-12"  # Allow processing up to 12th
-            return default
-
-        mock_variable_get.side_effect = get_side_effect
-
-        # Act: Run the flow with force_reprocess=True
-        await aggregate_argentina_products_flow(
-            s3_block=s3_bucket_block,
-            descriptor_block=mock_descriptor_block,
-            force_reprocess=True,
-        )
+    # force_reprocess=True means LAST_AGGREGATION not fetched — no variable mock needed
+    await aggregate_argentina_products_flow(
+        s3_block=s3_bucket_block,
+        descriptor_block=mock_descriptor_block,
+        force_reprocess=True,
+    )
 
     # --- Verify Final State (Verify MOCK upsert calls) ---
     # Expected state is the same as cold start, should process 10, 11, 12

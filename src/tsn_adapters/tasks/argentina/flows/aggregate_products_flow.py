@@ -61,24 +61,19 @@ async def aggregate_argentina_products_flow(
             product_averages_provider=product_averages_provider,
             force_reprocess=force_reprocess,
         )
-        # Unpack the results from the task
-        dates_to_process, last_agg_date_used, last_prep_date_used = task_result
+        dates_to_process, last_agg_date_used = task_result
 
-        # Check if any dates remain after filtering by the task
         if not dates_to_process:
-            # Use the context dates returned by the task
             logger.info(
-                f"Task determine_aggregation_dates returned no new dates to process between {last_agg_date_used} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}) and {last_prep_date_used} ({ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE}). Flow finished early."
+                f"Task determine_aggregation_dates returned no new dates to process after {last_agg_date_used} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}). Flow finished early."
             )
-            # Create artifact even if no dates processed
             create_markdown_artifact(
                 key="argentina-product-aggregation-summary",
-                markdown=f"# Argentina Product Aggregation Summary\\n\\nNo new dates found to process between {last_agg_date_used} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}) and {last_prep_date_used} ({ArgentinaFlowVariableNames.LAST_PREPROCESS_SUCCESS_DATE}).",
+                markdown=f"# Argentina Product Aggregation Summary\\n\\nNo new dates found to process after {last_agg_date_used} ({ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE}).",
                 description="Summary of the Argentina SEPA product aggregation flow run.",
             )
             return
 
-        # Log the result from the task
         logger.info(
             f"Task determine_aggregation_dates determined {len(dates_to_process)} dates to process: {dates_to_process[0]} to {dates_to_process[-1]}"
         )
