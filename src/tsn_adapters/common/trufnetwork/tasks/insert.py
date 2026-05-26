@@ -4,8 +4,6 @@ from typing import (
     Optional,
     TypedDict,
 )
-import warnings
-
 import pandas as pd
 from pandera.typing import DataFrame
 from prefect import get_run_logger, task
@@ -36,7 +34,7 @@ class SplitInsertResults(TypedDict):
 def task_split_and_insert_records(
     block: TNAccessBlock,
     records: DataFrame[TnDataRowModel],
-    max_batch_size: int = 25000,
+    max_batch_size: int = 10,
     wait: bool = True,
     filter_deployed_streams: bool = True,
     max_streams_per_existence_check: int = 1000,
@@ -45,31 +43,14 @@ def task_split_and_insert_records(
     Inserts records into TN via BulkInserter (cached-nonce pipelining),
     optionally filtering by stream existence first.
 
-    The underlying node enforces a per-tx insert cap (currently 10 rows).
-    BulkInserter satisfies that by chunking internally at 10/tx and
-    pipelining broadcasts so throughput stays bounded by admission
-    (~50ms) rather than inclusion (~1-2s/block).
-
     Args:
         block: The TNAccessBlock instance.
         records: The records to insert.
-        max_batch_size: Legacy. Ignored — BulkInserter chunks at the
-            protocol cap (10 rows/tx).
-        wait: Legacy. Effectively always-true — BulkInserter drains
-            in-flight broadcasts via WaitTx before returning.
+        max_batch_size: Records per insert_records tx (passed to BulkInserter).
+        wait: Legacy. Effectively always-true.
         filter_deployed_streams: Whether to filter out streams that do not exist on TN.
         max_streams_per_existence_check: Max streams to check in one existence API call.
-
-    Returns:
-        SplitInsertResults with one tx_hash per chunk (~10 rows) and any failed records/reasons.
     """
-    if max_batch_size != 25000 or wait is not True:
-        warnings.warn(
-            "max_batch_size and wait are deprecated; BulkInserter chunks at the "
-            "protocol cap (10 rows/tx) and always drains before returning.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
 
     logger = get_logger_safe(__name__)
     processed_records = records.copy()
@@ -307,26 +288,16 @@ def _perform_batch_insertions(
 ) -> SplitInsertResults:
     """Insert records via sdk-py BulkInserter (cached-nonce pipelining).
 
-    Exceptions propagate so the enclosing Prefect task
-    (`task_split_and_insert_records`, with `tn_special_retry_condition(5)`)
-    can retry. We don't catch `BulkInsertError` partially: retrying with
-    the known-committed txs removed would require mapping flattened chunks
-    back to source rows, which BulkInserter's stream-grouped flatten makes
-    unreliable. Letting the whole batch re-run is safer.
-
     Args:
         block: TNAccessBlock instance.
         records_to_insert: DataFrame of records ready for insertion.
-        max_batch_size: Legacy. Ignored — BulkInserter chunks at the
-            protocol cap (10 rows/tx) internally.
-        wait: Legacy. Effectively always-true — BulkInserter drains all
-            in-flight broadcasts via WaitTx before returning.
+        max_batch_size: Passed through to bulk_insert_tn_records as batch_size.
+        wait: Legacy. Effectively always-true.
 
     Returns:
-        SplitInsertResults with one tx_hash per chunk (~10 rows). On
-        failure, raises (does not return partial results).
+        SplitInsertResults. On failure, raises (does not return partial results).
     """
-    del max_batch_size, wait  # parameters retained for API compat
+    del wait
 
     logger = get_logger_safe(__name__)
 
@@ -335,8 +306,8 @@ def _perform_batch_insertions(
         empty_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
         return SplitInsertResults(success_tx_hashes=[], failed_records=empty_df, failed_reasons=[])
 
-    logger.info(f"Submitting {len(records_to_insert)} records via BulkInserter (chunk_size=10).")
-    success_tx_hashes = block.bulk_insert_tn_records(records_to_insert)
+    logger.info(f"Submitting {len(records_to_insert)} records via BulkInserter (batch_size={max_batch_size}).")
+    success_tx_hashes = block.bulk_insert_tn_records(records_to_insert, batch_size=max_batch_size)
     logger.info(f"BulkInserter submitted {len(success_tx_hashes)} txs.")
 
     empty_df = DataFrame[TnDataRowModel](columns=["data_provider", "stream_id", "date", "value"])
