@@ -212,6 +212,7 @@ def test_aapl_filing_date_off_by_one():
     assert len(yahoo_rows) == 1
     assert len(truf_rows) == 1
     assert truf_rows[0]["value"] == "2.01"
+    assert truf_rows[0]["date"] == date_string_to_unix("2026-04-30")
 
 
 # --- Disagreement / pending paths ---
