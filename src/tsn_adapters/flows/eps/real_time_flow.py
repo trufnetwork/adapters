@@ -40,7 +40,7 @@ block for all three when source identities share a wallet.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 from pandera.typing import DataFrame
@@ -135,14 +135,19 @@ def detect_and_prepare_eps(
     income_stmt_df = fmp_block.get_quarterly_income_statements(symbol, limit=RECENT_QUARTERS + 2)
 
     # Build filing_date → fiscal-period-end mapping from quarterly income
-    # statements. `filingDate` matches FMP earnings' `date` (announcement
-    # date) exactly for the same event; `date` is the fiscal-period-end.
+    # statements. For most tickers, `filingDate` matches FMP earnings'
+    # `date` exactly. Some tickers (AAPL, GOOGL, AMZN, META, TSLA) are
+    # off by ±1 day, so we index each filing under its date and both
+    # neighbors.
     filing_to_period_end: dict[str, str] = {}
     for _, row in income_stmt_df.iterrows():
         fd = row.get("filingDate")
         pe = row.get("date")
         if fd and pe and not pd.isna(fd) and not pd.isna(pe):
-            filing_to_period_end[str(fd)] = str(pe)
+            fd_date = date.fromisoformat(str(fd))
+            for offset in (-1, 0, 1):
+                key = (fd_date + timedelta(days=offset)).isoformat()
+                filing_to_period_end.setdefault(key, str(pe))
 
     fmp_rows: list[dict] = []
     yahoo_rows: list[dict] = []
