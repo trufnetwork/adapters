@@ -180,6 +180,41 @@ def test_aapl_fiscal_quarter_mismatch_resolves():
     assert truf_rows[0]["value"] == "2.01"
 
 
+def test_aapl_filing_date_off_by_one():
+    """Real production data: AAPL's income-statement filingDate is one day
+    after FMP earnings date (2026-05-01 vs 2026-04-30). The ±1 day fuzzy
+    match on filing dates resolves this.
+    """
+    aapl_fmp = {"symbol": "AAPL", "date": "2026-04-30", "epsActual": 2.01, "epsEstimated": 1.99, "lastUpdated": None}
+    aapl_yahoo = {"symbol": "AAPL", "date": "2026-03-31", "epsActual": 2.01, "epsEstimated": 1.99, "lastUpdated": None}
+    aapl_income = {
+        "symbol": "AAPL",
+        "period": "Q2",
+        "fiscalYear": "2026",
+        "date": "2026-03-28",
+        "filingDate": "2026-05-01",  # +1 day vs earnings date
+        "acceptedDate": None,
+    }
+
+    fmp = _make_fmp(earnings={"AAPL": [aapl_fmp]}, income_statements={"AAPL": [aapl_income]})
+    yahoo = _make_yahoo({"AAPL": [aapl_yahoo]})
+
+    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=FakeTNAccessBlock(),
+        yahoo_tn_block=FakeTNAccessBlock(),
+        truf_tn_block=FakeTNAccessBlock(),
+        symbol="AAPL",
+    )
+
+    assert len(fmp_rows) == 1
+    assert len(yahoo_rows) == 1
+    assert len(truf_rows) == 1
+    assert truf_rows[0]["value"] == "2.01"
+    assert truf_rows[0]["date"] == date_string_to_unix("2026-04-30")
+
+
 # --- Disagreement / pending paths ---
 
 
