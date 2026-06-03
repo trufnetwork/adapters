@@ -8,10 +8,12 @@ the same ``canonical_key`` bucket. Regression guard for the silent
 mis-bucketing where scraped Yahoo rows failed to reconcile against FMP.
 """
 
+from datetime import date
+
 import pandas as pd
 import pytest
 
-from tsn_adapters.blocks.yahoo import YahooBlock, _announcement_to_period_end
+from tsn_adapters.blocks.yahoo import YahooBlock, _announcement_to_period_end, _resolve_period_end
 from tsn_adapters.tasks.eps.reconciler import canonical_key
 
 
@@ -97,3 +99,50 @@ def test_normalize_json_preserves_period_end() -> None:
         "META",
     )
     assert list(out["date"]) == ["2026-03-31", "2025-12-31"]
+
+
+# (announcement, JSON period-ends, expected date) — the JSON period-end wins;
+# fall back to the calendar quarter-end only when none precede the announcement.
+@pytest.mark.parametrize(
+    "announce, period_ends, expected",
+    [
+        # NVDA off-cycle: the JSON month-end (04-30) wins over the calendar snap (06-30)
+        ("2026-05-20", ["2026-01-31", "2026-04-30"], "2026-04-30"),
+        ("2025-11-19", ["2025-07-31", "2025-10-31"], "2025-10-31"),
+        # META: JSON period-end and calendar snap already agree (03-31)
+        ("2026-04-29", ["2025-12-31", "2026-03-31"], "2026-03-31"),
+        # No known period-end precedes the announcement -> calendar-quarter fallback
+        ("2026-05-20", [], "2026-06-30"),
+        ("2026-05-20", ["2026-09-30"], "2026-06-30"),
+    ],
+)
+def test_resolve_period_end(announce: str, period_ends: list[str], expected: str) -> None:
+    pes = [date.fromisoformat(d) for d in period_ends]
+    assert _resolve_period_end(date.fromisoformat(announce), pes) == expected
+
+
+def test_scrape_matches_json_date_for_offcycle_ticker() -> None:
+    """Accessor equality for an off-cycle fiscal (NVDA).
+
+    The scrape publishes a row under the SAME literal date as the JSON path —
+    ``2026-04-30``, not the calendar quarter-end ``2026-06-30`` — so the two
+    accessors never split one quarter into two primitive rows, and the
+    read-before-write idempotency check (keyed on the exact date) holds across
+    a scrape/JSON switch. (`detect_and_prepare_eps` publishes the primitive
+    under this same `date`; its passthrough is covered in test_real_time_flow.)
+    """
+    json_out = YahooBlock._normalize_json(_json_df([{"period_end": "2026-04-30", "eps": 1.87}]), "NVDA")
+    period_ends = [date.fromisoformat(d) for d in json_out["date"]]
+    scrape_out = YahooBlock._normalize_scrape(
+        _scrape_df([{"announce": "2026-05-20", "eps": 1.87}]), "NVDA", period_ends
+    )
+    assert scrape_out["date"].iloc[0] == "2026-04-30"  # the JSON period-end, not 06-30
+    assert scrape_out["date"].iloc[0] == json_out["date"].iloc[0]  # identical across accessors
+
+
+def test_scrape_falls_back_to_calendar_quarter_without_period_ends() -> None:
+    """With no JSON period-ends, the scrape degrades to the nearest calendar
+    quarter-end — canonical-correct even if the literal date differs."""
+    out = YahooBlock._normalize_scrape(_scrape_df([{"announce": "2026-05-20", "eps": 1.87}]), "NVDA")
+    assert out["date"].iloc[0] == "2026-06-30"
+    assert canonical_key("NVDA", out["date"].iloc[0]) == ("NVDA", 2026, 2)

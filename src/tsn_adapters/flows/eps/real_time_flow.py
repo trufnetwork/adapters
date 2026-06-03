@@ -192,9 +192,9 @@ def detect_and_prepare_eps(
         fmp_by_key[canonical_key(symbol, period_end)] = (eps, announcement_date, retrieved_at)
 
     # Yahoo ingestion. The block normalizes both of its accessors to a
-    # fiscal-period-end `date` (the scrape's announcement date is snapped to
-    # period-end), so no auxiliary lookup is needed here — primitive emission
-    # and canonical-key population happen together.
+    # fiscal-period-end `date` (the scrape's announcement date is resolved to
+    # the JSON accessor's period-end), so no auxiliary lookup is needed here —
+    # primitive emission and canonical-key population happen together.
     yahoo_by_key: dict[tuple[str, int, int], tuple[float, str]] = {}
     for _, row in yahoo_df.iterrows():
         raw = row.get("epsActual")
