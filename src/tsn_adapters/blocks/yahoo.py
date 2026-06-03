@@ -1,14 +1,16 @@
 """Yahoo Finance Prefect block for EPS data."""
+
 from __future__ import annotations
 
+from datetime import date
 import logging
 import os
 import random
 import time
 
 import pandas as pd
-import platformdirs
 from pandera.typing import DataFrame
+import platformdirs
 from prefect.blocks.core import Block
 from pydantic import Field
 
@@ -81,6 +83,58 @@ def _clear_stale_cookie_cache() -> None:
         pass
 
 
+def _announcement_to_period_end(announcement: date) -> str:
+    """Map a Yahoo "Earnings Date" (announcement date) to its fiscal-period-end.
+
+    The contract for ``get_historical_earnings`` is that the ``date`` column is
+    the **fiscal-period-end** — that is what the JSON ``earnings_history``
+    accessor returns, what FMP is reduced to via its income-statement join, and
+    what the reconciler's ``canonical_key`` expects. But the HTML-scrape
+    accessor (``get_earnings_dates``) dates each row by the *announcement*
+    (earnings-call) date instead — ~3-5 weeks after the quarter closed. Left
+    unconverted, those rows land in the wrong ``(year, calendar_quarter)``
+    bucket and silently fail to reconcile against FMP.
+
+    The announcement always sits close to a calendar-quarter boundary, so we
+    snap to the nearest quarter-end. That lands in the correct
+    ``(year, calendar_quarter)`` for both calendar-quarter reporters
+    (META/AAPL/GOOGL/AMZN/MSFT/TSLA — period-ends 03-31/06-30/09-30/12-31) and
+    NVDA's off-cycle Jan/Apr/Jul/Oct fiscal — verified across all four quarters
+    of each.
+
+    This is the **fallback** for ``_resolve_period_end``: it keeps the canonical
+    quarter correct, but the literal date can differ from the JSON accessor for
+    off-cycle fiscals (NVDA → 06-30 here vs the JSON's actual 04-30). Prefer the
+    JSON-derived period-end so both accessors publish an identical date.
+    """
+    candidates = [
+        date(y, m, 31 if m in (3, 12) else 30)
+        for y in (announcement.year - 1, announcement.year, announcement.year + 1)
+        for m in (3, 6, 9, 12)
+    ]
+    return min(candidates, key=lambda q: abs((q - announcement).days)).isoformat()
+
+
+def _resolve_period_end(announcement: date, period_ends: list[date]) -> str:
+    """Resolve a scraped announcement date to its fiscal-period-end.
+
+    Prefers the actual period-end reported by the JSON ``earnings_history``
+    accessor — the most recent quarter close on or before the announcement —
+    so the scrape and JSON paths publish an **identical** ``date`` for a given
+    quarter. This is what keeps off-cycle fiscals consistent: NVDA's period-end
+    is the month-end ``2026-04-30``, not the calendar quarter-end ``2026-06-30``.
+
+    Falls back to ``_announcement_to_period_end`` (nearest calendar quarter-end)
+    only when no known period-end precedes the announcement — e.g. quarters
+    older than ``earnings_history``'s short window, or when that accessor is
+    unavailable.
+    """
+    prior = [pe for pe in period_ends if pe <= announcement]
+    if prior:
+        return max(prior).isoformat()
+    return _announcement_to_period_end(announcement)
+
+
 class YahooBlock(Block):
     """Prefect block wrapping yfinance for EPS data.
 
@@ -132,6 +186,14 @@ class YahooBlock(Block):
         returns empty — e.g. when yfinance 0.2.49 encounters a column
         Yahoo no longer serves.
 
+        Both paths return ``date`` as the **fiscal-period-end** — the scrape's
+        announcement date is resolved to the period-end the JSON accessor would
+        report for the same quarter — so callers and the reconciler can treat
+        the two accessors interchangeably, and both publish a row for a given
+        quarter under an identical date. Note the two Yahoo endpoints can report
+        different `epsActual` for the same quarter; the scrape's "Reported EPS"
+        is generally the more accurate of the two.
+
         Raises on persistent failures so the calling @task retry decorator can
         take over.
         """
@@ -148,35 +210,28 @@ class YahooBlock(Block):
                 df = ticker.get_earnings_dates(limit=limit)
             except Exception as exc:
                 last_exc = exc
-                self.logger.error(
-                    f"yfinance scrape raised for {symbol} (attempt {attempt}/{_MAX_ATTEMPTS}): {exc}"
-                )
+                self.logger.error(f"yfinance scrape raised for {symbol} (attempt {attempt}/{_MAX_ATTEMPTS}): {exc}")
                 df = None
 
             if df is not None and not df.empty:
-                return self._normalize_scrape(df, symbol)
+                return self._normalize_scrape(df, symbol, self._period_ends_from_history(symbol))
 
             # Fallback: JSON-based earnings_history (last 4 quarters only)
             try:
                 ticker = yf.Ticker(symbol)
                 eh = ticker.earnings_history
                 if eh is not None and hasattr(eh, "empty") and not eh.empty:
-                    self.logger.info(
-                        f"Scrape empty for {symbol} — using JSON earnings_history fallback"
-                    )
+                    self.logger.info(f"Scrape empty for {symbol} — using JSON earnings_history fallback")
                     return self._normalize_json(eh, symbol)
             except Exception as fallback_exc:
-                self.logger.warning(
-                    f"JSON fallback also failed for {symbol}: {fallback_exc}"
-                )
+                self.logger.warning(f"JSON fallback also failed for {symbol}: {fallback_exc}")
                 if last_exc is None:
                     last_exc = fallback_exc
 
             if attempt < _MAX_ATTEMPTS:
                 delay = _BACKOFF_BASE_S * (2 ** (attempt - 1)) + random.uniform(*_BACKOFF_JITTER_S)
                 self.logger.warning(
-                    f"No data for {symbol} (attempt {attempt}/{_MAX_ATTEMPTS}) — "
-                    f"sleeping {delay:.1f}s before retry"
+                    f"No data for {symbol} (attempt {attempt}/{_MAX_ATTEMPTS}) — " f"sleeping {delay:.1f}s before retry"
                 )
                 time.sleep(delay)
 
@@ -189,22 +244,52 @@ class YahooBlock(Block):
             raise RuntimeError(msg) from last_exc
         raise RuntimeError(msg)
 
+    def _period_ends_from_history(self, symbol: str) -> list[date]:
+        """Fiscal-period-end dates from the JSON ``earnings_history`` accessor.
+
+        Used to date scraped rows identically to the JSON path (see
+        ``_resolve_period_end``). Returns ``[]`` on any failure, so the scrape
+        path degrades to the calendar-quarter approximation rather than raising.
+        """
+        import yfinance as yf
+
+        try:
+            eh = yf.Ticker(symbol).earnings_history
+            if hasattr(eh, "empty") and not eh.empty:
+                return [pd.Timestamp(d).date() for d in eh.index]
+        except Exception as exc:
+            self.logger.warning(f"period-end lookup for {symbol} unavailable: {exc}")
+        return []
+
     @staticmethod
-    def _normalize_scrape(df: pd.DataFrame, symbol: str) -> DataFrame[EarningsData]:
-        """Normalize output from ``get_earnings_dates`` (HTML scrape)."""
+    def _normalize_scrape(
+        df: pd.DataFrame, symbol: str, period_ends: list[date] | None = None
+    ) -> DataFrame[EarningsData]:
+        """Normalize output from ``get_earnings_dates`` (HTML scrape).
+
+        ``get_earnings_dates`` keys each row by the *announcement* date, so we
+        resolve it to the fiscal-period-end (see ``_resolve_period_end``) to
+        honor the ``date == period-end`` contract shared with the JSON accessor
+        and the reconciler. ``period_ends`` are the JSON accessor's actual
+        period-ends; without them each announcement falls back to the nearest
+        calendar quarter-end. Without this step scraped rows reconcile in the
+        wrong calendar quarter.
+        """
+        pes = period_ends or []
         df = df.reset_index()
-        date_col = df.columns[0]  # "Earnings Date" — timezone-aware
-        df["date"] = pd.to_datetime(df[date_col]).dt.strftime("%Y-%m-%d")
+        date_col = df.columns[0]  # "Earnings Date" — announcement date, timezone-aware
+        announced = pd.to_datetime(df[date_col])
+        df["date"] = [_resolve_period_end(ts.date(), pes) for ts in announced]
         df["symbol"] = symbol
-        df = df.rename(columns={
-            "Reported EPS": "epsActual",
-            "EPS Estimate": "epsEstimated",
-        })
+        df = df.rename(
+            columns={
+                "Reported EPS": "epsActual",
+                "EPS Estimate": "epsEstimated",
+            }
+        )
         df["lastUpdated"] = None
 
-        return DataFrame[EarningsData](
-            df[["symbol", "date", "epsEstimated", "epsActual", "lastUpdated"]]
-        )
+        return DataFrame[EarningsData](df[["symbol", "date", "epsEstimated", "epsActual", "lastUpdated"]])
 
     @staticmethod
     def _normalize_json(df: pd.DataFrame, symbol: str) -> DataFrame[EarningsData]:
@@ -220,6 +305,4 @@ class YahooBlock(Block):
         df = df.rename(columns={"epsEstimate": "epsEstimated"})
         df["lastUpdated"] = None
 
-        return DataFrame[EarningsData](
-            df[["symbol", "date", "epsEstimated", "epsActual", "lastUpdated"]]
-        )
+        return DataFrame[EarningsData](df[["symbol", "date", "epsEstimated", "epsActual", "lastUpdated"]])
