@@ -40,8 +40,11 @@ from tsn_adapters.tasks.eps.config import FMP_EPS_STREAM_IDS, MAG7, YAHOO_EPS_ST
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
 
-# FMP earnings endpoint returns up to `limit` quarters. 50 covers ~12.5 years.
-EARNINGS_LIMIT = 50
+# FMP earnings endpoint returns up to `limit` quarters. The current FMP plan
+# rejects `limit` > 5 with HTTP 402, and ignores offset/page/date-range params,
+# so deeper history is unreachable without a plan upgrade. Yahoo (yfinance) is
+# also shallow (~4 quarters). Raise this once FMP access is restored.
+EARNINGS_LIMIT = 5
 
 
 @task(retries=3, retry_delay_seconds=30)
