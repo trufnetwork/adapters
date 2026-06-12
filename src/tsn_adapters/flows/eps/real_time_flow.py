@@ -132,7 +132,8 @@ def detect_and_prepare_eps(
     yahoo_df = yahoo_block.get_historical_earnings(symbol, limit=RECENT_QUARTERS)
     # +2 keeps the lookup tolerant of fetch-window drift between earnings and
     # income-statement (income-statement may lag earnings by one filing).
-    income_stmt_df = fmp_block.get_quarterly_income_statements(symbol, limit=RECENT_QUARTERS + 2)
+    # Capped at 5: the current FMP plan rejects `limit` > 5 with HTTP 402.
+    income_stmt_df = fmp_block.get_quarterly_income_statements(symbol, limit=min(RECENT_QUARTERS + 2, 5))
 
     # Build filing_date → fiscal-period-end mapping from quarterly income
     # statements. For most tickers, `filingDate` matches FMP earnings'
