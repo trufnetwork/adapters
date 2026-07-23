@@ -67,6 +67,13 @@ RECENT_QUARTERS = 4
 def _is_published(tn_block: TNAccessBlock, stream_id: str, date_unix: int) -> bool:
     """Return True if a record for this exact date already exists in TN.
 
+    TN's `get_records` gap-fills: a query for [date, date] also returns the
+    latest record at-or-before `date` (the LOCF anchor), so a non-empty
+    result only proves the stream has *some* earlier history — not that this
+    date is published. Only an exact event-time match counts; treating the
+    anchor as "published" made every date after a stream's first record read
+    as a duplicate and silently no-op'd all publishes (website#4362).
+
     Raises on TN errors (fail-closed) — callers are retried by Prefect so a
     transient failure never silently breaks the read-before-write guarantee.
     """
@@ -75,7 +82,9 @@ def _is_published(tn_block: TNAccessBlock, stream_id: str, date_unix: int) -> bo
         date_from=date_unix,
         date_to=date_unix,
     )
-    return not df.empty
+    if df.empty:
+        return False
+    return bool((df["date"].astype("int64") == int(date_unix)).any())
 
 
 @task(retries=3, retry_delay_seconds=30)

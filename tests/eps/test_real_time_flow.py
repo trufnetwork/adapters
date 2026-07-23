@@ -367,6 +367,53 @@ def test_idempotent_skips_already_published_consensus():
     assert len(truf_rows) == 0
 
 
+def test_publishes_fresh_print_despite_older_stream_history():
+    """A fresh print must publish even when the stream already holds older
+    quarters. TN's gap-filled read answers a [date, date] query with the
+    PREVIOUS record (the LOCF anchor), so an is-it-published check that only
+    tests non-emptiness sees every new announcement as a duplicate once the
+    stream has any history at all. That silently no-op'd every scheduled run
+    (website#4362: TSLA's Q2-2026 print never reached TN while the streams
+    held Q1 and older). Only an exact date match may count as published.
+    """
+    from tsn_adapters.tasks.eps.config import (
+        EPS_STREAM_IDS,
+        FMP_EPS_STREAM_IDS,
+        YAHOO_EPS_STREAM_IDS,
+    )
+
+    fmp = _make_fmp(
+        earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
+        income_statements={"NVDA": [NVDA_Q1_FY27_INCOME_STMT]},
+    )
+    yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
+
+    # Every stream already carries the PREVIOUS quarter — the production
+    # steady state. The gap-filled read returns these as anchors for the
+    # fresh dates.
+    fmp_tn = FakeTNAccessBlock()
+    yahoo_tn = FakeTNAccessBlock()
+    truf_tn = FakeTNAccessBlock()
+    fmp_tn.seed_records(FMP_EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-02-25")])
+    yahoo_tn.seed_records(YAHOO_EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-01-31")])
+    truf_tn.seed_records(EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-02-25")])
+
+    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=fmp_tn,
+        yahoo_tn_block=yahoo_tn,
+        truf_tn_block=truf_tn,
+        symbol="NVDA",
+    )
+
+    # The fresh quarter publishes everywhere — the older history must not
+    # shadow it.
+    assert [r["date"] for r in fmp_rows] == [date_string_to_unix("2026-05-20")]
+    assert [r["date"] for r in yahoo_rows] == [date_string_to_unix("2026-04-30")]
+    assert [r["date"] for r in truf_rows] == [date_string_to_unix("2026-05-20")]
+
+
 def test_idempotent_when_all_streams_already_published():
     """Full idempotency: when every stream's date is already on-chain,
     a re-run produces no writes anywhere. Mirrors the steady-state
