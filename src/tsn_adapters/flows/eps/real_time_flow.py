@@ -43,20 +43,13 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
-from pandera.typing import DataFrame
 from prefect import flow, task
 
 from tsn_adapters.blocks.fmp import FMPBlock
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.blocks.yahoo import YahooBlock
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
-from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
-from tsn_adapters.tasks.eps.config import (
-    EPS_STREAM_IDS,
-    FMP_EPS_STREAM_IDS,
-    MAG7,
-    YAHOO_EPS_STREAM_IDS,
-)
+from tsn_adapters.flows.eps.publish import publish_eps_records
+from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, MAG7, YAHOO_EPS_STREAM_IDS
 from tsn_adapters.tasks.eps.reconciler import SourceReading, canonical_key, reconcile
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
@@ -338,25 +331,13 @@ def eps_real_time_flow(
         return
 
     if fmp_rows:
-        task_split_and_insert_records(
-            block=fmp_tn_block,
-            records=DataFrame[TnDataRowModel](pd.DataFrame(fmp_rows)),
-        )
-        logger.info(f"Published {len(fmp_rows)} record(s) to FMP streams")
+        publish_eps_records(fmp_tn_block, pd.DataFrame(fmp_rows), "FMP")
 
     if yahoo_rows:
-        task_split_and_insert_records(
-            block=yahoo_tn_block,
-            records=DataFrame[TnDataRowModel](pd.DataFrame(yahoo_rows)),
-        )
-        logger.info(f"Published {len(yahoo_rows)} record(s) to Yahoo streams")
+        publish_eps_records(yahoo_tn_block, pd.DataFrame(yahoo_rows), "Yahoo")
 
     if truf_rows:
-        task_split_and_insert_records(
-            block=truf_tn_block,
-            records=DataFrame[TnDataRowModel](pd.DataFrame(truf_rows)),
-        )
-        logger.info(f"Published {len(truf_rows)} record(s) to Truf consensus streams")
+        publish_eps_records(truf_tn_block, pd.DataFrame(truf_rows), "Truf consensus")
 
 
 if __name__ == "__main__":
