@@ -8,15 +8,18 @@ naïve dict-key joins on raw dates don't treat the same event as two
 separate single-source entries.
 """
 
+from typing import Any
+
 import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import PrivateAttr, SecretStr
+import pytest
 from tests.utils.constants import FAKE_PRIVATE_KEY
 from tests.utils.fake_tn_access import FakeTNAccessBlock
 
 from tsn_adapters.blocks.fmp import EarningsData, FMPBlock, QuarterlyIncomeStatementData
 from tsn_adapters.blocks.yahoo import YahooBlock
-from tsn_adapters.flows.eps.real_time_flow import detect_and_prepare_eps
+from tsn_adapters.flows.eps.real_time_flow import detect_and_prepare_eps, eps_real_time_flow
 from tsn_adapters.utils.create_empty_df import create_empty_df
 from tsn_adapters.utils.time_utils import date_string_to_unix
 
@@ -376,11 +379,7 @@ def test_publishes_fresh_print_despite_older_stream_history():
     (website#4362: TSLA's Q2-2026 print never reached TN while the streams
     held Q1 and older). Only an exact date match may count as published.
     """
-    from tsn_adapters.tasks.eps.config import (
-        EPS_STREAM_IDS,
-        FMP_EPS_STREAM_IDS,
-        YAHOO_EPS_STREAM_IDS,
-    )
+    from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, YAHOO_EPS_STREAM_IDS
 
     fmp = _make_fmp(
         earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
@@ -420,11 +419,7 @@ def test_idempotent_when_all_streams_already_published():
     behaviour of the scheduled flow re-encountering the same recent
     earnings rows on subsequent ticks.
     """
-    from tsn_adapters.tasks.eps.config import (
-        EPS_STREAM_IDS,
-        FMP_EPS_STREAM_IDS,
-        YAHOO_EPS_STREAM_IDS,
-    )
+    from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, YAHOO_EPS_STREAM_IDS
 
     fmp = _make_fmp(
         earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
@@ -451,3 +446,74 @@ def test_idempotent_when_all_streams_already_published():
     assert len(fmp_rows) == 0
     assert len(yahoo_rows) == 0
     assert len(truf_rows) == 0
+
+
+# --- Flow-level: the 2026-07-22 duplicate-row incident (website#4362) ---
+
+GOOGL_Q2_2026_FMP_EARNINGS = {
+    "symbol": "GOOGL",
+    "date": "2026-07-22",
+    "epsActual": 9.11,
+    "epsEstimated": None,
+    "lastUpdated": None,
+}
+GOOGL_Q2_2026_YAHOO_EARNINGS = {
+    "symbol": "GOOGL",
+    "date": "2026-06-30",
+    "epsActual": 9.11,
+    "epsEstimated": None,
+    "lastUpdated": None,
+}
+GOOGL_Q2_2026_INCOME_STMT = {
+    "symbol": "GOOGL",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "date": "2026-06-30",
+    "filingDate": "2026-07-22",
+    "acceptedDate": None,
+}
+
+
+@pytest.fixture(scope="module")
+def prefect_harness(prefect_test_fixture: Any):
+    yield prefect_test_fixture
+
+
+@pytest.mark.timeout(120, func_only=True)
+def test_duplicate_fmp_announcement_rows_publish_once(prefect_harness: Any):
+    """The 2026-07-22 incident shape (website#4362): FMP returned GOOGL's
+    fresh Q2 print twice; both copies passed the not-yet-published check
+    and rode one insert_records tx, whose primitive PK rejected the whole
+    batch on-chain — TSLA's print rolled back with it. Duplicates must
+    collapse before the write so one repeated upstream row can't sink
+    every record in the batch."""
+    from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, YAHOO_EPS_STREAM_IDS
+
+    fmp = _make_fmp(
+        earnings={"GOOGL": [GOOGL_Q2_2026_FMP_EARNINGS, GOOGL_Q2_2026_FMP_EARNINGS]},
+        income_statements={"GOOGL": [GOOGL_Q2_2026_INCOME_STMT]},
+    )
+    yahoo = _make_yahoo({"GOOGL": [GOOGL_Q2_2026_YAHOO_EARNINGS]})
+    fmp_tn = FakeTNAccessBlock(existing_streams={FMP_EPS_STREAM_IDS["GOOGL"]})
+    yahoo_tn = FakeTNAccessBlock(existing_streams={YAHOO_EPS_STREAM_IDS["GOOGL"]})
+    truf_tn = FakeTNAccessBlock(existing_streams={EPS_STREAM_IDS["GOOGL"]})
+
+    eps_real_time_flow(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=fmp_tn,
+        yahoo_tn_block=yahoo_tn,
+        truf_tn_block=truf_tn,
+        symbols=["GOOGL"],
+    )
+
+    fmp_inserted = pd.concat(fmp_tn.inserted_records, ignore_index=True)
+    assert len(fmp_inserted) == 1
+    assert fmp_inserted.iloc[0]["date"] == date_string_to_unix("2026-07-22")
+
+    yahoo_inserted = pd.concat(yahoo_tn.inserted_records, ignore_index=True)
+    assert len(yahoo_inserted) == 1
+
+    truf_inserted = pd.concat(truf_tn.inserted_records, ignore_index=True)
+    assert len(truf_inserted) == 1
+    assert truf_inserted.iloc[0]["value"] == "9.11"

@@ -3,12 +3,12 @@
 from typing import Any
 
 import pandas as pd
-import pytest
 from pandera.typing import DataFrame
 from pydantic import PrivateAttr, SecretStr
-
+import pytest
 from tests.utils.constants import FAKE_PRIVATE_KEY
 from tests.utils.fake_tn_access import FakeTNAccessBlock
+
 from tsn_adapters.blocks.fmp import EarningsData, FMPBlock
 from tsn_adapters.blocks.yahoo import YahooBlock
 from tsn_adapters.flows.eps.historical_flow import build_new_records, eps_historical_flow
@@ -84,6 +84,7 @@ def test_build_new_records_empty_input():
 
 # --- flow-level tests ---
 
+
 @pytest.fixture(scope="module", autouse=True)
 def prefect_harness(prefect_test_fixture: Any):
     yield prefect_test_fixture
@@ -91,6 +92,30 @@ def prefect_harness(prefect_test_fixture: Any):
 
 AAPL_FMP_ROW = AAPL_ROW
 AAPL_YAHOO_ROW = {"symbol": "AAPL", "date": "2024-03-31", "epsActual": 1.53, "epsEstimated": None, "lastUpdated": None}
+
+
+@pytest.mark.timeout(30, func_only=True)
+def test_backfill_collapses_duplicate_source_rows():
+    """FMP can repeat an announcement row in its response (website#4362);
+    both copies pass the published-dates filter and would ride one insert
+    tx, which the primitive PK rejects wholesale. The publish path must
+    collapse them so the backfill still lands."""
+    fmp_block = make_fmp_block({"AAPL": [AAPL_FMP_ROW, AAPL_FMP_ROW]})
+    yahoo_block = make_yahoo_block({})
+    fmp_tn_block = FakeTNAccessBlock(existing_streams={FMP_EPS_STREAM_IDS["AAPL"]})
+    yahoo_tn_block = FakeTNAccessBlock()
+
+    eps_historical_flow(
+        fmp_block=fmp_block,
+        yahoo_block=yahoo_block,
+        fmp_tn_block=fmp_tn_block,
+        yahoo_tn_block=yahoo_tn_block,
+        symbols=["AAPL"],
+    )
+
+    inserted = pd.concat(fmp_tn_block.inserted_records, ignore_index=True)
+    assert len(inserted) == 1
+    assert inserted.iloc[0]["date"] == date_string_to_unix("2024-03-31")
 
 
 @pytest.mark.timeout(30, func_only=True)

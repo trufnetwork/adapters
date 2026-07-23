@@ -25,6 +25,7 @@ Usage (single-shot, idempotent — already-published dates are skipped):
 `fmp_tn_block` and `yahoo_tn_block` may point at the same TN wallet
 when source identities are not split.
 """
+
 from __future__ import annotations
 
 import pandas as pd
@@ -32,10 +33,10 @@ from pandera.typing import DataFrame
 from prefect import flow, task
 
 from tsn_adapters.blocks.fmp import EarningsData, FMPBlock
-from tsn_adapters.blocks.yahoo import YahooBlock
 from tsn_adapters.blocks.tn_access import TNAccessBlock
+from tsn_adapters.blocks.yahoo import YahooBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
-from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
+from tsn_adapters.flows.eps.publish import publish_eps_records
 from tsn_adapters.tasks.eps.config import FMP_EPS_STREAM_IDS, MAG7, YAHOO_EPS_STREAM_IDS
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
@@ -76,9 +77,7 @@ def build_new_records(
     published_dates: set[int],
 ) -> DataFrame[TnDataRowModel]:
     """Filter to unpublished quarters and convert to TN row format."""
-    _empty = DataFrame[TnDataRowModel](
-        pd.DataFrame(columns=["stream_id", "date", "value", "data_provider"])
-    )
+    _empty = DataFrame[TnDataRowModel](pd.DataFrame(columns=["stream_id", "date", "value", "data_provider"]))
     if earnings_df.empty:
         return _empty
 
@@ -89,12 +88,14 @@ def build_new_records(
         date_unix = date_string_to_unix(str(row["date"]))
         if date_unix in published_dates:
             continue
-        rows.append({
-            "stream_id": stream_id,
-            "date": date_unix,
-            "value": str(float(row["epsActual"])),
-            "data_provider": None,
-        })
+        rows.append(
+            {
+                "stream_id": stream_id,
+                "date": date_unix,
+                "value": str(float(row["epsActual"])),
+                "data_provider": None,
+            }
+        )
 
     if not rows:
         return _empty
@@ -156,22 +157,15 @@ def eps_historical_flow(
         return
 
     if not fmp_records.empty:
-        task_split_and_insert_records(
-            block=fmp_tn_block,
-            records=DataFrame[TnDataRowModel](fmp_records),
-        )
-        logger.info(f"Inserted {len(fmp_records)} EPS records into FMP streams")
+        publish_eps_records(fmp_tn_block, fmp_records, "FMP")
 
     if not yahoo_records.empty:
-        task_split_and_insert_records(
-            block=yahoo_tn_block,
-            records=DataFrame[TnDataRowModel](yahoo_records),
-        )
-        logger.info(f"Inserted {len(yahoo_records)} EPS records into Yahoo streams")
+        publish_eps_records(yahoo_tn_block, yahoo_records, "Yahoo")
 
 
 if __name__ == "__main__":
     import asyncio
+
     from tsn_adapters.utils import deroutine
 
     async def main() -> None:
