@@ -282,8 +282,19 @@ class FakeTNAccessBlock(TNAccessBlock):
     ) -> PanderaDataFrame[TnRecordModel]:
         rows = self._seeded_records.get(stream_id, [])
         if date_from is not None:
-            rows = [r for r in rows if r["date"] >= date_from]
-        if date_to is not None:
+            # Mirror TN's get_records gap-fill: rows within [date_from, date_to]
+            # plus the LOCF anchor — the latest record strictly before
+            # date_from when no row sits exactly at it. A bare >= filter
+            # models a contract the real node does not honor, which let the
+            # EPS real-time dedup bug pass CI (website#4362).
+            in_range = [
+                r for r in rows if r["date"] >= date_from and (date_to is None or r["date"] <= date_to)
+            ]
+            earlier = [r for r in rows if r["date"] < date_from]
+            rows = sorted(in_range, key=lambda r: r["date"])
+            if earlier and all(r["date"] != date_from for r in in_range):
+                rows = [max(earlier, key=lambda r: r["date"]), *rows]
+        elif date_to is not None:
             rows = [r for r in rows if r["date"] <= date_to]
         if not rows:
             return PanderaDataFrame[TnRecordModel](pd.DataFrame({"date": pd.Series([], dtype=int), "value": pd.Series([], dtype=str)}))
