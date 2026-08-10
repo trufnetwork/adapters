@@ -36,7 +36,11 @@ from tsn_adapters.tasks.argentina.flows.insert_products_flow import (
     insert_argentina_products_flow,
 )
 from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPriceProductModel
-from tsn_adapters.tasks.argentina.tasks.date_processing_tasks import DailyAverageLoadingError, MappingIntegrityError
+from tsn_adapters.tasks.argentina.tasks.date_processing_tasks import (
+    DailyAverageLoadingError,
+    MappingIntegrityError,
+    filter_unchanged_products,
+)
 from tsn_adapters.tasks.argentina.tasks.descriptor_tasks import DescriptorError
 from tsn_adapters.tasks.argentina.types import DateStr
 
@@ -64,6 +68,18 @@ def mocked_flow_context() -> Generator[dict[str, MagicMock], None, None]:
         mocks["var_get"] = stack.enter_context(patch("prefect.variables.Variable.get"))
         mocks["var_aset"] = stack.enter_context(patch("prefect.variables.Variable.aset", new_callable=AsyncMock))
         mocks["load_daily"] = stack.enter_context(patch(f"{flow_path}.load_daily_averages", new_callable=AsyncMock))
+        # Change detection is stubbed out to a pass-through here so the rest of the
+        # suite keeps exercising the insert path. It has to be stubbed rather than
+        # left alone: load_daily is mocked to return one frame for every date, so
+        # the real filter would read consecutive days as unchanged and drop them.
+        # Its own behaviour is covered in tests/argentina/tasks and by the
+        # change-detection tests at the bottom of this file.
+        mocks["load_previous"] = stack.enter_context(
+            patch(f"{flow_path}.load_previous_daily_averages", new_callable=AsyncMock)
+        )
+        mocks["load_previous"].return_value = None
+        mocks["filter_unchanged"] = stack.enter_context(patch(f"{flow_path}.filter_unchanged_products"))
+        mocks["filter_unchanged"].side_effect = lambda daily_avg_df, previous_avg_df, date_str: daily_avg_df
         mocks["transform"] = stack.enter_context(patch(f"{flow_path}.transform_product_data", new_callable=AsyncMock))
         mocks["insert"] = stack.enter_context(patch(f"{flow_path}.task_split_and_insert_records"))
         mocks["create_artifact"] = stack.enter_context(patch(f"{flow_path}.create_markdown_artifact"))
@@ -684,3 +700,174 @@ async def test_insert_flow_reporting(
 # --- Test Removed ---
 # @pytest.mark.asyncio
 # async def test_insert_flow_fatal_error_load_state(...) - Removed as state loading changed.
+
+
+# --- Change Detection ---
+#
+# These run the real filter, so they patch load_daily per date rather than
+# handing the same frame to every date the way the fixture above does.
+
+
+@pytest.fixture
+def unstubbed_change_detection(
+    mocked_flow_context: dict[str, MagicMock],
+) -> Generator[dict[str, MagicMock], None, None]:
+    """Restore the real filter inside the shared flow context.
+
+    Taken from the defining module, not from the flow module: the flow module's
+    name is already bound to the pass-through stub, so reading `.fn` off it
+    would hand back another mock and the test would assert nothing.
+    """
+    flow_path = "tsn_adapters.tasks.argentina.flows.insert_products_flow"
+    with patch(f"{flow_path}.filter_unchanged_products", filter_unchanged_products.fn):
+        yield mocked_flow_context
+
+
+def _averages(rows: list[tuple[str, float]], date_str: str) -> DataFrame[SepaAvgPriceProductModel]:
+    return SepaAvgPriceProductModel.validate(
+        pd.DataFrame(
+            {
+                "id_producto": [pid for pid, _ in rows],
+                "productos_descripcion": [f"Prod {pid}" for pid, _ in rows],
+                "productos_precio_lista_avg": [price for _, price in rows],
+                "date": [date_str] * len(rows),
+            }
+        ),
+        lazy=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_insert_flow_only_sends_products_that_moved(
+    prefect_test_fixture: Any,
+    unstubbed_change_detection: dict[str, MagicMock],
+    mock_s3_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
+    mock_descriptor_block: MagicMock,
+    mock_deployment_state_block: MagicMock,
+    sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
+    sample_transformed_df_date1: DataFrame[TnDataRowModel],
+):
+    """p1 holds its price overnight and p2 moves, so only p2 reaches transform."""
+    mocks = unstubbed_change_detection
+    date_to_process = "2024-03-15"
+
+    mocks["provider_instance"].list_available_keys.return_value = [date_to_process]
+    mocks["var_get"].side_effect = lambda name, default=None: {
+        ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE: date_to_process,
+        ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE: "2024-03-14",
+    }.get(name, default)
+
+    mocks["load_daily"].return_value = _averages([("p1", 10.5), ("p2", 30.0)], date_to_process)
+    mocks["load_previous"].return_value = _averages([("p1", 10.5), ("p2", 20.25)], "2024-03-14")
+    mocks["transform"].return_value = sample_transformed_df_date1
+
+    mock_descriptor_block.get_descriptor.return_value = sample_descriptor_df
+    mock_deployment_state_block.check_multiple_streams.return_value = {
+        s: True for s in sample_descriptor_df["stream_id"]
+    }
+    mock_tn_block.set_deployed_streams(set(sample_descriptor_df["stream_id"].tolist()))
+
+    await insert_argentina_products_flow(
+        s3_block=mock_s3_block,
+        tn_block=mock_tn_block,
+        descriptor_block=mock_descriptor_block,
+        deployment_state=mock_deployment_state_block,
+    )
+
+    forwarded = mocks["transform"].call_args.kwargs["daily_avg_df"]
+    assert forwarded["id_producto"].tolist() == ["p2"], "p1 did not move and must not be broadcast"
+    mocks["insert"].assert_called_once()
+    assert "Unchanged Prices Skipped:** 1" in mocks["create_artifact"].call_args.kwargs["markdown"]
+
+
+@pytest.mark.asyncio
+async def test_insert_flow_finishes_a_date_where_nothing_moved(
+    prefect_test_fixture: Any,
+    unstubbed_change_detection: dict[str, MagicMock],
+    mock_s3_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
+    mock_descriptor_block: MagicMock,
+    mock_deployment_state_block: MagicMock,
+    sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
+):
+    """A day with no movement still advances the insertion date.
+
+    Leaving the variable behind would make the flow retry that date on every
+    run and never move past it, so a quiet day would look like a wedged flow.
+    """
+    mocks = unstubbed_change_detection
+    date_to_process = "2024-03-15"
+
+    mocks["provider_instance"].list_available_keys.return_value = [date_to_process]
+    mocks["var_get"].side_effect = lambda name, default=None: {
+        ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE: date_to_process,
+        ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE: "2024-03-14",
+    }.get(name, default)
+
+    steady = [("p1", 10.5), ("p2", 20.25)]
+    mocks["load_daily"].return_value = _averages(steady, date_to_process)
+    mocks["load_previous"].return_value = _averages(steady, "2024-03-14")
+
+    mock_descriptor_block.get_descriptor.return_value = sample_descriptor_df
+    mock_deployment_state_block.check_multiple_streams.return_value = {
+        s: True for s in sample_descriptor_df["stream_id"]
+    }
+
+    await insert_argentina_products_flow(
+        s3_block=mock_s3_block,
+        tn_block=mock_tn_block,
+        descriptor_block=mock_descriptor_block,
+        deployment_state=mock_deployment_state_block,
+    )
+
+    mocks["insert"].assert_not_called()
+    mocks["transform"].assert_not_called()
+    mocks["var_aset"].assert_called_once_with(
+        ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_to_process, overwrite=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_insert_flow_can_be_told_to_send_everything(
+    prefect_test_fixture: Any,
+    unstubbed_change_detection: dict[str, MagicMock],
+    mock_s3_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
+    mock_descriptor_block: MagicMock,
+    mock_deployment_state_block: MagicMock,
+    sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
+    sample_transformed_df_date1: DataFrame[TnDataRowModel],
+):
+    """skip_unchanged=False is the escape hatch: no comparison, no filtering."""
+    mocks = unstubbed_change_detection
+    date_to_process = "2024-03-15"
+
+    mocks["provider_instance"].list_available_keys.return_value = [date_to_process]
+    mocks["var_get"].side_effect = lambda name, default=None: {
+        ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE: date_to_process,
+        ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE: "2024-03-14",
+    }.get(name, default)
+
+    steady = [("p1", 10.5), ("p2", 20.25)]
+    mocks["load_daily"].return_value = _averages(steady, date_to_process)
+    mocks["transform"].return_value = sample_transformed_df_date1
+
+    mock_descriptor_block.get_descriptor.return_value = sample_descriptor_df
+    mock_deployment_state_block.check_multiple_streams.return_value = {
+        s: True for s in sample_descriptor_df["stream_id"]
+    }
+    mock_tn_block.set_deployed_streams(set(sample_descriptor_df["stream_id"].tolist()))
+
+    await insert_argentina_products_flow(
+        s3_block=mock_s3_block,
+        tn_block=mock_tn_block,
+        descriptor_block=mock_descriptor_block,
+        deployment_state=mock_deployment_state_block,
+        skip_unchanged=False,
+    )
+
+    mocks["load_previous"].assert_not_awaited()
+    forwarded = mocks["transform"].call_args.kwargs["daily_avg_df"]
+    assert forwarded["id_producto"].tolist() == ["p1", "p2"]
+    assert "Unchanged Prices Skipped:** disabled" in mocks["create_artifact"].call_args.kwargs["markdown"]
