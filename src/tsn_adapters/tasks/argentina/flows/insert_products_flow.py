@@ -26,7 +26,9 @@ from tsn_adapters.tasks.argentina.models.sepa.sepa_models import SepaAvgPricePro
 from tsn_adapters.tasks.argentina.provider import ProductAveragesProvider
 from tsn_adapters.tasks.argentina.tasks import (
     determine_dates_to_insert,
+    filter_unchanged_products,
     load_daily_averages,
+    load_previous_daily_averages,
     transform_product_data,
 )
 
@@ -162,6 +164,7 @@ async def insert_argentina_products_flow(
     deployment_state: DeploymentStateBlock,
     batch_size: int = 1000,  # Default batch size (empirically chosen to balance API load and memory)
     max_filter_size: int = 500,  # Max number of streams per batch when filtering deployed streams
+    skip_unchanged: bool = True,  # Broadcast a product only on the days its price moves
 ):
     """
     Inserts pre-calculated Argentina SEPA daily average product prices into TN streams.
@@ -171,6 +174,7 @@ async def insert_argentina_products_flow(
       2) Determines new dates since the last run.
       3) For each date:
          - Loads raw SEPA average price data.
+         - Drops products whose price matches the previous day's.
          - Checks TN stream deployment status.
          - Transforms data into TnDataRowModel.
          - Submits batched insert tasks to TN.
@@ -183,6 +187,10 @@ async def insert_argentina_products_flow(
         deployment_state (DeploymentStateBlock): Verifies TN stream deployment status.
         batch_size (int): Number of records per TN insert batch.
         max_filter_size (int): Max number of streams per batch during stream filtering.
+        skip_unchanged (bool): When True, a product is written only on the days its
+            average price differs from the previous day's. TN reads carry the last
+            observation forward, so the skipped days still resolve to the right value.
+            Set False to write every product every day.
 
     Returns:
         None: Flow does not return; outputs artifacts and updates Prefect Variables.
@@ -267,10 +275,23 @@ State is managed by Prefect Variables.
     # --- Loop, Load/Transform, Insert, Save State, Report ---
     processed_dates_count = 0
     total_records_transformed = 0
+    total_records_skipped = 0
     last_processed_date_str = (
         ArgentinaFlowVariableNames.DEFAULT_DATE
     )  # Variable to track the last successfully processed date
     first_processed_date_str = dates_to_process_frozen[0]
+
+    # The source frame for the last date whose records actually reached TN, which
+    # is what every later date is compared against. Carried across iterations so a
+    # multi-date run reads each date from S3 once; only the first date of a run has
+    # to fetch its predecessor.
+    #
+    # It advances on commit, never on load. A date that is skipped without writing
+    # leaves the older prices standing on chain, so adopting its source as the
+    # baseline would read the next date's repeat of a skipped change as "unchanged"
+    # and drop it — losing the change from both dates.
+    baseline_avg_df: DataFrame[SepaAvgPriceProductModel] | None = None
+    baseline_loaded = False
 
     for date_str in dates_to_process_frozen:
         logger.info(f"--- Processing date: {date_str} ---")
@@ -286,6 +307,35 @@ State is managed by Prefect Variables.
                     f"No daily averages found for determined date {date_str}. Skipping, but check source data."
                 )
                 continue  # Continue to next date, but log warning
+
+            # Every product listed for this date, including the ones filtered out
+            # below. This is what the next date compares against, once this one has
+            # actually been committed.
+            source_avg_df: DataFrame[SepaAvgPriceProductModel] = daily_avg_df
+
+            # Step 10a-bis: Drop the products whose price has not moved.
+            if skip_unchanged:
+                if not baseline_loaded:
+                    baseline_avg_df = await load_previous_daily_averages(
+                        provider=product_averages_provider, date_str=date_str
+                    )
+                    baseline_loaded = True
+                daily_avg_df = filter_unchanged_products(
+                    daily_avg_df=daily_avg_df,
+                    previous_avg_df=baseline_avg_df,
+                    date_str=date_str,
+                )
+                total_records_skipped += len(source_avg_df) - len(daily_avg_df)
+
+                if daily_avg_df.empty:
+                    logger.info(f"No product moved on {date_str}. Nothing to write; the date is done.")
+                    processed_dates_count += 1
+                    last_processed_date_str = date_str
+                    baseline_avg_df = source_avg_df  # committed: there was nothing to write
+                    await variables.Variable.aset(
+                        ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_str, overwrite=True
+                    )
+                    continue
 
             # --- Deployment Status Check (Moved Before Transformation/Insertion) ---
             # Get unique product IDs for this date
@@ -437,6 +487,7 @@ State is managed by Prefect Variables.
             # Increment processed count only after successful processing of the date
             processed_dates_count += 1
             last_processed_date_str = date_str  # Update last successful date
+            baseline_avg_df = source_avg_df  # these prices are now the ones on chain
 
             # Update last successful INSERTION date variable *after* processing the date
             await variables.Variable.aset(
@@ -459,6 +510,8 @@ State is managed by Prefect Variables.
 
     logger.info(f"--- Finished processing loop for {processed_dates_count} dates. --- ")
     logger.info(f"Total records transformed across all dates: {total_records_transformed}")
+    if skip_unchanged:
+        logger.info(f"Total unchanged prices skipped across all dates: {total_records_skipped}")
 
     # Step 14: Final Reporting
     if processed_dates_count > 0:
@@ -468,6 +521,7 @@ Successfully processed data and submitted for insertion.
 
 *   **Processed Date Range:** {first_processed_date_str} to {last_processed_date_str} ({processed_dates_count} dates)
 *   **Total Records Transformed & Submitted:** {total_records_transformed}
+*   **Unchanged Prices Skipped:** {total_records_skipped if skip_unchanged else "disabled"}
 *   **Final Last Processed Insertion Date (Variable Updated):** {last_processed_date_str}
 """
         create_markdown_artifact(

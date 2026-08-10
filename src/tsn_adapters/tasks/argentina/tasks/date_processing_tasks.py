@@ -2,8 +2,8 @@
 Tasks related to processing dates for Argentina SEPA data insertion.
 """
 
-from datetime import datetime
-from typing import List, cast
+from datetime import datetime, timedelta
+from typing import List, Optional, cast
 
 import pandas as pd
 from pandera.typing import DataFrame, Series
@@ -163,6 +163,107 @@ async def load_daily_averages(
         logger.error(msg, exc_info=True)
         # Re-raise as a specific error type for clarity in flow error handling
         raise DailyAverageLoadingError(msg) from e
+
+
+def previous_day(date_str: DateStr) -> DateStr:
+    """Return the calendar day before `date_str`, in the same 'YYYY-MM-DD' shape."""
+    day_before = datetime.strptime(date_str, "%Y-%m-%d").date() - timedelta(days=1)
+    return cast(DateStr, day_before.isoformat())
+
+
+@task(name="Load Previous Daily Averages")
+async def load_previous_daily_averages(
+    provider: ProductAveragesProvider,
+    date_str: DateStr,
+) -> Optional[DataFrame[SepaAvgPriceProductModel]]:
+    """
+    Load the daily averages for the day before `date_str`, or None if there are none.
+
+    A missing predecessor is ordinary rather than exceptional: the first date SEPA
+    ever published has none, and the upstream pipeline skips a day now and then.
+    Callers read None as "treat every product as changed", so the cost of a missing
+    file is redundant writes, never missing ones.
+
+    Args:
+        provider: The provider instance to fetch daily data.
+        date_str: The date ('YYYY-MM-DD') whose predecessor should be loaded.
+
+    Returns:
+        The previous day's averages, or None when that day has no data.
+
+    Raises:
+        DailyAverageLoadingError: If the file exists but cannot be loaded or parsed.
+    """
+    logger = get_logger_safe(__name__)
+    prior_date = previous_day(date_str)
+
+    if not provider.exists(prior_date):
+        logger.warning(
+            f"No daily averages available for {prior_date}, the day before {date_str}. "
+            f"Every product for {date_str} will be treated as changed."
+        )
+        return None
+
+    return await load_daily_averages(provider=provider, date_str=prior_date)
+
+
+@task(name="Filter Unchanged Products")
+def filter_unchanged_products(
+    daily_avg_df: DataFrame[SepaAvgPriceProductModel],
+    previous_avg_df: Optional[DataFrame[SepaAvgPriceProductModel]],
+    date_str: DateStr,
+) -> DataFrame[SepaAvgPriceProductModel]:
+    """
+    Drop the products whose average price is identical to the previous day's.
+
+    TN carries the last observation forward: a query for a date with no record
+    resolves to the newest record at or before it, for primitive and composed
+    streams alike. Re-broadcasting a price that did not move therefore costs a row
+    and a transaction fee without telling a reader anything new.
+
+    The comparison is against the previous day's *source* file rather than against
+    what was published, which is what lets this work without storing any state.
+    When a price is unchanged we skip the write, so the value left standing on
+    chain is the one from the last day the price actually moved — and that is the
+    same number the previous day's source file holds. A product missing from that
+    file breaks the chain, so it is published: the cost of a gap in the source is a
+    redundant write, never a missing one.
+
+    Args:
+        daily_avg_df: The averages for `date_str`.
+        previous_avg_df: The averages for the day before, or None if unavailable.
+        date_str: The date being processed (for logging).
+
+    Returns:
+        The subset of `daily_avg_df` whose prices differ from the previous day's.
+    """
+    logger = get_logger_safe(__name__)
+
+    if daily_avg_df.empty or previous_avg_df is None or previous_avg_df.empty:
+        logger.info(f"No previous day to compare {date_str} against. Keeping all {len(daily_avg_df)} products.")
+        return daily_avg_df
+
+    # A product listed twice on the previous day has no single previous price;
+    # keeping one row makes the join incapable of duplicating today's rows.
+    previous_prices = (
+        previous_avg_df[["id_producto", "productos_precio_lista_avg"]]
+        .drop_duplicates(subset="id_producto", keep="first")
+        .rename(columns={"productos_precio_lista_avg": "previous_price"})
+    )
+
+    # merge preserves the left frame's row order because the right key is unique,
+    # so the mask lines up positionally with daily_avg_df.
+    compared = daily_avg_df.merge(previous_prices, on="id_producto", how="left")
+    unchanged = (
+        compared["previous_price"].notna() & (compared["productos_precio_lista_avg"] == compared["previous_price"])
+    ).to_numpy()
+
+    changed_df = daily_avg_df[~unchanged].reset_index(drop=True)
+    logger.info(
+        f"{date_str}: {len(changed_df)} of {len(daily_avg_df)} products moved since the previous day; "
+        f"skipping {int(unchanged.sum())} unchanged."
+    )
+    return changed_df
 
 
 class MappingIntegrityError(ValueError):
