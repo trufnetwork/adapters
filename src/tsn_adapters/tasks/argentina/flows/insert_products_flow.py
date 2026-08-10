@@ -29,7 +29,6 @@ from tsn_adapters.tasks.argentina.tasks import (
     filter_unchanged_products,
     load_daily_averages,
     load_previous_daily_averages,
-    previous_day,
     transform_product_data,
 )
 
@@ -282,11 +281,17 @@ State is managed by Prefect Variables.
     )  # Variable to track the last successfully processed date
     first_processed_date_str = dates_to_process_frozen[0]
 
-    # The previous day's averages, carried across iterations so a multi-date run
-    # reads each date from S3 once rather than once as "today" and again as
-    # "yesterday". Only the first date of a run has to fetch its predecessor.
-    previous_avg_df: DataFrame[SepaAvgPriceProductModel] | None = None
-    previous_avg_date_str: str | None = None
+    # The source frame for the last date whose records actually reached TN, which
+    # is what every later date is compared against. Carried across iterations so a
+    # multi-date run reads each date from S3 once; only the first date of a run has
+    # to fetch its predecessor.
+    #
+    # It advances on commit, never on load. A date that is skipped without writing
+    # leaves the older prices standing on chain, so adopting its source as the
+    # baseline would read the next date's repeat of a skipped change as "unchanged"
+    # and drop it — losing the change from both dates.
+    baseline_avg_df: DataFrame[SepaAvgPriceProductModel] | None = None
+    baseline_loaded = False
 
     for date_str in dates_to_process_frozen:
         logger.info(f"--- Processing date: {date_str} ---")
@@ -303,27 +308,30 @@ State is managed by Prefect Variables.
                 )
                 continue  # Continue to next date, but log warning
 
+            # Every product listed for this date, including the ones filtered out
+            # below. This is what the next date compares against, once this one has
+            # actually been committed.
+            source_avg_df: DataFrame[SepaAvgPriceProductModel] = daily_avg_df
+
             # Step 10a-bis: Drop the products whose price has not moved.
             if skip_unchanged:
-                if previous_avg_date_str != previous_day(date_str):
-                    previous_avg_df = await load_previous_daily_averages(
+                if not baseline_loaded:
+                    baseline_avg_df = await load_previous_daily_averages(
                         provider=product_averages_provider, date_str=date_str
                     )
-                source_avg_df = daily_avg_df  # every product listed today, including the skipped ones
+                    baseline_loaded = True
                 daily_avg_df = filter_unchanged_products(
                     daily_avg_df=daily_avg_df,
-                    previous_avg_df=previous_avg_df,
+                    previous_avg_df=baseline_avg_df,
                     date_str=date_str,
                 )
                 total_records_skipped += len(source_avg_df) - len(daily_avg_df)
-                # Tomorrow compares against today's full source, not against the
-                # subset written: a price we skipped is still the standing value.
-                previous_avg_df, previous_avg_date_str = source_avg_df, date_str
 
                 if daily_avg_df.empty:
                     logger.info(f"No product moved on {date_str}. Nothing to write; the date is done.")
                     processed_dates_count += 1
                     last_processed_date_str = date_str
+                    baseline_avg_df = source_avg_df  # committed: there was nothing to write
                     await variables.Variable.aset(
                         ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, date_str, overwrite=True
                     )
@@ -479,6 +487,7 @@ State is managed by Prefect Variables.
             # Increment processed count only after successful processing of the date
             processed_dates_count += 1
             last_processed_date_str = date_str  # Update last successful date
+            baseline_avg_df = source_avg_df  # these prices are now the ones on chain
 
             # Update last successful INSERTION date variable *after* processing the date
             await variables.Variable.aset(

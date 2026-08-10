@@ -871,3 +871,69 @@ async def test_insert_flow_can_be_told_to_send_everything(
     forwarded = mocks["transform"].call_args.kwargs["daily_avg_df"]
     assert forwarded["id_producto"].tolist() == ["p1", "p2"]
     assert "Unchanged Prices Skipped:** disabled" in mocks["create_artifact"].call_args.kwargs["markdown"]
+
+
+@pytest.mark.asyncio
+async def test_insert_flow_does_not_compare_against_an_uncommitted_date(
+    prefect_test_fixture: Any,
+    unstubbed_change_detection: dict[str, MagicMock],
+    mock_s3_block: MagicMock,
+    mock_tn_block: FakeTNAccessBlock,
+    mock_descriptor_block: MagicMock,
+    mock_deployment_state_block: MagicMock,
+    sample_descriptor_df: DataFrame[PrimitiveSourceDataModel],
+    sample_transformed_df_date1: DataFrame[TnDataRowModel],
+):
+    """A date that writes nothing must not become the comparison baseline.
+
+    p3 is absent from the descriptor, so 03-15 — where p3 is the only product
+    that moved — maps to no stream and is abandoned without writing. If 03-16
+    were then compared against 03-15, p3 repeating its new price would read as
+    unchanged and be dropped, and the move would reach the chain from neither
+    date.
+    """
+    mocks = unstubbed_change_detection
+    dates = ["2024-03-15", "2024-03-16"]
+
+    mocks["provider_instance"].list_available_keys.return_value = dates
+    mocks["var_get"].side_effect = lambda name, default=None: {
+        ArgentinaFlowVariableNames.LAST_AGGREGATION_SUCCESS_DATE: dates[-1],
+        ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE: "2024-03-14",
+    }.get(name, default)
+
+    per_date = {
+        # p3 moves 5.0 -> 7.0, but p3 maps to no stream, so this date writes nothing.
+        "2024-03-15": _averages([("p1", 10.5), ("p2", 20.25), ("p3", 7.0)], "2024-03-15"),
+        # p3 holds 7.0 while p1 moves, so this date does have something to write.
+        "2024-03-16": _averages([("p1", 11.0), ("p2", 20.25), ("p3", 7.0)], "2024-03-16"),
+    }
+    mocks["load_daily"].side_effect = lambda provider, date_str: per_date[date_str]
+    mocks["load_previous"].return_value = _averages(
+        [("p1", 10.5), ("p2", 20.25), ("p3", 5.0)], "2024-03-14"
+    )
+    mocks["transform"].return_value = sample_transformed_df_date1
+
+    mock_descriptor_block.get_descriptor.return_value = sample_descriptor_df
+    mock_deployment_state_block.check_multiple_streams.return_value = {
+        s: True for s in sample_descriptor_df["stream_id"]
+    }
+    mock_tn_block.set_deployed_streams(set(sample_descriptor_df["stream_id"].tolist()))
+
+    await insert_argentina_products_flow(
+        s3_block=mock_s3_block,
+        tn_block=mock_tn_block,
+        descriptor_block=mock_descriptor_block,
+        deployment_state=mock_deployment_state_block,
+    )
+
+    # 03-15 never reached transform, so 03-16 is the only call.
+    mocks["transform"].assert_called_once()
+    forwarded = mocks["transform"].call_args.kwargs["daily_avg_df"]
+    assert forwarded["date"].tolist() == ["2024-03-16"] * len(forwarded)
+    assert sorted(forwarded["id_producto"].tolist()) == ["p1", "p3"], (
+        "p3 still differs from the last price actually written, so it must survive"
+    )
+    # 03-15 must not be recorded as done either; it wrote nothing.
+    mocks["var_aset"].assert_called_once_with(
+        ArgentinaFlowVariableNames.LAST_INSERTION_SUCCESS_DATE, "2024-03-16", overwrite=True
+    )
