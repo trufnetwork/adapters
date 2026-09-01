@@ -1,25 +1,36 @@
-
+from decimal import Decimal, InvalidOperation
 from math import ceil
-from typing import (
-    Optional,
-    TypedDict,
-)
+from typing import Optional, TypedDict
+
 import pandas as pd
+import trufnetwork_sdk_py.client as tn_client
 from pandera.typing import DataFrame
 from prefect import get_run_logger, task
 from prefect.states import Completed
-import trufnetwork_sdk_py.client as tn_client
 
-from tsn_adapters.blocks.tn_access import (
-    UNUSED_INFINITY_RETRIES,
-    TNAccessBlock,
-    extract_stream_locators,
-    task_wait_for_tx,
-    tn_special_retry_condition,
-)
-from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel, TnRecordModel
-from tsn_adapters.common.trufnetwork.tn import task_batch_filter_streams_by_existence
+from tsn_adapters.blocks.tn_access import (UNUSED_INFINITY_RETRIES,
+                                           TNAccessBlock,
+                                           extract_stream_locators,
+                                           task_wait_for_tx,
+                                           tn_special_retry_condition)
+from tsn_adapters.common.trufnetwork.models.tn_models import (TnDataRowModel,
+                                                              TnRecordModel)
+from tsn_adapters.common.trufnetwork.tn import \
+    task_batch_filter_streams_by_existence
 from tsn_adapters.utils.logging import get_logger_safe
+
+# Every stream in the batch costs one read, and TNAccessBlock.read_records holds a
+# global `tn-read` concurrency slot, so those reads are serialised. That is fine for
+# the hundreds of streams a single-source adapter touches and hopeless for the
+# 18k-stream FMP run or the 155k-stream Argentina run. Refuse past this rather than
+# quietly turning a pipeline into a queue of blocking reads; those callers need a
+# batched last-value read on the node, which does not exist yet.
+MAX_STREAMS_FOR_UNCHANGED_CHECK = 500
+
+# get_record_primitive caps its result at 10000 rows
+# (node/internal/migrations/005-primitive-query.sql). A span read that returns this
+# many may be truncated, and a truncated read cannot be reasoned about safely.
+GET_RECORD_ROW_LIMIT = 10000
 
 
 class SplitInsertResults(TypedDict):
@@ -38,6 +49,8 @@ def task_split_and_insert_records(
     wait: bool = True,
     filter_deployed_streams: bool = True,
     max_streams_per_existence_check: int = 1000,
+    skip_unchanged: bool = False,
+    max_streams_for_unchanged_check: int = MAX_STREAMS_FOR_UNCHANGED_CHECK,
 ) -> SplitInsertResults:
     """
     Inserts records into TN via BulkInserter (cached-nonce pipelining),
@@ -50,6 +63,14 @@ def task_split_and_insert_records(
         wait: Legacy. Effectively always-true.
         filter_deployed_streams: Whether to filter out streams that do not exist on TN.
         max_streams_per_existence_check: Max streams to check in one existence API call.
+        skip_unchanged: Drop a record whose value equals the one the stream already
+            resolves to just before it. TN carries the last observation forward, so
+            such a record answers no query differently than its absence would, while
+            still costing a transaction, a write fee, and storage on every node.
+            Defaults to False, so no pipeline changes behaviour until it opts in.
+        max_streams_for_unchanged_check: Refuse the unchanged check above this many
+            distinct streams. See `_filter_unchanged_records` for why the ceiling
+            exists.
     """
 
     logger = get_logger_safe(__name__)
@@ -71,7 +92,15 @@ def task_split_and_insert_records(
             logger.error(f"Halting task due to error during stream existence filtering: {e!s}", exc_info=True)
             raise
 
-    # 3. Perform Batch Insertions
+    # 3. Optionally drop records that restate the value already standing
+    if skip_unchanged and not processed_records.empty:
+        processed_records = _filter_unchanged_records(
+            block=block,
+            records=processed_records,
+            max_streams_for_unchanged_check=max_streams_for_unchanged_check,
+        )
+
+    # 4. Perform Batch Insertions
     if processed_records.empty:
         logger.warning("No records remaining to insert after filtering.")
         # Return empty success result
@@ -130,6 +159,7 @@ def task_batch_insert_tn_records(
 
     return tx_hash
 
+
 @task(retries=UNUSED_INFINITY_RETRIES, retry_delay_seconds=10, retry_condition_fn=tn_special_retry_condition(5))
 def task_insert_tn_records(
     block: TNAccessBlock,
@@ -182,6 +212,150 @@ def task_destroy_stream(block: TNAccessBlock, stream_id: str, wait: bool = True)
 
 
 # --- Helper Function for Filtering ---
+
+
+def _filter_unchanged_records(
+    block: TNAccessBlock,
+    records: DataFrame[TnDataRowModel],
+    max_streams_for_unchanged_check: int,
+) -> DataFrame[TnDataRowModel]:
+    """Drop records that restate the value the stream already resolves to.
+
+    TN carries the last observation forward: a query for a time with no record
+    returns the newest record at or before it. A record whose value equals the one
+    already standing therefore answers every query exactly as its absence would,
+    while still costing a transaction, a write fee, and permanent storage on every
+    node in the network.
+
+    The comparison is against what TN actually holds, not against the previous row
+    of a source file. `filter_unchanged_products` in the Argentina pipeline does the
+    latter and says in its own docstring what that costs: a product missing from the
+    previous day's file gets republished even though its value has not moved. Reading
+    the chain has no such hole and needs no assumption about the source's
+    completeness.
+
+    One read per stream covers the batch's whole span, so records already on chain
+    between two rows of the batch take part in the comparison. That matters for
+    backfills, which write history out of order: the record before a candidate may
+    be one this batch is not writing.
+
+    Raises:
+        ValueError: If the batch spans more streams than the check can afford.
+    """
+    logger = get_logger_safe(__name__)
+
+    frame = records.copy()
+    frame["_row_order"] = range(len(frame))
+    unique_streams = frame[["data_provider", "stream_id"]].drop_duplicates()
+
+    if len(unique_streams) > max_streams_for_unchanged_check:
+        raise ValueError(
+            f"skip_unchanged was asked to check {len(unique_streams)} streams, above the "
+            f"{max_streams_for_unchanged_check} ceiling. Each stream costs one serialised read, so "
+            "this would stall the flow rather than speed it up. A batched last-value read on the "
+            "node is what this size needs; until that exists, leave skip_unchanged off here."
+        )
+
+    logger.info(f"Checking {len(frame)} records across {len(unique_streams)} streams for unchanged values...")
+
+    drop_positions: set[int] = set()
+    for _, locator in unique_streams.iterrows():
+        data_provider = str(locator["data_provider"])
+        stream_id = str(locator["stream_id"])
+        group = frame[(frame["data_provider"] == data_provider) & (frame["stream_id"] == stream_id)]
+        drop_positions.update(
+            _unchanged_row_positions(
+                block=block,
+                data_provider=data_provider,
+                stream_id=stream_id,
+                group=group,
+            )
+        )
+
+    kept = frame[~frame["_row_order"].isin(drop_positions)].drop(columns=["_row_order"])
+    logger.info(
+        f"Finished unchanged check. Dropped {len(drop_positions)} of {len(records)} records that "
+        f"restated a value already standing."
+    )
+    return DataFrame[TnDataRowModel](kept)
+
+
+def _unchanged_row_positions(
+    block: TNAccessBlock,
+    data_provider: str,
+    stream_id: str,
+    group: pd.DataFrame,
+) -> set[int]:
+    """Return the `_row_order` positions in one stream's rows that say nothing new.
+
+    Walks the stream's timeline in event-time order, merging what TN already holds
+    with what this batch would write, and carries the standing value forward. A
+    candidate is dropped when it equals the value standing immediately before it.
+    """
+    logger = get_logger_safe(__name__)
+
+    candidates: list[tuple[int, Decimal, int]] = []
+    for _, row in group.iterrows():
+        try:
+            candidates.append((int(row["date"]), Decimal(str(row["value"])), int(row["_row_order"])))
+        except (InvalidOperation, TypeError, ValueError):
+            # An unparseable value is not our problem to diagnose here; let it through
+            # and fail where it would have failed without this filter.
+            logger.warning(f"Could not read value {row['value']!r} for {stream_id} as a number; keeping the record.")
+            return set()
+
+    candidates.sort(key=lambda c: c[0])
+    first_event_time = candidates[0][0]
+    last_event_time = candidates[-1][0]
+
+    # date_from sits one second before the earliest candidate so the read carries the
+    # anchor, the newest record at or before that point. get_record treats `from` as
+    # exclusive on its interval and inclusive on its anchor, so this returns the
+    # standing value plus everything already on chain inside the batch's span.
+    existing = block.read_records(
+        stream_id=stream_id,
+        data_provider=data_provider,
+        date_from=first_event_time - 1,
+        date_to=last_event_time,
+    )
+
+    # get_record_primitive ends `ORDER BY event_time ASC LIMIT 10000`. A read that
+    # comes back at the cap may have been truncated, which would hide records that
+    # sit between candidates and make a genuine change look like a repeat. Skipping
+    # nothing is the safe answer; a redundant write costs a fee, a wrongly dropped
+    # one loses data.
+    if len(existing) >= GET_RECORD_ROW_LIMIT:
+        logger.warning(
+            f"Stream {stream_id} returned {len(existing)} records for the batch span, at or above the "
+            f"{GET_RECORD_ROW_LIMIT}-row read limit. The read may be truncated, so no record is dropped."
+        )
+        return set()
+
+    on_chain: dict[int, Decimal] = {}
+    for _, row in existing.iterrows():
+        try:
+            on_chain[int(row["date"])] = Decimal(str(row["value"]))
+        except (InvalidOperation, TypeError, ValueError):
+            logger.warning(f"Stream {stream_id} returned an unreadable value at {row['date']!r}; keeping its records.")
+            return set()
+
+    # Merge both sides into one timeline. At a shared event_time the on-chain record
+    # is what stands, so it is compared against first; a candidate that matches it is
+    # a restatement of the same point and adds nothing either.
+    timeline = sorted(
+        [(t, v, None) for t, v in on_chain.items()] + [(t, v, pos) for t, v, pos in candidates],
+        key=lambda item: (item[0], item[2] is not None),
+    )
+
+    dropped: set[int] = set()
+    standing: Optional[Decimal] = None
+    for _event_time, value, position in timeline:
+        if position is not None and standing is not None and value == standing:
+            dropped.add(position)
+            continue
+        standing = value
+
+    return dropped
 
 
 def _filter_records_by_stream_existence(

@@ -269,9 +269,19 @@ class FakeTNAccessBlock(TNAccessBlock):
         """Set the internal client for testing."""
         self._client = client
 
-    def seed_records(self, stream_id: str, dates: list[int]) -> None:
-        """Pre-populate read_records responses for a stream (unix timestamps)."""
-        self._seeded_records[stream_id] = [{"date": d, "value": "0"} for d in dates]
+    def seed_records(self, stream_id: str, dates: list[int], values: Optional[list[str]] = None) -> None:
+        """Pre-populate read_records responses for a stream (unix timestamps).
+
+        `values` defaults to "0" everywhere, which is all the existence-oriented
+        tests need. Pass it when the test turns on what the stream last published —
+        without it no test can express "this stream is standing at 1.5", and the
+        skip-unchanged filter is entirely about that value.
+        """
+        if values is None:
+            values = ["0"] * len(dates)
+        if len(values) != len(dates):
+            raise ValueError("seed_records: dates and values must be the same length")
+        self._seeded_records[stream_id] = [{"date": d, "value": v} for d, v in zip(dates, values, strict=True)]
 
     def read_records(
         self,
