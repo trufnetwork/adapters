@@ -68,6 +68,8 @@ def task_split_and_insert_records(
             such a record answers no query differently than its absence would, while
             still costing a transaction, a write fee, and storage on every node.
             Defaults to False, so no pipeline changes behaviour until it opts in.
+            Only sound when this process is the sole writer to those streams for the
+            duration of the batch — see `_filter_unchanged_records`.
         max_streams_for_unchanged_check: Refuse the unchanged check above this many
             distinct streams. See `_filter_unchanged_records` for why the ceiling
             exists.
@@ -238,6 +240,20 @@ def _filter_unchanged_records(
     between two rows of the batch take part in the comparison. That matters for
     backfills, which write history out of order: the record before a candidate may
     be one this batch is not writing.
+
+    Precondition: one writer per stream for the duration of the batch. The read
+    happens before the write, and nothing serialises that interval — `tn-read` and
+    `tn-write` are separate concurrency scopes, and a writer in another process
+    holds neither. If a second writer inserts a different value at an event_time
+    inside the batch's span between this read and the insert, a record dropped here
+    would have been the one carrying the stream's value forward past it, and the
+    stream ends up resolving to the other writer's value instead.
+
+    Every adapter today satisfies this: each source identity owns its own wallet and
+    its own streams, and no call site submits the write task concurrently. Closing
+    the window properly needs a conditional write on the node — `insert_records` is
+    unconditional — which is the same node-side work the stream ceiling above is
+    already waiting on.
 
     Raises:
         ValueError: If the batch spans more streams than the check can afford.
