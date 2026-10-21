@@ -297,13 +297,12 @@ def test_pending_when_only_yahoo_has_event():
 # --- Edge cases ---
 
 
-def test_skips_fmp_event_when_income_statement_not_yet_published():
-    """Rare race at the moment of an earnings announcement: FMP /stable/earnings
-    has the new actual but /stable/income-statement hasn't yet been populated
-    for that filing. The raw FMP primitive still emits under the announcement
-    date — the income-statement is only needed to derive the canonical key
-    for reconciliation. Yahoo still writes its primitive. Consensus is
-    pending and resolves on the next cycle once income-statement catches up.
+def test_settles_on_yahoo_quarter_when_income_statement_not_yet_published():
+    """FMP /stable/earnings has the new actual but /stable/income-statement has
+    no row for that filing yet (for Tesla it arrives with the 10-Q, the day
+    after the release, which held the Q2 2026 print for about 16 hours).
+    FMP's reading pairs with the Yahoo quarter that ended shortly before the
+    announcement, so the consensus settles without waiting for the statement.
     """
     fmp = _make_fmp(
         earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
@@ -320,16 +319,185 @@ def test_skips_fmp_event_when_income_statement_not_yet_published():
         symbol="NVDA",
     )
 
-    # FMP primitive still emits under the announcement date — primitive
-    # emission is decoupled from reconciliation
     assert len(fmp_rows) == 1
-    assert fmp_rows[0]["value"] == "1.87"
     assert fmp_rows[0]["date"] == date_string_to_unix("2026-05-20")
-    # Yahoo still publishes its primitive
     assert len(yahoo_rows) == 1
-    # No consensus possible — FMP entry isn't in the canonical-key dict
-    # without a period-end lookup, so reconciliation defers to next cycle
-    assert len(truf_rows) == 0
+    # Yahoo's quarter ended 2026-04-30, 20 days before FMP's 2026-05-20
+    # announcement, so both readings describe the same quarter
+    assert len(truf_rows) == 1
+    assert truf_rows[0]["value"] == "1.87"
+    assert truf_rows[0]["date"] == date_string_to_unix("2026-05-20")
+
+
+def test_pending_when_income_statement_and_yahoo_quarter_both_missing():
+    """The new quarter is only on FMP: no income-statement row and no Yahoo row
+    for it yet. Yahoo's newest quarter is the previous one, with the same
+    figure, so pairing FMP's new print with it would settle Q3 on Q2's data.
+    The consensus must stay pending instead.
+    """
+    tsla_q3_fmp = {"symbol": "TSLA", "date": "2026-10-21", "epsActual": 0.33, "epsEstimated": 0.45, "lastUpdated": None}
+    tsla_q2_income = {
+        "symbol": "TSLA",
+        "period": "Q2",
+        "fiscalYear": "2026",
+        "date": "2026-06-30",
+        "filingDate": "2026-07-23",
+        "acceptedDate": None,
+    }
+    tsla_q2_yahoo = {
+        "symbol": "TSLA",
+        "date": "2026-06-30",
+        "epsActual": 0.33,
+        "epsEstimated": 0.54,
+        "lastUpdated": None,
+    }
+
+    fmp = _make_fmp(earnings={"TSLA": [tsla_q3_fmp]}, income_statements={"TSLA": [tsla_q2_income]})
+    yahoo = _make_yahoo({"TSLA": [tsla_q2_yahoo]})
+
+    fmp_rows, _, truf_rows = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=FakeTNAccessBlock(),
+        yahoo_tn_block=FakeTNAccessBlock(),
+        truf_tn_block=FakeTNAccessBlock(),
+        symbol="TSLA",
+    )
+
+    assert [r["date"] for r in fmp_rows] == [date_string_to_unix("2026-10-21")]
+    assert truf_rows == []
+
+
+def test_settles_when_the_announcement_falls_in_the_next_calendar_quarter():
+    """Tesla's Q2 2026 shape: the quarter ended 2026-06-30 (calendar Q2) and was
+    announced on 2026-07-22 (calendar Q3), before FMP had an income-statement
+    row for it. Keyed by its announcement date, FMP's reading would sit in a
+    different quarter from Yahoo's, so this only settles through the Yahoo
+    quarter.
+    """
+    tsla_q2_fmp = {"symbol": "TSLA", "date": "2026-07-22", "epsActual": 0.33, "epsEstimated": 0.54, "lastUpdated": None}
+    tsla_q2_yahoo = {
+        "symbol": "TSLA",
+        "date": "2026-06-30",
+        "epsActual": 0.33,
+        "epsEstimated": 0.54,
+        "lastUpdated": None,
+    }
+    fmp = _make_fmp(earnings={"TSLA": [tsla_q2_fmp]}, income_statements={"TSLA": []})
+    yahoo = _make_yahoo({"TSLA": [tsla_q2_yahoo]})
+
+    _, _, truf_rows = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=FakeTNAccessBlock(),
+        yahoo_tn_block=FakeTNAccessBlock(),
+        truf_tn_block=FakeTNAccessBlock(),
+        symbol="TSLA",
+    )
+
+    assert [(r["date"], r["value"]) for r in truf_rows] == [(date_string_to_unix("2026-07-22"), "0.33")]
+
+
+def test_an_older_unmatched_fmp_row_pairs_with_its_own_quarter():
+    """FMP lists newest first. The Q3 row matches its income statement; the Q2
+    statement has no filingDate, so Q2 pairs through Yahoo. Q2 must pair with
+    the quarter that ended before its announcement (06-30), never with Q3's
+    (09-30, after it): that would take Q3's place, and Q3 would never print.
+    """
+    q3_fmp = {"symbol": "TSLA", "date": "2026-10-21", "epsActual": 0.5, "epsEstimated": 0.45, "lastUpdated": None}
+    q2_fmp = {"symbol": "TSLA", "date": "2026-07-22", "epsActual": 0.33, "epsEstimated": 0.54, "lastUpdated": None}
+    q3_income = {
+        "symbol": "TSLA",
+        "period": "Q3",
+        "fiscalYear": "2026",
+        "date": "2026-09-30",
+        "filingDate": "2026-10-22",
+        "acceptedDate": None,
+    }
+    q2_income_without_filing = {
+        "symbol": "TSLA",
+        "period": "Q2",
+        "fiscalYear": "2026",
+        "date": "2026-06-30",
+        "filingDate": pd.NA,
+        "acceptedDate": None,
+    }
+    q3_yahoo = {"symbol": "TSLA", "date": "2026-09-30", "epsActual": 0.5, "epsEstimated": 0.45, "lastUpdated": None}
+    q2_yahoo = {"symbol": "TSLA", "date": "2026-06-30", "epsActual": 0.33, "epsEstimated": 0.54, "lastUpdated": None}
+    fmp = _make_fmp(
+        earnings={"TSLA": [q3_fmp, q2_fmp]},
+        income_statements={"TSLA": [q3_income, q2_income_without_filing]},
+    )
+    yahoo = _make_yahoo({"TSLA": [q3_yahoo, q2_yahoo]})
+
+    _, _, truf_rows = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=FakeTNAccessBlock(),
+        yahoo_tn_block=FakeTNAccessBlock(),
+        truf_tn_block=FakeTNAccessBlock(),
+        symbol="TSLA",
+    )
+
+    assert sorted((r["date"], r["value"]) for r in truf_rows) == [
+        (date_string_to_unix("2026-07-22"), "0.33"),
+        (date_string_to_unix("2026-10-21"), "0.5"),
+    ]
+
+
+def test_null_filing_date_on_an_old_income_statement_row_does_not_crash():
+    """FMP can return an income-statement row with no filingDate. In a column
+    where other rows carry a date it is pd.NA, and `bool(pd.NA)` raises, which
+    used to fail the whole run for every ticker. The row is skipped instead.
+    """
+    old_row = {
+        "symbol": "NVDA",
+        "period": "Q4",
+        "fiscalYear": "2026",
+        "date": "2026-01-25",
+        "filingDate": pd.NA,
+        "acceptedDate": None,
+    }
+    fmp = _make_fmp(
+        earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
+        income_statements={"NVDA": [NVDA_Q1_FY27_INCOME_STMT, old_row]},
+    )
+    yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
+
+    _, _, truf_rows = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=FakeTNAccessBlock(),
+        yahoo_tn_block=FakeTNAccessBlock(),
+        truf_tn_block=FakeTNAccessBlock(),
+        symbol="NVDA",
+    )
+
+    assert [r["value"] for r in truf_rows] == ["1.87"]
+
+
+def test_null_last_updated_on_an_fmp_row_does_not_crash():
+    """`lastUpdated` is pd.NA on a row when another row carries a timestamp, and
+    `pd.NA or now()` raises. The reading falls back to the time of the run.
+    """
+    with_timestamp = {**NVDA_Q1_FY27_FMP_EARNINGS, "date": "2026-02-25", "lastUpdated": "2026-02-26T00:00:00Z"}
+    without_timestamp = {**NVDA_Q1_FY27_FMP_EARNINGS, "lastUpdated": pd.NA}
+    fmp = _make_fmp(
+        earnings={"NVDA": [with_timestamp, without_timestamp]},
+        income_statements={"NVDA": [NVDA_Q1_FY27_INCOME_STMT]},
+    )
+    yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
+
+    _, _, truf_rows = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=FakeTNAccessBlock(),
+        yahoo_tn_block=FakeTNAccessBlock(),
+        truf_tn_block=FakeTNAccessBlock(),
+        symbol="NVDA",
+    )
+
+    assert [r["value"] for r in truf_rows] == ["1.87"]
 
 
 def test_idempotent_skips_already_published_consensus():
@@ -517,3 +685,77 @@ def test_duplicate_fmp_announcement_rows_publish_once(prefect_harness: Any):
     truf_inserted = pd.concat(truf_tn.inserted_records, ignore_index=True)
     assert len(truf_inserted) == 1
     assert truf_inserted.iloc[0]["value"] == "9.11"
+
+
+class _FailingFMPBlock(RealTimeFakeFMPBlock):
+    """Raises a given error for given symbols, as a schema error or an outage would."""
+
+    _failures: dict = PrivateAttr(default_factory=dict)
+
+    def get_historical_earnings(self, symbol: str, limit: int = 40) -> DataFrame[EarningsData]:
+        if symbol in self._failures:
+            raise self._failures[symbol]
+        return super().get_historical_earnings(symbol, limit)
+
+
+def _googl_blocks(failures: dict) -> tuple:
+    from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, YAHOO_EPS_STREAM_IDS
+
+    fmp = _FailingFMPBlock(api_key=SecretStr(FAKE_PRIVATE_KEY.get_secret_value()))
+    fmp._earnings_data = {"GOOGL": [GOOGL_Q2_2026_FMP_EARNINGS]}
+    fmp._income_data = {"GOOGL": [GOOGL_Q2_2026_INCOME_STMT]}
+    fmp._failures = failures
+    yahoo = _make_yahoo({"GOOGL": [GOOGL_Q2_2026_YAHOO_EARNINGS]})
+    fmp_tn = FakeTNAccessBlock(existing_streams={FMP_EPS_STREAM_IDS["GOOGL"]})
+    yahoo_tn = FakeTNAccessBlock(existing_streams={YAHOO_EPS_STREAM_IDS["GOOGL"]})
+    truf_tn = FakeTNAccessBlock(existing_streams={EPS_STREAM_IDS["GOOGL"]})
+    return fmp, yahoo, fmp_tn, yahoo_tn, truf_tn
+
+
+def test_failing_symbols_do_not_block_the_others(prefect_harness: Any):
+    """AAPL runs first. One failing symbol used to end the run before any other
+    symbol was read or published. Now the healthy symbols publish, and the run
+    still fails, naming every failed symbol, whatever the error type and even
+    when the error text does not mention the symbol.
+    """
+    fmp, yahoo, fmp_tn, yahoo_tn, truf_tn = _googl_blocks(
+        {"AAPL": ValueError("schema mismatch"), "MSFT": KeyError("lastUpdated")}
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        eps_real_time_flow(
+            fmp_block=fmp,
+            yahoo_block=yahoo,
+            fmp_tn_block=fmp_tn,
+            yahoo_tn_block=yahoo_tn,
+            truf_tn_block=truf_tn,
+            symbols=["AAPL", "GOOGL", "MSFT"],
+        )
+
+    assert "AAPL" in str(raised.value) and "MSFT" in str(raised.value)
+    truf_inserted = pd.concat(truf_tn.inserted_records, ignore_index=True)
+    assert truf_inserted["value"].tolist() == ["9.11"]
+
+
+def test_a_failing_symbol_fails_the_run_even_when_nothing_is_new(prefect_harness: Any):
+    """Most scheduled runs have nothing new to publish. A symbol failing in such
+    a run must still fail it, or the failure would end as a green run.
+    """
+    from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, YAHOO_EPS_STREAM_IDS
+
+    fmp, yahoo, fmp_tn, yahoo_tn, truf_tn = _googl_blocks({"AAPL": ValueError("schema mismatch")})
+    fmp_tn.seed_records(FMP_EPS_STREAM_IDS["GOOGL"], [date_string_to_unix("2026-07-22")])
+    yahoo_tn.seed_records(YAHOO_EPS_STREAM_IDS["GOOGL"], [date_string_to_unix(GOOGL_Q2_2026_YAHOO_EARNINGS["date"])])
+    truf_tn.seed_records(EPS_STREAM_IDS["GOOGL"], [date_string_to_unix("2026-07-22")])
+
+    with pytest.raises(RuntimeError, match="AAPL"):
+        eps_real_time_flow(
+            fmp_block=fmp,
+            yahoo_block=yahoo,
+            fmp_tn_block=fmp_tn,
+            yahoo_tn_block=yahoo_tn,
+            truf_tn_block=truf_tn,
+            symbols=["AAPL", "GOOGL"],
+        )
+
+    assert truf_tn.inserted_records == []
