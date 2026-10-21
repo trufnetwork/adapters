@@ -41,6 +41,7 @@ block for all three when source identities share a wallet.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 import pandas as pd
 from prefect import flow, task
@@ -55,6 +56,24 @@ from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
 
 RECENT_QUARTERS = 4
+
+# A company reports a quarter within this many days of its end (17 to 37 days
+# for the Mag-7 in 2026), while the previous quarter ended about 90 days before
+# that. Pairing FMP's announcement with a Yahoo quarter in this window cannot
+# reach the wrong quarter.
+MAX_REPORT_LAG_DAYS = 75
+
+
+def _present(value: Any) -> bool:
+    """True for a real value. None, NaN, pd.NA and '' are absent; bool(pd.NA) raises."""
+    return value is not None and not pd.isna(value) and value != ""
+
+
+def _recent_period_end(announcement_date: str, period_ends: list[date]) -> str | None:
+    """The latest quarter end within MAX_REPORT_LAG_DAYS before an announcement."""
+    announced = date.fromisoformat(announcement_date)
+    candidates = [p for p in period_ends if 0 < (announced - p).days <= MAX_REPORT_LAG_DAYS]
+    return max(candidates).isoformat() if candidates else None
 
 
 def _is_published(tn_block: TNAccessBlock, stream_id: str, date_unix: int) -> bool:
@@ -146,11 +165,19 @@ def detect_and_prepare_eps(
     for _, row in income_stmt_df.iterrows():
         fd = row.get("filingDate")
         pe = row.get("date")
-        if fd and pe and not pd.isna(fd) and not pd.isna(pe):
+        if _present(fd) and _present(pe):
             fd_date = date.fromisoformat(str(fd))
             for offset in (-1, 0, 1):
                 key = (fd_date + timedelta(days=offset)).isoformat()
                 filing_to_period_end.setdefault(key, str(pe))
+
+    # Quarters Yahoo already has an actual for. When the income statement has
+    # no row for an announcement yet (for TSLA it comes with the 10-Q, the day
+    # after the release), FMP's reading pairs with the Yahoo quarter that ended
+    # shortly before the announcement.
+    yahoo_period_ends = sorted(
+        {date.fromisoformat(str(r["date"])[:10]) for _, r in yahoo_df.iterrows() if _present(r.get("epsActual"))}
+    )
 
     fmp_rows: list[dict] = []
     yahoo_rows: list[dict] = []
@@ -167,7 +194,8 @@ def detect_and_prepare_eps(
             continue
         announcement_date = str(row["date"])
         eps = float(row["epsActual"])
-        retrieved_at = str(row.get("lastUpdated") or datetime.now(timezone.utc).isoformat())
+        last_updated = row.get("lastUpdated")
+        retrieved_at = str(last_updated) if _present(last_updated) else datetime.now(timezone.utc).isoformat()
 
         # Emit primitive (always, when FMP has data and the date isn't published)
         fmp_date_unix = date_string_to_unix(announcement_date)
@@ -181,17 +209,25 @@ def detect_and_prepare_eps(
                 }
             )
 
-        # Populate canonical-key dict for reconciliation, only when income-
-        # statement lookup resolves. Missing income-statement is the rare
-        # race-at-announcement window; reconciliation retries next cycle.
+        # Populate canonical-key dict for reconciliation. The income statement
+        # gives the period end; without it, a Yahoo quarter that ended shortly
+        # before the announcement does. With neither, reconciliation retries
+        # next cycle.
         period_end = filing_to_period_end.get(announcement_date)
         if period_end is None:
+            period_end = _recent_period_end(announcement_date, yahoo_period_ends)
+            if period_end is None:
+                logger.info(
+                    f"{symbol} {announcement_date}: income-statement not yet "
+                    f"published for this filing and no Yahoo quarter ended in the "
+                    f"{MAX_REPORT_LAG_DAYS} days before it; primitive emitted, "
+                    f"reconciliation deferred to next cycle"
+                )
+                continue
             logger.info(
-                f"{symbol} {announcement_date}: income-statement not yet "
-                f"published for this filing; primitive emitted, "
-                f"reconciliation deferred to next cycle"
+                f"{symbol} {announcement_date}: income-statement not yet published "
+                f"for this filing; paired with Yahoo's quarter ending {period_end}"
             )
-            continue
         fmp_by_key[canonical_key(symbol, period_end)] = (eps, announcement_date, retrieved_at)
 
     # Yahoo ingestion. The block normalizes both of its accessors to a
@@ -311,16 +347,24 @@ def eps_real_time_flow(
     fmp_rows: list[dict] = []
     yahoo_rows: list[dict] = []
     truf_rows: list[dict] = []
+    failed: dict[str, str] = {}
 
     for symbol in symbols:
-        fmp_new, yahoo_new, truf_new = detect_and_prepare_eps(
-            fmp_block=fmp_block,
-            yahoo_block=yahoo_block,
-            fmp_tn_block=fmp_tn_block,
-            yahoo_tn_block=yahoo_tn_block,
-            truf_tn_block=truf_tn_block,
-            symbol=symbol,
-        )
+        # One symbol's failure must not drop the others' prints: the run used
+        # to end at the first failing symbol, before anything was published.
+        try:
+            fmp_new, yahoo_new, truf_new = detect_and_prepare_eps(
+                fmp_block=fmp_block,
+                yahoo_block=yahoo_block,
+                fmp_tn_block=fmp_tn_block,
+                yahoo_tn_block=yahoo_tn_block,
+                truf_tn_block=truf_tn_block,
+                symbol=symbol,
+            )
+        except Exception as err:
+            logger.error(f"{symbol}: EPS detection failed, continuing with the other symbols: {err!r}")
+            failed[symbol] = repr(err)
+            continue
         fmp_rows.extend(fmp_new)
         yahoo_rows.extend(yahoo_new)
         truf_rows.extend(truf_new)
@@ -328,7 +372,6 @@ def eps_real_time_flow(
     total = len(fmp_rows) + len(yahoo_rows) + len(truf_rows)
     if total == 0:
         logger.info("No new EPS records to publish")
-        return
 
     if fmp_rows:
         publish_eps_records(fmp_tn_block, pd.DataFrame(fmp_rows), "FMP")
@@ -338,6 +381,11 @@ def eps_real_time_flow(
 
     if truf_rows:
         publish_eps_records(truf_tn_block, pd.DataFrame(truf_rows), "Truf consensus")
+
+    # Fail the run after publishing, so the other symbols' prints still land
+    # and the failure stays visible in the run state.
+    if failed:
+        raise RuntimeError(f"EPS detection failed for {', '.join(failed)}: {failed}")
 
 
 if __name__ == "__main__":
