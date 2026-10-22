@@ -1,19 +1,28 @@
-"""Unit tests for YahooBlock EPS normalization.
+"""Unit tests for YahooBlock EPS normalization and its two readers.
 
-Covers the period-end normalization that keeps the two yfinance accessors
-interchangeable. ``get_earnings_dates`` (HTML scrape) dates rows by the
-announcement date while ``earnings_history`` (JSON) dates them by the
-fiscal-period-end; the block must reduce both to period-end so they land in
-the same ``canonical_key`` bucket. Regression guard for the silent
-mis-bucketing where scraped Yahoo rows failed to reconcile against FMP.
+Covers the period-end normalization that keeps Yahoo's two datasets
+interchangeable. The earnings page dates rows by the announcement date while
+``earnings_history`` (JSON) dates them by the fiscal-period-end; the block must
+reduce both to period-end so they land in the same ``canonical_key`` bucket.
+Regression guard for the silent mis-bucketing where page rows failed to
+reconcile against FMP. Also covers the page parser against Yahoo's markup and
+the split between the JSON reader and the page reader.
 """
 
 from datetime import date
+from typing import ClassVar
 
 import pandas as pd
 import pytest
 
-from tsn_adapters.blocks.yahoo import YahooBlock, _announcement_to_period_end, _resolve_period_end
+import tsn_adapters.blocks.yahoo as yahoo_module
+from tsn_adapters.blocks.yahoo import (
+    YahooBlock,
+    _announcement_to_period_end,
+    _page_announcement_day,
+    _parse_earnings_page,
+    _resolve_period_end,
+)
 from tsn_adapters.tasks.eps.reconciler import canonical_key
 
 
@@ -114,6 +123,14 @@ def test_normalize_json_preserves_period_end() -> None:
         # No known period-end precedes the announcement -> calendar-quarter fallback
         ("2026-05-20", [], "2026-06-30"),
         ("2026-05-20", ["2026-09-30"], "2026-06-30"),
+        # A new report before the JSON feed has its quarter: step forward by whole
+        # quarters, never back to the previous quarter's period-end
+        ("2026-10-21", ["2025-12-31", "2026-03-31", "2026-06-30"], "2026-09-30"),  # TSLA, META Q3
+        ("2026-11-02", ["2025-12-31", "2026-03-31", "2026-06-30"], "2026-09-30"),  # AAPL Q4 FY26
+        ("2026-11-17", ["2026-01-31", "2026-04-30", "2026-07-31"], "2026-10-31"),  # NVDA Q3 FY27
+        ("2026-10-21", ["2026-03-31"], "2026-09-30"),  # two quarters behind
+        # An older report keeps its own quarter
+        ("2026-07-22", ["2026-03-31", "2026-06-30", "2026-09-30"], "2026-06-30"),
     ],
 )
 def test_resolve_period_end(announce: str, period_ends: list[str], expected: str) -> None:
@@ -146,3 +163,159 @@ def test_scrape_falls_back_to_calendar_quarter_without_period_ends() -> None:
     out = YahooBlock._normalize_scrape(_scrape_df([{"announce": "2026-05-20", "eps": 1.87}]), "NVDA")
     assert out["date"].iloc[0] == "2026-06-30"
     assert canonical_key("NVDA", out["date"].iloc[0]) == ("NVDA", 2026, 2)
+
+
+# Yahoo's earnings page as served on 2026-10-22, cut to a few rows, with the
+# styling attributes removed. Meta's 2025-10-29 row shows the adjusted 7.25;
+# GAAP EPS was 1.05.
+_PAGE_HEADER = (
+    '<tr> <th data-testid-header="ticker"><div> Symbol </div> </th> '
+    '<th data-testid-header="companyshortname"><div> Company </div> </th> '
+    '<th data-testid-header="startdatetime"><div> Earnings Date </div> </th> '
+    '<th data-testid-header="epsestimate"><div> EPS Estimate </div> </th> '
+    '<th data-testid-header="epsactual"><div> Reported EPS </div> </th> '
+    '<th data-testid-header="epssurprisepct"><div> Surprise (%) </div> </th> </tr>'
+)
+
+
+def _page_row(symbol: str, company: str, when: str, estimate: str, reported: str, surprise: str) -> str:
+    return (
+        '<tr data-testid="data-table-v2-row"> '
+        f'<td data-testid-cell="ticker"> <div data-testid=""><a href="/quote/{symbol}/" title="{symbol}">{symbol} </a>'
+        " </div> </td> "
+        f'<td data-testid-cell="companyshortname"> {company} </td> '
+        f'<td data-testid-cell="startdatetime"> {when} </td> '
+        f'<td data-testid-cell="epsestimate"> {estimate} </td> '
+        f'<td data-testid-cell="epsactual"> {reported} </td> '
+        f'<td data-testid-cell="epssurprisepct"> <p data-testid="typography">{surprise} </p> </td></tr>'
+    )
+
+
+def _page(*rows: str) -> str:
+    return f"<html><body><table>{_PAGE_HEADER}{''.join(rows)}</table></body></html>"
+
+
+META_PAGE = _page(
+    _page_row("META", "Meta Platforms, Inc.", "October 21, 2026 at 4 PM EDT", "5.46", "3.83", "-29.91"),
+    _page_row("META", "Meta Platforms, Inc.", "October 29, 2025 at 4 PM EDT", "6.67", "7.25", "+8.66"),
+)
+NVDA_PAGE = _page(
+    _page_row("NVDA", "NVIDIA Corporation", "November 17, 2026 at 3 PM EST", "2.47", "-", "-"),
+    _page_row("NVDA", "NVIDIA Corporation", "August 26, 2026 at 4 PM EDT", "2.09", "2.22", "+6.16"),
+)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("October 21, 2026 at 4 PM EDT", "2026-10-21"),
+        ("January 28, 2026 at 4 PM EST", "2026-01-28"),
+        ("May 20, 2026 at 4 PM EDT", "2026-05-20"),
+        ("Sept 30, 2026 at 8 AM EDT", "2026-09-30"),
+        ("Oct 21, 2026, 4 PM EDT", "2026-10-21"),  # the page's earlier format
+    ],
+)
+def test_page_announcement_day(text: str, expected: str) -> None:
+    assert _page_announcement_day(text).isoformat() == expected
+
+
+def test_page_announcement_day_rejects_an_unknown_format() -> None:
+    with pytest.raises(ValueError):
+        _page_announcement_day("21/10/2026 16:00")
+
+
+def test_parse_earnings_page_reads_yahoos_markup() -> None:
+    df = _parse_earnings_page(META_PAGE)
+    assert [ts.date().isoformat() for ts in df.index] == ["2026-10-21", "2025-10-29"]
+    assert df["Reported EPS"].tolist() == [3.83, 7.25]
+    assert df["EPS Estimate"].tolist() == [5.46, 6.67]
+
+
+def test_parse_earnings_page_reads_a_pending_report_as_missing() -> None:
+    df = _parse_earnings_page(NVDA_PAGE)
+    assert pd.isna(df["Reported EPS"].iloc[0])
+    assert df["Reported EPS"].iloc[1] == 2.22
+
+
+def test_parse_earnings_page_rejects_a_page_without_the_table() -> None:
+    with pytest.raises(ValueError):
+        _parse_earnings_page("<html><body><table><tr><th>Symbol</th></tr><tr><td>META</td></tr></table></body></html>")
+
+
+class _FakeResponse:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeYfData:
+    """Stands in for yfinance's shared session; records each request."""
+
+    calls: ClassVar[list[tuple[str, dict[str, object]]]] = []
+
+    def __init__(self, session: object = None) -> None:
+        pass
+
+    def get(self, url: str, params: dict[str, object] | None = None, **_: object) -> _FakeResponse:
+        _FakeYfData.calls.append((url, dict(params or {})))
+        return _FakeResponse(META_PAGE)
+
+    def cache_get(self, *_: object, **__: object) -> _FakeResponse:
+        raise AssertionError("cache_get keeps a response for the life of the process")
+
+
+@pytest.fixture
+def offline_block(monkeypatch: pytest.MonkeyPatch) -> YahooBlock:
+    monkeypatch.setattr(YahooBlock, "_ensure_proxy", lambda self: None)
+    monkeypatch.setattr(yahoo_module.time, "sleep", lambda _s: None)
+    return YahooBlock()
+
+
+def test_get_page_earnings_dates_a_new_report_by_its_own_quarter(
+    offline_block: YahooBlock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Meta's 2026-10-21 row lands on 2026-09-30 although the JSON feed's
+    newest quarter is 2026-06-30, and each request reads the page afresh."""
+    import yfinance.data
+
+    _FakeYfData.calls = []
+    monkeypatch.setattr(yfinance.data, "YfData", _FakeYfData)
+    feed_period_ends = [date(2025, 9, 30), date(2025, 12, 31), date(2026, 3, 31), date(2026, 6, 30)]
+
+    out = offline_block.get_page_earnings("META", feed_period_ends)
+
+    assert list(out["date"]) == ["2026-09-30", "2025-09-30"]
+    assert list(out["epsActual"]) == [3.83, 7.25]
+    assert list(out["symbol"]) == ["META", "META"]
+    assert _FakeYfData.calls == [
+        ("https://finance.yahoo.com/calendar/earnings", {"symbol": "META", "offset": 0, "size": 25})
+    ]
+
+
+class _FeedOnlyTicker:
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+
+    @property
+    def earnings_history(self) -> pd.DataFrame:
+        return _json_df([{"period_end": "2026-06-30", "eps": 6.18}, {"period_end": "2026-03-31", "eps": 7.31}])
+
+    def get_earnings_dates(self, *_: object, **__: object) -> None:
+        raise AssertionError("the page is read by get_page_earnings, never in place of the feed")
+
+
+def test_get_historical_earnings_reads_the_json_feed_only(
+    offline_block: YahooBlock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The historical backfill writes whatever this returns to the write-once
+    Yahoo stream, so a page figure on another basis must never reach it."""
+    import yfinance
+
+    monkeypatch.setattr(yfinance, "Ticker", _FeedOnlyTicker)
+
+    out = offline_block.get_historical_earnings("META", limit=5)
+
+    assert list(out["date"]) == ["2026-06-30", "2026-03-31"]
+    assert list(out["epsActual"]) == [6.18, 7.31]

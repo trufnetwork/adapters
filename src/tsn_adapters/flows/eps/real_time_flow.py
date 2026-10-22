@@ -16,6 +16,14 @@ Settlement logic (spec §3-4):
   DISPUTED — sources disagree beyond tolerance → log warning; skip consensus;
              manual review required (spec §4)
 
+Yahoo has two datasets: its JSON feed and its earnings page. The page can carry
+a new figure hours before the feed, and the two can differ in basis, so the
+Yahoo reading for a quarter is whichever of them matches FMP (`_pick_yahoo`).
+
+A report still missing from the consensus stream at 06:00 UTC the day after
+it (OVERDUE_AFTER) fails the run, after everything else is published, so it
+shows hours before the market settles.
+
 Idempotency: each stream is checked before writing (TN read-before-write).
 Scheduling: external (Prefect, cron); this flow is single-shot.
 
@@ -46,12 +54,13 @@ from typing import Any
 import pandas as pd
 from prefect import flow, task
 
-from tsn_adapters.blocks.fmp import FMPBlock
+from tsn_adapters.blocks.fmp import EarningsData, FMPBlock
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.blocks.yahoo import YahooBlock
 from tsn_adapters.flows.eps.publish import publish_eps_records
 from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, MAG7, YAHOO_EPS_STREAM_IDS
-from tsn_adapters.tasks.eps.reconciler import SourceReading, canonical_key, reconcile
+from tsn_adapters.tasks.eps.reconciler import TOLERANCE, SourceReading, canonical_key, reconcile
+from tsn_adapters.utils.create_empty_df import create_empty_df
 from tsn_adapters.utils.logging import get_logger_safe
 from tsn_adapters.utils.time_utils import date_string_to_unix
 
@@ -63,10 +72,60 @@ RECENT_QUARTERS = 4
 # reach the wrong quarter.
 MAX_REPORT_LAG_DAYS = 75
 
+# Each market settles about 24 hours after its report, around 20:00 UTC the
+# day after an after-close release. A report still missing from the consensus
+# stream 30 hours after its day began (06:00 UTC that next day) fails the run,
+# which leaves about 14 hours to step in. Past OVERDUE_UNTIL the market has
+# settled and the report stops failing runs.
+OVERDUE_AFTER = timedelta(hours=30)
+OVERDUE_UNTIL = timedelta(days=3)
+
+YahooReading = tuple[float, str]  # (eps, fiscal-period-end date)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 def _present(value: Any) -> bool:
     """True for a real value. None, NaN, pd.NA and '' are absent; bool(pd.NA) raises."""
     return value is not None and not pd.isna(value) and value != ""
+
+
+def _readings_by_key(symbol: str, df: pd.DataFrame) -> dict[tuple[str, int, int], YahooReading]:
+    """A Yahoo dataset's actuals, keyed by canonical quarter."""
+    readings: dict[tuple[str, int, int], YahooReading] = {}
+    for _, row in df.iterrows():
+        raw = row.get("epsActual")
+        if raw is None or pd.isna(raw):
+            continue
+        period_end = str(row["date"])
+        readings[canonical_key(symbol, period_end)] = (float(raw), period_end)
+    return readings
+
+
+def _eps_of(readings: dict[tuple[str, int, int], YahooReading], key: tuple[str, int, int]) -> float | None:
+    return readings[key][0] if key in readings else None
+
+
+def _pick_yahoo(
+    fmp_eps: float | None, feed: YahooReading | None, page: YahooReading | None
+) -> tuple[YahooReading | None, str | None]:
+    """Yahoo's reading for one quarter, and which dataset it came from.
+
+    The reading that matches FMP wins, the JSON feed first. Without a match the
+    feed's reading stands, as before the page was read. A page figure that
+    matches nothing is left out: it may be on another basis than the stream
+    (Meta Q3 2025: page 7.25 adjusted, feed 1.05 GAAP), and the Yahoo stream
+    keeps the first value written for a date.
+    """
+    if fmp_eps is not None:
+        for dataset, reading in (("feed", feed), ("page", page)):
+            if reading is not None and round(abs(reading[0] - fmp_eps), 10) <= TOLERANCE:
+                return reading, dataset
+    if feed is not None:
+        return feed, "feed"
+    return None, None
 
 
 def _recent_period_end(announcement_date: str, period_ends: list[date]) -> str | None:
@@ -107,14 +166,17 @@ def detect_and_prepare_eps(
     yahoo_tn_block: TNAccessBlock,
     truf_tn_block: TNAccessBlock,
     symbol: str,
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], list[str]]:
     """Detect new EPS prints for one symbol and return per-wallet TN rows.
 
-    Returns a tuple `(fmp_rows, yahoo_rows, truf_rows)` where each list is
-    destined for the matching wallet's TN block:
+    Returns a tuple `(fmp_rows, yahoo_rows, truf_rows, overdue)`. The first
+    three lists are destined for the matching wallet's TN block:
     - fmp_rows  → FMP primitive stream (raw value, when FMP has the data)
     - yahoo_rows → Yahoo primitive stream (raw value, when Yahoo has the data)
     - truf_rows → consensus stream (exact primary-source value, when ≥2 agree)
+    `overdue` names each report ("SYMBOL YYYY-MM-DD") that is still missing
+    from the consensus stream past OVERDUE_AFTER and will not be written by
+    this run.
 
     Read scoping: each stream's "already-published?" check uses the block
     that owns it, so the underlying `read_records` query resolves to the
@@ -155,6 +217,14 @@ def detect_and_prepare_eps(
     # income-statement (income-statement may lag earnings by one filing).
     # Capped at 5: the current FMP plan rejects `limit` > 5 with HTTP 402.
     income_stmt_df = fmp_block.get_quarterly_income_statements(symbol, limit=min(RECENT_QUARTERS + 2, 5))
+    # Yahoo's earnings page is an extra source: when it cannot be read, the run
+    # goes on with the JSON feed alone, as it did before the page was read.
+    feed_period_ends = [date.fromisoformat(str(d)[:10]) for d in yahoo_df["date"]]
+    try:
+        page_df = yahoo_block.get_page_earnings(symbol, feed_period_ends)
+    except Exception as err:
+        logger.warning(f"{symbol}: Yahoo's earnings page not read, using its JSON feed alone: {err!r}")
+        page_df = create_empty_df(EarningsData)
 
     # Build filing_date → fiscal-period-end mapping from quarterly income
     # statements. For most tickers, `filingDate` matches FMP earnings'
@@ -171,12 +241,17 @@ def detect_and_prepare_eps(
                 key = (fd_date + timedelta(days=offset)).isoformat()
                 filing_to_period_end.setdefault(key, str(pe))
 
-    # Quarters Yahoo already has an actual for. When the income statement has
-    # no row for an announcement yet (for TSLA it comes with the 10-Q, the day
-    # after the release), FMP's reading pairs with the Yahoo quarter that ended
-    # shortly before the announcement.
+    # Quarters Yahoo already has an actual for, in its feed or on its page. When
+    # the income statement has no row for an announcement yet (for TSLA it comes
+    # with the 10-Q, the day after the release), FMP's reading pairs with the
+    # Yahoo quarter that ended shortly before the announcement.
     yahoo_period_ends = sorted(
-        {date.fromisoformat(str(r["date"])[:10]) for _, r in yahoo_df.iterrows() if _present(r.get("epsActual"))}
+        {
+            date.fromisoformat(str(r["date"])[:10])
+            for df in (yahoo_df, page_df)
+            for _, r in df.iterrows()
+            if _present(r.get("epsActual"))
+        }
     )
 
     fmp_rows: list[dict] = []
@@ -230,17 +305,26 @@ def detect_and_prepare_eps(
             )
         fmp_by_key[canonical_key(symbol, period_end)] = (eps, announcement_date, retrieved_at)
 
-    # Yahoo ingestion. The block normalizes both of its accessors to a
-    # fiscal-period-end `date` (the scrape's announcement date is resolved to
-    # the JSON accessor's period-end), so no auxiliary lookup is needed here —
-    # primitive emission and canonical-key population happen together.
-    yahoo_by_key: dict[tuple[str, int, int], tuple[float, str]] = {}
-    for _, row in yahoo_df.iterrows():
-        raw = row.get("epsActual")
-        if raw is None or pd.isna(raw):
-            continue
-        yahoo_date = str(row["date"])
-        eps = float(raw)
+    # Yahoo ingestion. The block dates both of its datasets by fiscal-period-end
+    # (the page's announcement date is resolved to the feed's period-end), so
+    # the feed and the page meet on the canonical key. Per quarter, the reading
+    # `_pick_yahoo` keeps is the one emitted and reconciled.
+    feed_by_key = _readings_by_key(symbol, yahoo_df)
+    # The page lists about six years of quarters. Only those FMP or the feed
+    # also has can ever be matched, so the rest are left out.
+    page_by_key = {
+        key: reading
+        for key, reading in _readings_by_key(symbol, page_df).items()
+        if key in fmp_by_key or key in feed_by_key
+    }
+    yahoo_by_key: dict[tuple[str, int, int], YahooReading] = {}
+    yahoo_dataset: dict[tuple[str, int, int], str] = {}
+    for key in sorted(set(feed_by_key) | set(page_by_key)):
+        fmp_eps = fmp_by_key[key][0] if key in fmp_by_key else None
+        reading, dataset = _pick_yahoo(fmp_eps, feed_by_key.get(key), page_by_key.get(key))
+        if reading is None or dataset is None:
+            continue  # a page figure FMP does not match; the pending line below shows both
+        eps, yahoo_date = reading
 
         # Emit primitive
         yahoo_date_unix = date_string_to_unix(yahoo_date)
@@ -253,7 +337,8 @@ def detect_and_prepare_eps(
                     "data_provider": None,
                 }
             )
-        yahoo_by_key[canonical_key(symbol, yahoo_date)] = (eps, yahoo_date)
+        yahoo_by_key[key] = reading
+        yahoo_dataset[key] = dataset
 
     # Reconciliation loop. Primitive writes were emitted above during
     # ingestion; this loop only decides each event's consensus verdict.
@@ -313,15 +398,41 @@ def detect_and_prepare_eps(
             )
             logger.info(
                 f"{symbol} {key}: settled at {result.value} "
-                f"(agreed: {result.sources_agree}, "
+                f"(agreed: {result.sources_agree}, yahoo from its {yahoo_dataset.get(key)}, "
                 f"consensus_date={consensus_date_str})"
             )
         elif result.status == "disputed":
-            logger.warning(f"{symbol} {key}: DISPUTED — " f"fmp={fmp_eps}, yahoo={yahoo_eps}; manual review required")
+            logger.warning(
+                f"{symbol} {key}: DISPUTED — fmp={fmp_eps}, yahoo feed={_eps_of(feed_by_key, key)}, "
+                f"yahoo page={_eps_of(page_by_key, key)}; manual review required"
+            )
         else:
-            logger.info(f"{symbol} {key}: pending — " f"{len(readings)} source(s) available, need ≥2 to settle")
+            logger.info(
+                f"{symbol} {key}: pending — {len(readings)} source(s) available, need ≥2 to settle "
+                f"(fmp={fmp_eps}, yahoo feed={_eps_of(feed_by_key, key)}, yahoo page={_eps_of(page_by_key, key)})"
+            )
 
-    return fmp_rows, yahoo_rows, truf_rows
+    # A report still missing past OVERDUE_AFTER fails the run (see
+    # eps_real_time_flow), whatever holds it: one source, a dispute, or none
+    # yet. FMP lists a report's day before it has the figure, so its rows
+    # without an actual count too.
+    now = _utc_now()
+    settling = {row["date"] for row in truf_rows}
+    overdue: list[str] = []
+    for report_day in sorted({str(d) for d in earnings_df["date"]}):
+        day_start = datetime.fromisoformat(report_day).replace(tzinfo=timezone.utc)
+        if not day_start + OVERDUE_AFTER <= now < day_start + OVERDUE_UNTIL:
+            continue
+        report_unix = date_string_to_unix(report_day)
+        if report_unix in settling or _is_published(truf_tn_block, consensus_stream, report_unix):
+            continue
+        logger.error(
+            f"{symbol} {report_day}: not on the consensus stream at {now:%Y-%m-%d %H:%M} UTC; "
+            f"its market settles on the previous quarter's value unless the figure prints first"
+        )
+        overdue.append(f"{symbol} {report_day}")
+
+    return fmp_rows, yahoo_rows, truf_rows, overdue
 
 
 @flow(name="EPS Real-Time Detection Flow")
@@ -340,6 +451,9 @@ def eps_real_time_flow(
     Each destination uses its own wallet block so the on-chain `data_provider`
     reflects the identity that produced the data. Single-shot — driven by
     external scheduler.
+
+    Fails the run, after publishing, when a symbol fails or a report is still
+    missing from the consensus stream past OVERDUE_AFTER.
     """
     logger = get_logger_safe(__name__)
     logger.info(f"EPS real-time detection starting for {symbols}")
@@ -348,12 +462,13 @@ def eps_real_time_flow(
     yahoo_rows: list[dict] = []
     truf_rows: list[dict] = []
     failed: dict[str, str] = {}
+    overdue: list[str] = []
 
     for symbol in symbols:
         # One symbol's failure must not drop the others' prints: the run used
         # to end at the first failing symbol, before anything was published.
         try:
-            fmp_new, yahoo_new, truf_new = detect_and_prepare_eps(
+            fmp_new, yahoo_new, truf_new, overdue_new = detect_and_prepare_eps(
                 fmp_block=fmp_block,
                 yahoo_block=yahoo_block,
                 fmp_tn_block=fmp_tn_block,
@@ -368,6 +483,7 @@ def eps_real_time_flow(
         fmp_rows.extend(fmp_new)
         yahoo_rows.extend(yahoo_new)
         truf_rows.extend(truf_new)
+        overdue.extend(overdue_new)
 
     total = len(fmp_rows) + len(yahoo_rows) + len(truf_rows)
     if total == 0:
@@ -384,8 +500,13 @@ def eps_real_time_flow(
 
     # Fail the run after publishing, so the other symbols' prints still land
     # and the failure stays visible in the run state.
+    problems: list[str] = []
     if failed:
-        raise RuntimeError(f"EPS detection failed for {', '.join(failed)}: {failed}")
+        problems.append(f"EPS detection failed for {', '.join(failed)}: {failed}")
+    if overdue:
+        problems.append(f"EPS print not on the consensus stream yet for {', '.join(overdue)}")
+    if problems:
+        raise RuntimeError("; ".join(problems))
 
 
 if __name__ == "__main__":

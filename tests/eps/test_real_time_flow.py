@@ -8,6 +8,7 @@ naïve dict-key joins on raw dates don't treat the same event as two
 separate single-source entries.
 """
 
+from datetime import date, datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -19,6 +20,7 @@ from tests.utils.fake_tn_access import FakeTNAccessBlock
 
 from tsn_adapters.blocks.fmp import EarningsData, FMPBlock, QuarterlyIncomeStatementData
 from tsn_adapters.blocks.yahoo import YahooBlock
+import tsn_adapters.flows.eps.real_time_flow as real_time_flow_module
 from tsn_adapters.flows.eps.real_time_flow import detect_and_prepare_eps, eps_real_time_flow
 from tsn_adapters.utils.create_empty_df import create_empty_df
 from tsn_adapters.utils.time_utils import date_string_to_unix
@@ -53,10 +55,19 @@ class RealTimeFakeFMPBlock(FMPBlock):
 
 
 class RealTimeFakeYahooBlock(YahooBlock):
+    """JSON feed rows in `_data`; earnings-page rows, already period-end dated, in `_page`."""
+
     _data: dict = PrivateAttr(default_factory=dict)
+    _page: dict = PrivateAttr(default_factory=dict)
+    _page_error: Exception | None = PrivateAttr(default=None)
 
     def get_historical_earnings(self, symbol: str, limit: int = 40) -> DataFrame[EarningsData]:
         return _earnings_df(self._data.get(symbol, []))
+
+    def get_page_earnings(self, symbol: str, period_ends: list[date]) -> DataFrame[EarningsData]:
+        if self._page_error is not None:
+            raise self._page_error
+        return _earnings_df(self._page.get(symbol, []))
 
 
 def _make_fmp(earnings: dict[str, list[dict]], income_statements: dict[str, list[dict]]) -> RealTimeFakeFMPBlock:
@@ -66,10 +77,26 @@ def _make_fmp(earnings: dict[str, list[dict]], income_statements: dict[str, list
     return block
 
 
-def _make_yahoo(data: dict[str, list[dict]]) -> RealTimeFakeYahooBlock:
+def _make_yahoo(
+    data: dict[str, list[dict]],
+    page: dict[str, list[dict]] | None = None,
+    page_error: Exception | None = None,
+) -> RealTimeFakeYahooBlock:
     block = RealTimeFakeYahooBlock()
     block._data = data
+    block._page = page or {}
+    block._page_error = page_error
     return block
+
+
+# A fixed clock away from every report day below, so no fixture falls in the
+# overdue window by accident. The overdue tests set their own.
+QUIET_NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _quiet_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(real_time_flow_module, "_utc_now", lambda: QUIET_NOW)
 
 
 # --- Test fixtures — the events from issue #3936 ---
@@ -124,7 +151,7 @@ def test_reconciles_despite_source_date_mismatch():
     yahoo_tn = FakeTNAccessBlock()
     truf_tn = FakeTNAccessBlock()
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=fmp_tn,
@@ -170,7 +197,7 @@ def test_aapl_fiscal_quarter_mismatch_resolves():
     fmp = _make_fmp(earnings={"AAPL": [aapl_fmp]}, income_statements={"AAPL": [aapl_income]})
     yahoo = _make_yahoo({"AAPL": [aapl_yahoo]})
 
-    _, _, truf_rows = detect_and_prepare_eps.fn(
+    _, _, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -202,7 +229,7 @@ def test_aapl_filing_date_off_by_one():
     fmp = _make_fmp(earnings={"AAPL": [aapl_fmp]}, income_statements={"AAPL": [aapl_income]})
     yahoo = _make_yahoo({"AAPL": [aapl_yahoo]})
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -234,7 +261,7 @@ def test_disputed_when_same_event_different_values():
     )
     yahoo = _make_yahoo({"NVDA": [yahoo_row]})
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -261,7 +288,7 @@ def test_pending_when_only_fmp_has_event():
     )
     yahoo = _make_yahoo({"NVDA": []})
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -280,7 +307,7 @@ def test_pending_when_only_yahoo_has_event():
     fmp = _make_fmp(earnings={"NVDA": []}, income_statements={"NVDA": []})
     yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -310,7 +337,7 @@ def test_settles_on_yahoo_quarter_when_income_statement_not_yet_published():
     )
     yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -355,7 +382,7 @@ def test_pending_when_income_statement_and_yahoo_quarter_both_missing():
     fmp = _make_fmp(earnings={"TSLA": [tsla_q3_fmp]}, income_statements={"TSLA": [tsla_q2_income]})
     yahoo = _make_yahoo({"TSLA": [tsla_q2_yahoo]})
 
-    fmp_rows, _, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, _, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -386,7 +413,7 @@ def test_settles_when_the_announcement_falls_in_the_next_calendar_quarter():
     fmp = _make_fmp(earnings={"TSLA": [tsla_q2_fmp]}, income_statements={"TSLA": []})
     yahoo = _make_yahoo({"TSLA": [tsla_q2_yahoo]})
 
-    _, _, truf_rows = detect_and_prepare_eps.fn(
+    _, _, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -430,7 +457,7 @@ def test_an_older_unmatched_fmp_row_pairs_with_its_own_quarter():
     )
     yahoo = _make_yahoo({"TSLA": [q3_yahoo, q2_yahoo]})
 
-    _, _, truf_rows = detect_and_prepare_eps.fn(
+    _, _, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -464,7 +491,7 @@ def test_null_filing_date_on_an_old_income_statement_row_does_not_crash():
     )
     yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
 
-    _, _, truf_rows = detect_and_prepare_eps.fn(
+    _, _, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -488,7 +515,7 @@ def test_null_last_updated_on_an_fmp_row_does_not_crash():
     )
     yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]})
 
-    _, _, truf_rows = detect_and_prepare_eps.fn(
+    _, _, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -522,7 +549,7 @@ def test_idempotent_skips_already_published_consensus():
         [date_string_to_unix("2026-05-20")],
     )
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=FakeTNAccessBlock(),
@@ -565,7 +592,7 @@ def test_publishes_fresh_print_despite_older_stream_history():
     yahoo_tn.seed_records(YAHOO_EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-01-31")])
     truf_tn.seed_records(EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-02-25")])
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=fmp_tn,
@@ -602,7 +629,7 @@ def test_idempotent_when_all_streams_already_published():
     yahoo_tn.seed_records(YAHOO_EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-04-30")])
     truf_tn.seed_records(EPS_STREAM_IDS["NVDA"], [date_string_to_unix("2026-05-20")])
 
-    fmp_rows, yahoo_rows, truf_rows = detect_and_prepare_eps.fn(
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
         fmp_block=fmp,
         yahoo_block=yahoo,
         fmp_tn_block=fmp_tn,
@@ -759,3 +786,301 @@ def test_a_failing_symbol_fails_the_run_even_when_nothing_is_new(prefect_harness
         )
 
     assert truf_tn.inserted_records == []
+
+
+# --- Yahoo's earnings page (website#4987: Meta's 2026-10-21 report) ---
+
+META_Q3_2026_FMP_EARNINGS = {
+    "symbol": "META",
+    "date": "2026-10-21",
+    "epsActual": 3.83,
+    "epsEstimated": 5.46,
+    "lastUpdated": None,
+}
+META_Q3_2026_INCOME_STMT = {
+    "symbol": "META",
+    "period": "Q3",
+    "fiscalYear": "2026",
+    "date": "2026-09-30",
+    "filingDate": "2026-10-21",
+    "acceptedDate": None,
+}
+META_Q2_2026_YAHOO_FEED = {
+    "symbol": "META",
+    "date": "2026-06-30",
+    "epsActual": 6.18,
+    "epsEstimated": 7.22,
+    "lastUpdated": None,
+}
+META_Q3_2026_YAHOO_PAGE = {
+    "symbol": "META",
+    "date": "2026-09-30",
+    "epsActual": 3.83,
+    "epsEstimated": 5.46,
+    "lastUpdated": None,
+}
+
+
+def _meta_q3_fmp() -> RealTimeFakeFMPBlock:
+    return _make_fmp(
+        earnings={"META": [META_Q3_2026_FMP_EARNINGS]},
+        income_statements={"META": [META_Q3_2026_INCOME_STMT]},
+    )
+
+
+def _detect_meta(
+    fmp: RealTimeFakeFMPBlock,
+    yahoo: RealTimeFakeYahooBlock,
+    truf_tn: FakeTNAccessBlock | None = None,
+) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+    return detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=FakeTNAccessBlock(),
+        yahoo_tn_block=FakeTNAccessBlock(),
+        truf_tn_block=truf_tn or FakeTNAccessBlock(),
+        symbol="META",
+    )
+
+
+def test_settles_on_the_page_while_the_feed_has_no_row():
+    """Meta's 2026-10-21 report: FMP had 3.83 from the first run after the
+    release, Yahoo's earnings page showed 3.83 by 01:07 UTC, and Yahoo's JSON
+    feed still had no Q3 row hours later. The page matches FMP, so the
+    consensus settles without waiting for the feed, and the Yahoo stream gets
+    the page's figure.
+    """
+    fmp = _meta_q3_fmp()
+    yahoo = _make_yahoo({"META": [META_Q2_2026_YAHOO_FEED]}, page={"META": [META_Q3_2026_YAHOO_PAGE]})
+
+    _, yahoo_rows, truf_rows, overdue = _detect_meta(fmp, yahoo)
+
+    assert [(r["date"], r["value"]) for r in truf_rows] == [(date_string_to_unix("2026-10-21"), "3.83")]
+    assert (date_string_to_unix("2026-09-30"), "3.83") in [(r["date"], r["value"]) for r in yahoo_rows]
+    assert overdue == []
+
+
+def test_settles_on_the_page_without_an_income_statement_or_a_feed_row():
+    """FMP's income statement has no row for the filing yet and the feed has no
+    row for the quarter. The page's quarter dates FMP's reading, as a feed row
+    would, so the print still settles.
+    """
+    fmp = _make_fmp(earnings={"META": [META_Q3_2026_FMP_EARNINGS]}, income_statements={"META": []})
+    yahoo = _make_yahoo({"META": [META_Q2_2026_YAHOO_FEED]}, page={"META": [META_Q3_2026_YAHOO_PAGE]})
+
+    _, _, truf_rows, _ = _detect_meta(fmp, yahoo)
+
+    assert [(r["date"], r["value"]) for r in truf_rows] == [(date_string_to_unix("2026-10-21"), "3.83")]
+
+
+def test_a_page_figure_on_another_basis_is_left_out():
+    """Meta Q3 2025: GAAP EPS was 1.05 with a one-time tax charge and 7.25
+    without it; Yahoo's page listed 7.25 while its feed recorded 1.05. A page
+    figure that matches nothing may be on the wrong basis, and the Yahoo stream
+    keeps the first value written for a date, so it is neither written nor
+    reconciled.
+    """
+    q3_2025_gaap = {
+        "symbol": "META",
+        "date": "2025-10-29",
+        "epsActual": 1.05,
+        "epsEstimated": 6.67,
+        "lastUpdated": None,
+    }
+    fmp = _make_fmp(
+        earnings={"META": [q3_2025_gaap]},
+        income_statements={
+            "META": [
+                {
+                    "symbol": "META",
+                    "period": "Q3",
+                    "fiscalYear": "2025",
+                    "date": "2025-09-30",
+                    "filingDate": "2025-10-29",
+                    "acceptedDate": None,
+                }
+            ]
+        },
+    )
+    yahoo = _make_yahoo(
+        {"META": []},
+        page={"META": [dict(q3_2025_gaap, date="2025-09-30", epsActual=7.25)]},
+    )
+
+    _, yahoo_rows, truf_rows, _ = _detect_meta(fmp, yahoo)
+
+    assert yahoo_rows == []
+    assert truf_rows == []
+
+
+def test_the_page_settles_when_the_feed_is_on_another_basis():
+    """The reverse: the feed carries a figure on another basis and the page
+    matches FMP. The page's reading is the one kept, for the consensus and for
+    the Yahoo stream.
+    """
+    fmp = _meta_q3_fmp()
+    feed_q3 = dict(META_Q3_2026_YAHOO_PAGE, epsActual=7.40)
+    yahoo = _make_yahoo({"META": [feed_q3]}, page={"META": [META_Q3_2026_YAHOO_PAGE]})
+
+    _, yahoo_rows, truf_rows, _ = _detect_meta(fmp, yahoo)
+
+    assert [r["value"] for r in truf_rows] == ["3.83"]
+    assert [(r["date"], r["value"]) for r in yahoo_rows] == [(date_string_to_unix("2026-09-30"), "3.83")]
+
+
+def test_the_feed_is_kept_when_both_match():
+    """When the feed and the page both match FMP, the feed's figure is the one
+    written, as before the page was read."""
+    fmp = _meta_q3_fmp()
+    page_q3 = dict(META_Q3_2026_YAHOO_PAGE, epsActual=3.84)
+    yahoo = _make_yahoo({"META": [META_Q3_2026_YAHOO_PAGE]}, page={"META": [page_q3]})
+
+    _, yahoo_rows, truf_rows, _ = _detect_meta(fmp, yahoo)
+
+    assert [r["value"] for r in truf_rows] == ["3.83"]
+    assert [r["value"] for r in yahoo_rows] == ["3.83"]
+
+
+def test_a_page_reading_waits_until_another_source_matches_it():
+    """Only the page has the quarter: FMP and the feed have nothing for it yet.
+    Nothing is written for it; the reading waits for FMP or the feed."""
+    fmp = _make_fmp(earnings={"META": []}, income_statements={"META": []})
+    yahoo = _make_yahoo({"META": [META_Q2_2026_YAHOO_FEED]}, page={"META": [META_Q3_2026_YAHOO_PAGE]})
+
+    _, yahoo_rows, truf_rows, _ = _detect_meta(fmp, yahoo)
+
+    assert [r["date"] for r in yahoo_rows] == [date_string_to_unix("2026-06-30")]
+    assert truf_rows == []
+
+
+def test_a_page_that_cannot_be_read_leaves_the_feed_path_as_before():
+    """A consent page, a changed layout or an HTTP error on the page must not
+    cost the run anything the feed provides."""
+    fmp = _make_fmp(
+        earnings={"NVDA": [NVDA_Q1_FY27_FMP_EARNINGS]},
+        income_statements={"NVDA": [NVDA_Q1_FY27_INCOME_STMT]},
+    )
+    yahoo = _make_yahoo({"NVDA": [NVDA_Q1_FY27_YAHOO_EARNINGS]}, page_error=ValueError("no earnings table"))
+
+    fmp_rows, yahoo_rows, truf_rows, _ = detect_and_prepare_eps.fn(
+        fmp_block=fmp,
+        yahoo_block=yahoo,
+        fmp_tn_block=FakeTNAccessBlock(),
+        yahoo_tn_block=FakeTNAccessBlock(),
+        truf_tn_block=FakeTNAccessBlock(),
+        symbol="NVDA",
+    )
+
+    assert [r["value"] for r in fmp_rows] == ["1.87"]
+    assert [r["value"] for r in yahoo_rows] == ["1.87"]
+    assert [r["value"] for r in truf_rows] == ["1.87"]
+
+
+# --- A report still missing the morning after (OVERDUE_AFTER) ---
+
+
+def _clock_at(monkeypatch: pytest.MonkeyPatch, when: str) -> None:
+    monkeypatch.setattr(real_time_flow_module, "_utc_now", lambda: datetime.fromisoformat(when))
+
+
+def test_a_report_still_pending_the_next_morning_is_overdue(monkeypatch: pytest.MonkeyPatch):
+    """Meta's report as the adapter saw it before reading the page: FMP had the
+    figure and Yahoo had nothing. At 06:00 UTC the next day, about 14 hours
+    before its market settles, the report is overdue."""
+    _clock_at(monkeypatch, "2026-10-22T06:00:00+00:00")
+    fmp = _meta_q3_fmp()
+    yahoo = _make_yahoo({"META": [META_Q2_2026_YAHOO_FEED]})
+
+    _, _, truf_rows, overdue = _detect_meta(fmp, yahoo)
+
+    assert truf_rows == []
+    assert overdue == ["META 2026-10-21"]
+
+
+@pytest.mark.parametrize("when", ["2026-10-22T05:59:00+00:00", "2026-10-24T00:00:00+00:00"])
+def test_a_report_is_not_overdue_outside_its_window(monkeypatch: pytest.MonkeyPatch, when: str):
+    """Before 06:00 UTC the next day the runs still have time; three days on,
+    the market has settled."""
+    _clock_at(monkeypatch, when)
+    fmp = _meta_q3_fmp()
+    yahoo = _make_yahoo({"META": [META_Q2_2026_YAHOO_FEED]})
+
+    _, _, _, overdue = _detect_meta(fmp, yahoo)
+
+    assert overdue == []
+
+
+def test_a_report_already_on_tn_is_not_overdue(monkeypatch: pytest.MonkeyPatch):
+    """Meta's 2026-10-21 record, written outside the scheduled runs, ends the
+    alarm for that report."""
+    from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS
+
+    _clock_at(monkeypatch, "2026-10-22T06:00:00+00:00")
+    fmp = _meta_q3_fmp()
+    yahoo = _make_yahoo({"META": [META_Q2_2026_YAHOO_FEED]})
+    truf_tn = FakeTNAccessBlock()
+    truf_tn.seed_records(EPS_STREAM_IDS["META"], [date_string_to_unix("2026-10-21")])
+
+    _, _, truf_rows, overdue = _detect_meta(fmp, yahoo, truf_tn)
+
+    assert truf_rows == []
+    assert overdue == []
+
+
+def test_a_report_this_run_settles_is_not_overdue(monkeypatch: pytest.MonkeyPatch):
+    _clock_at(monkeypatch, "2026-10-22T06:00:00+00:00")
+    fmp = _meta_q3_fmp()
+    yahoo = _make_yahoo({"META": [META_Q2_2026_YAHOO_FEED]}, page={"META": [META_Q3_2026_YAHOO_PAGE]})
+
+    _, _, truf_rows, overdue = _detect_meta(fmp, yahoo)
+
+    assert [r["value"] for r in truf_rows] == ["3.83"]
+    assert overdue == []
+
+
+def test_a_report_with_no_figure_anywhere_is_overdue(monkeypatch: pytest.MonkeyPatch):
+    """FMP lists a report's day before it has the figure. With no figure from
+    any source the next morning, the report is overdue all the same."""
+    _clock_at(monkeypatch, "2026-10-22T06:00:00+00:00")
+    no_figure_yet = dict(META_Q3_2026_FMP_EARNINGS, epsActual=None)
+    fmp = _make_fmp(earnings={"META": [no_figure_yet]}, income_statements={"META": []})
+    yahoo = _make_yahoo({"META": [META_Q2_2026_YAHOO_FEED]})
+
+    fmp_rows, _, truf_rows, overdue = _detect_meta(fmp, yahoo)
+
+    assert fmp_rows == []
+    assert truf_rows == []
+    assert overdue == ["META 2026-10-21"]
+
+
+@pytest.mark.timeout(120, func_only=True)
+def test_an_overdue_report_fails_the_run_after_the_others_publish(
+    prefect_harness: Any, monkeypatch: pytest.MonkeyPatch
+):
+    """GOOGL's print is new and META's report is overdue. The run writes
+    GOOGL's print first, then fails, naming META's report, so the failed run
+    shows the miss hours before the market settles."""
+    from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, YAHOO_EPS_STREAM_IDS
+
+    _clock_at(monkeypatch, "2026-10-22T06:00:00+00:00")
+    fmp = _make_fmp(
+        earnings={"GOOGL": [GOOGL_Q2_2026_FMP_EARNINGS], "META": [META_Q3_2026_FMP_EARNINGS]},
+        income_statements={"GOOGL": [GOOGL_Q2_2026_INCOME_STMT], "META": [META_Q3_2026_INCOME_STMT]},
+    )
+    yahoo = _make_yahoo({"GOOGL": [GOOGL_Q2_2026_YAHOO_EARNINGS], "META": [META_Q2_2026_YAHOO_FEED]})
+    fmp_tn = FakeTNAccessBlock(existing_streams={FMP_EPS_STREAM_IDS["GOOGL"], FMP_EPS_STREAM_IDS["META"]})
+    yahoo_tn = FakeTNAccessBlock(existing_streams={YAHOO_EPS_STREAM_IDS["GOOGL"], YAHOO_EPS_STREAM_IDS["META"]})
+    truf_tn = FakeTNAccessBlock(existing_streams={EPS_STREAM_IDS["GOOGL"], EPS_STREAM_IDS["META"]})
+
+    with pytest.raises(RuntimeError, match="META 2026-10-21"):
+        eps_real_time_flow(
+            fmp_block=fmp,
+            yahoo_block=yahoo,
+            fmp_tn_block=fmp_tn,
+            yahoo_tn_block=yahoo_tn,
+            truf_tn_block=truf_tn,
+            symbols=["GOOGL", "META"],
+        )
+
+    truf_inserted = pd.concat(truf_tn.inserted_records, ignore_index=True)
+    assert truf_inserted["value"].tolist() == ["9.11"]
