@@ -18,6 +18,11 @@ from tsn_adapters.utils.logging import get_logger_safe
 
 PanderaModelType = TypeVar("PanderaModelType", bound=DataFrameModel)
 
+# Without a timeout a stalled FMP call blocks its run indefinitely (one EPS call
+# sat two minutes before an SSL error). urlopen applies it to each blocking
+# socket operation, connect and every read, not to the whole download.
+REQUEST_TIMEOUT_S = 60
+
 
 class FMPExchange(Enum):
     NYSE = "nyse"
@@ -299,7 +304,7 @@ class FMPBlock(Block):
         separator = "&" if "?" in base_endpoint_url else "?"
         url = base_endpoint_url + separator + "apikey=" + self.api_key.get_secret_value()
         rate_limit("fmp_api")
-        response = urlopen(url, cafile=certifi.where())
+        response = urlopen(url, cafile=certifi.where(), timeout=REQUEST_TIMEOUT_S)
         data = response.read().decode("utf-8")
         return json.loads(data)
 
