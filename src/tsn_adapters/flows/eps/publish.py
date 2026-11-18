@@ -1,6 +1,6 @@
 """Shared EPS publish path — dedup + fail-loud TN insert.
 
-Both EPS flows funnel their outgoing rows through here so that
+The EPS flows funnel their outgoing rows through here so that
 
 1. duplicate (stream_id, date) rows are collapsed before the write. FMP
    occasionally repeats a fresh announcement row in its response (observed
@@ -14,6 +14,8 @@ Both EPS flows funnel their outgoing rows through here so that
 
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 from pandera.typing import DataFrame
 
@@ -21,6 +23,9 @@ from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.common.trufnetwork.models.tn_models import TnDataRowModel
 from tsn_adapters.common.trufnetwork.tasks.insert import task_split_and_insert_records
 from tsn_adapters.utils.logging import get_logger_safe
+
+# One TN row as the EPS flows build it: stream_id, date (unix), value (str), data_provider.
+EpsRow = dict[str, Any]
 
 
 def publish_eps_records(block: TNAccessBlock, records: pd.DataFrame, label: str) -> int:
@@ -47,3 +52,33 @@ def publish_eps_records(block: TNAccessBlock, records: pd.DataFrame, label: str)
 
     logger.info(f"Published {len(frame)} record(s) to {label} streams")
     return len(frame)
+
+
+def publish_detected_rows(
+    *,
+    fmp_tn_block: TNAccessBlock,
+    yahoo_tn_block: TNAccessBlock,
+    truf_tn_block: TNAccessBlock,
+    fmp_rows: list[EpsRow],
+    yahoo_rows: list[EpsRow],
+    truf_rows: list[EpsRow],
+) -> None:
+    """Publish a real-time run's rows, each list with the wallet block that owns its streams.
+
+    Shared by the real-time flow and the report watch. Raises like
+    `publish_eps_records` when a record fails to insert.
+    """
+    logger = get_logger_safe(__name__)
+
+    total = len(fmp_rows) + len(yahoo_rows) + len(truf_rows)
+    if total == 0:
+        logger.info("No new EPS records to publish")
+
+    if fmp_rows:
+        publish_eps_records(fmp_tn_block, pd.DataFrame(fmp_rows), "FMP")
+
+    if yahoo_rows:
+        publish_eps_records(yahoo_tn_block, pd.DataFrame(yahoo_rows), "Yahoo")
+
+    if truf_rows:
+        publish_eps_records(truf_tn_block, pd.DataFrame(truf_rows), "Truf consensus")
