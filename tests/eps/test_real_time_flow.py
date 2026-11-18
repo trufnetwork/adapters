@@ -22,7 +22,13 @@ from tests.utils.fake_tn_access import FakeTNAccessBlock
 from tsn_adapters.blocks.fmp import EarningsData, FMPBlock, QuarterlyIncomeStatementData
 from tsn_adapters.blocks.yahoo import YahooBlock
 import tsn_adapters.flows.eps.real_time_flow as real_time_flow_module
-from tsn_adapters.flows.eps.real_time_flow import EpsDetection, detect_and_prepare_eps, eps_real_time_flow
+from tsn_adapters.flows.eps.real_time_flow import (
+    DetectedEps,
+    EpsDetection,
+    detect_and_prepare_eps,
+    eps_real_time_flow,
+)
+from tsn_adapters.tasks.eps.config import MAG7
 from tsn_adapters.utils.create_empty_df import create_empty_df
 from tsn_adapters.utils.time_utils import date_string_to_unix
 
@@ -1160,6 +1166,29 @@ def test_the_full_run_still_reads_both_fmp_endpoints():
     )
 
     assert fmp._calls == [("earnings", "NVDA", 4), ("income-statement", "NVDA", 5)]
+
+
+def test_the_full_run_hands_on_its_task_unchanged(monkeypatch: pytest.MonkeyPatch):
+    """The full run keeps its task retries and its income statement: it polls
+    with the module's task itself (`with_options` would make a new one) and
+    passes only the five blocks. conftest.py strips retries from every task,
+    so no flow test can see them."""
+    calls: list[tuple[Any, list[str], dict[str, Any]]] = []
+
+    def detect_symbols(detect: Any, symbols: list[str], **options: Any) -> DetectedEps:
+        calls.append((detect, symbols, options))
+        return DetectedEps()
+
+    monkeypatch.setattr(real_time_flow_module, "detect_symbols", detect_symbols)
+    blocks: dict[str, Any] = {name: FakeTNAccessBlock() for name in ("fmp_tn_block", "yahoo_tn_block", "truf_tn_block")}
+    fmp, yahoo = _make_fmp({}, {}), _make_yahoo({})
+
+    eps_real_time_flow.fn(fmp_block=fmp, yahoo_block=yahoo, **blocks, report_days_variable=None)
+
+    [(detect, symbols, options)] = calls
+    assert detect is real_time_flow_module.detect_and_prepare_eps
+    assert symbols == MAG7
+    assert options == {"fmp_block": fmp, "yahoo_block": yahoo, **blocks}
 
 
 def test_without_the_income_statement_one_fmp_call_still_settles():

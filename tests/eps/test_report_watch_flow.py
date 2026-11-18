@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pandas as pd
 from pandera.typing import DataFrame
+from prefect.client.schemas.filters import Operator
 from prefect.client.schemas.objects import FlowRun, StateType
 from pydantic import PrivateAttr, SecretStr
 import pytest
@@ -33,6 +34,7 @@ REPORT_DAY = "2026-10-28"
 IN_WINDOW = datetime(2026, 10, 28, 22, 0, tzinfo=timezone.utc)
 BUDGET = "eps_watch_fmp_calls"
 REPORT_DAYS = "eps_report_days"
+LOOKAHEAD = timedelta(minutes=15)
 
 MSFT_Q3_FMP = {"symbol": "MSFT", "date": REPORT_DAY, "epsActual": 4.13, "epsEstimated": 3.9, "lastUpdated": None}
 MSFT_Q3_YAHOO = {"symbol": "MSFT", "date": "2026-09-30", "epsActual": 4.13, "epsEstimated": 3.9, "lastUpdated": None}
@@ -76,11 +78,19 @@ class FeedYahooBlock(YahooBlock):
         return create_empty_df(EarningsData)
 
 
+class BlockTouched(BaseException):
+    """Not an Exception, so the flow's `except Exception` handlers cannot swallow it."""
+
+
 class Untouchable:
-    """A block that fails the test on any attribute access, so on any call."""
+    """A block that fails the test on any attribute access, so on any call.
+
+    Only for blocks the flow uses directly: a Prefect task turns any error
+    inside it into one the flow catches, so a poll is checked with `spy_poll`.
+    """
 
     def __getattribute__(self, name: str) -> Any:
-        raise AssertionError(f"a block was touched: .{name}")
+        raise BlockTouched(f"a block was touched: .{name}")
 
 
 class FakeClient:
@@ -104,13 +114,27 @@ class FakeClient:
         return self.runs
 
 
-def _running(started: datetime, run_id: Any = None) -> FlowRun:
+def _running(started: datetime, run_id: Any = None, deployment_id: Any = None) -> FlowRun:
     return FlowRun(
         id=run_id or uuid4(),
         name="eps-real-time-run",
         flow_id=uuid4(),
+        deployment_id=deployment_id or uuid4(),
         start_time=started,
+        expected_start_time=started,
         state_type=StateType.RUNNING,
+    )
+
+
+def _waiting(state: StateType, expected: datetime, deployment_id: Any = None) -> FlowRun:
+    """A run SCHEDULED or PENDING to start at `expected`."""
+    return FlowRun(
+        id=uuid4(),
+        name="eps-real-time-run",
+        flow_id=uuid4(),
+        deployment_id=deployment_id or uuid4(),
+        expected_start_time=expected,
+        state_type=state,
     )
 
 
@@ -138,6 +162,36 @@ def variables(monkeypatch: pytest.MonkeyPatch) -> FakeVariables:
     monkeypatch.setattr(watch_module, "Variable", store)
     monkeypatch.setattr(real_time_flow_module, "Variable", store)
     return store
+
+
+@pytest.fixture(autouse=True)
+def own_deployment(monkeypatch: pytest.MonkeyPatch):
+    """Run the tick as if under a deployment, through Prefect's documented
+    runtime override; until a test calls it, the tick runs outside any."""
+    monkeypatch.delenv("PREFECT__RUNTIME__DEPLOYMENT__ID", raising=False)
+
+    def set_id(deployment_id: Any) -> None:
+        monkeypatch.setenv("PREFECT__RUNTIME__DEPLOYMENT__ID", str(deployment_id))
+
+    return set_id
+
+
+@pytest.fixture
+def spy_poll(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Stands in for the poll task: records the task options and each poll, and
+    returns `result` (nothing found, unless a test sets it)."""
+    spy = SimpleNamespace(options=[], polls=[], result=EpsDetection([], [], [], [], []))
+
+    def poll(**kwargs: Any) -> EpsDetection:
+        spy.polls.append(kwargs)
+        return spy.result
+
+    def with_options(**kwargs: Any) -> Any:
+        spy.options.append(kwargs)
+        return poll
+
+    monkeypatch.setattr(watch_module, "detect_and_prepare_eps", SimpleNamespace(with_options=with_options))
+    return spy
 
 
 @pytest.fixture
@@ -296,13 +350,70 @@ def test_a_recent_eps_run_skips_the_tick(clock: Any, variables: FakeVariables, c
 
     [call] = client.calls
     assert call["deployment_filter"].name.any_ == ["eps-real-time-flow", "eps-historical-flow"]
-    assert call["flow_run_filter"].state.type.any_ == [StateType.RUNNING]
+    assert call["deployment_filter"].id is None  # outside a deployment
+    assert call["flow_run_filter"].state.type.any_ == [StateType.RUNNING, StateType.PENDING, StateType.SCHEDULED]
+    assert call["flow_run_filter"].expected_start_time.before_ == IN_WINDOW + LOOKAHEAD
     assert variables.names_touched() == {REPORT_DAYS}
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        # Seen from a tick at 23:50, the 00:00 run is due in 10 minutes; the 00:00 tick
+        # itself finds it SCHEDULED or PENDING; a run the runner missed is late.
+        pytest.param(_waiting(StateType.SCHEDULED, IN_WINDOW + LOOKAHEAD - timedelta(seconds=1)), id="scheduled-soon"),
+        pytest.param(_waiting(StateType.SCHEDULED, IN_WINDOW), id="scheduled-now"),
+        pytest.param(_waiting(StateType.PENDING, IN_WINDOW - timedelta(seconds=5)), id="pending"),
+        pytest.param(_waiting(StateType.SCHEDULED, IN_WINDOW - timedelta(minutes=59)), id="late"),
+    ],
+)
+def test_an_eps_run_about_to_start_skips_the_tick(
+    clock: Any, variables: FakeVariables, client: FakeClient, run: FlowRun
+):
+    """The other EPS flows never check for the watch: a tick that could still
+    be polling when one of them starts does not begin. The 00:00 UTC
+    real-time run falls inside every report window."""
+    _report_days(variables, {"MSFT": [REPORT_DAY]})
+    client.runs = [run]
+
+    _untouched_watch(busy_deployments=["eps-real-time-flow"])
+
+    assert variables.names_touched() == {REPORT_DAYS}
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        pytest.param(_waiting(StateType.SCHEDULED, IN_WINDOW + LOOKAHEAD), id="beyond-the-lookahead"),
+        pytest.param(_waiting(StateType.SCHEDULED, IN_WINDOW - timedelta(minutes=60)), id="late-for-an-hour"),
+        pytest.param(_waiting(StateType.PENDING, IN_WINDOW - timedelta(hours=3)), id="pending-for-hours"),
+    ],
+)
+def test_runs_further_off_or_long_overdue_do_not_block(
+    clock: Any, variables: FakeVariables, client: FakeClient, consensus_reads: list[tuple[str, int]], run: FlowRun
+):
+    """MSFT is already on the consensus stream, so the tick ends at that check."""
+    _report_days(variables, {"MSFT": [REPORT_DAY]})
+    client.runs = [run]
+
+    _untouched_watch(busy_deployments=["eps-real-time-flow"], truf_tn_block=_published("MSFT"))
+
+    assert consensus_reads == [(EPS_STREAM_IDS["MSFT"], date_string_to_unix(REPORT_DAY))]
+
+
+def test_the_lookahead_is_a_parameter(clock: Any, variables: FakeVariables, client: FakeClient):
+    _report_days(variables, {"MSFT": [REPORT_DAY]})
+    client.runs = [_waiting(StateType.SCHEDULED, IN_WINDOW + timedelta(minutes=25))]
+
+    _untouched_watch(busy_deployments=["eps-real-time-flow"], busy_lookahead_minutes=30)
+
+    [call] = client.calls
+    assert call["flow_run_filter"].expected_start_time.before_ == IN_WINDOW + timedelta(minutes=30)
 
 
 @pytest.mark.parametrize("age", [timedelta(minutes=60), timedelta(hours=5)])
 def test_a_run_stuck_in_running_for_an_hour_no_longer_blocks(
-    clock: Any, variables: FakeVariables, client: FakeClient, consensus_reads: list, age: timedelta
+    clock: Any, variables: FakeVariables, client: FakeClient, consensus_reads: list[tuple[str, int]], age: timedelta
 ):
     """A run that crashed without reporting it stays RUNNING for good; after an
     hour it stops holding the watch back. MSFT is already on the consensus
@@ -315,12 +426,57 @@ def test_a_run_stuck_in_running_for_an_hour_no_longer_blocks(
     assert consensus_reads == [(EPS_STREAM_IDS["MSFT"], date_string_to_unix(REPORT_DAY))]
 
 
-def test_this_run_does_not_count_as_busy(
-    clock: Any, variables: FakeVariables, client: FakeClient, consensus_reads: list, monkeypatch: pytest.MonkeyPatch
+def test_another_tick_of_this_deployment_skips_the_tick(
+    clock: Any, variables: FakeVariables, client: FakeClient, own_deployment: Any
 ):
-    """The watch's own deployment can be listed to keep two ticks apart."""
+    """Late ticks start together when the runner catches up, for instance after
+    a container restart. Two ticks at once would both read the FMP count and
+    under-count, so the watch keeps its own ticks apart without being listed."""
+    deployment_id = uuid4()
+    own_deployment(deployment_id)
+    _report_days(variables, {"MSFT": [REPORT_DAY]})
+    client.runs = [_running(IN_WINDOW - timedelta(minutes=2), deployment_id=deployment_id)]
+
+    _untouched_watch()
+
+    [call] = client.calls
+    assert call["deployment_filter"].id.any_ == [deployment_id]
+    assert call["deployment_filter"].name is None
+    assert call["deployment_filter"].operator == Operator.or_
+    assert variables.names_touched() == {REPORT_DAYS}
+
+
+def test_this_deployments_coming_ticks_do_not_block(
+    clock: Any,
+    variables: FakeVariables,
+    client: FakeClient,
+    consensus_reads: list[tuple[str, int]],
+    own_deployment: Any,
+):
+    """The next tick is always scheduled within the lookahead, also when the
+    watch's own deployment is listed by name."""
+    deployment_id = uuid4()
+    own_deployment(deployment_id)
+    _report_days(variables, {"MSFT": [REPORT_DAY]})
+    client.runs = [
+        _waiting(StateType.SCHEDULED, IN_WINDOW + timedelta(minutes=10), deployment_id=deployment_id),
+        _waiting(StateType.PENDING, IN_WINDOW, deployment_id=deployment_id),
+    ]
+
+    _untouched_watch(busy_deployments=["eps-report-watch"], truf_tn_block=_published("MSFT"))
+
+    assert len(consensus_reads) == 1
+
+
+def test_this_run_does_not_count_as_busy(
+    clock: Any,
+    variables: FakeVariables,
+    client: FakeClient,
+    consensus_reads: list[tuple[str, int]],
+    monkeypatch: pytest.MonkeyPatch,
+):
     own_id = uuid4()
-    monkeypatch.setenv("PREFECT__FLOW_RUN_ID", str(own_id))
+    monkeypatch.setattr(watch_module, "current_flow_run_id", lambda: str(own_id))
     _report_days(variables, {"MSFT": [REPORT_DAY]})
     client.runs = [_running(IN_WINDOW - timedelta(minutes=1), run_id=own_id)]
 
@@ -338,8 +494,8 @@ def test_runs_that_cannot_be_read_skip_the_tick(clock: Any, variables: FakeVaria
     assert len(client.calls) == 1
 
 
-def test_without_busy_deployments_no_runs_are_read(
-    clock: Any, variables: FakeVariables, client: FakeClient, consensus_reads: list
+def test_outside_a_deployment_and_without_busy_deployments_no_runs_are_read(
+    clock: Any, variables: FakeVariables, client: FakeClient, consensus_reads: list[tuple[str, int]]
 ):
     _report_days(variables, {"MSFT": [REPORT_DAY]})
 
@@ -349,29 +505,80 @@ def test_without_busy_deployments_no_runs_are_read(
     assert len(consensus_reads) == 1
 
 
+@pytest.mark.timeout(120, func_only=True)
+def test_the_busy_guard_reads_the_runs_from_prefect(
+    prefect_harness: Any, own_deployment: Any, monkeypatch: pytest.MonkeyPatch
+):
+    """The same rules against a real Prefect API, which applies the filters."""
+    from prefect.client.orchestration import get_client
+    from prefect.states import Pending, Running, Scheduled
+
+    now = datetime.now(timezone.utc)
+    tag = uuid4().hex[:8]
+    with get_client(sync_client=True) as api:
+        flow_id = api.create_flow_from_name(f"busy-guard-{tag}")
+        other = api.create_deployment(flow_id=flow_id, name=f"eps-real-time-{tag}")
+        unlisted = api.create_deployment(flow_id=flow_id, name=f"unlisted-{tag}")
+        watch = api.create_deployment(flow_id=flow_id, name=f"eps-report-watch-{tag}")
+
+        def run(deployment: Any, name: str, scheduled: datetime, state: Any = None) -> Any:
+            created = api.create_flow_run_from_deployment(
+                deployment, name=name, state=Scheduled(scheduled_time=scheduled)
+            )
+            if state is not None:
+                api.set_flow_run_state(created.id, state, force=True)
+            return created.id
+
+        run(other, "running", now - timedelta(minutes=1), Running())
+        run(other, "pending", now, Pending())
+        run(other, "due-soon", now + timedelta(minutes=10))
+        run(other, "due-later", now + timedelta(minutes=30))
+        run(other, "late-for-hours", now - timedelta(hours=2))
+        run(unlisted, "unlisted-running", now - timedelta(minutes=1), Running())
+        run(watch, "watch-running", now - timedelta(minutes=1), Running())
+        run(watch, "watch-next-tick", now + timedelta(minutes=10))
+        this_tick = run(watch, "this-tick", now - timedelta(minutes=1), Running())
+
+    own_deployment(watch)
+    monkeypatch.setattr(watch_module, "current_flow_run_id", lambda: str(this_tick))
+
+    def busy(at: datetime) -> set[str]:
+        return {r.name for r in watch_module._busy_runs([f"eps-real-time-{tag}"], at, LOOKAHEAD)}
+
+    assert busy(now) == {"running", "pending", "due-soon", "watch-running"}
+    # 61 minutes on, the RUNNING runs started, and the PENDING run was due, over an
+    # hour before, so they no longer count; the runs due at +10 and +30 minutes are
+    # late, not stale.
+    assert busy(now + timedelta(minutes=61)) == {"due-soon", "due-later"}
+
+
 # --- Symbols already published, and the FMP budget ---
 
 
-def test_a_symbol_already_on_the_consensus_stream_is_not_polled(clock: Any, variables: FakeVariables):
+def test_a_symbol_already_on_the_consensus_stream_is_not_polled(
+    clock: Any, variables: FakeVariables, spy_poll: SimpleNamespace
+):
     """Once a print has settled, the rest of its window costs no FMP call."""
     _report_days(variables, {"MSFT": [REPORT_DAY], "GOOGL": [REPORT_DAY]})
 
     _untouched_watch(truf_tn_block=_published("MSFT", "GOOGL"))
 
     assert BUDGET not in variables.names_touched()
+    assert spy_poll.polls == []
 
 
-def test_a_spent_budget_polls_nothing(clock: Any, variables: FakeVariables):
+def test_a_spent_budget_polls_nothing(clock: Any, variables: FakeVariables, spy_poll: SimpleNamespace):
     _report_days(variables, {"MSFT": [REPORT_DAY]})
-    variables.values[BUDGET] = {"report_day": REPORT_DAY, "fmp_calls": 100}
+    variables.values[BUDGET] = {"report_day": REPORT_DAY, "fmp_calls": 50}
 
     _untouched_watch(truf_tn_block=_published())
 
-    assert variables.values[BUDGET] == {"report_day": REPORT_DAY, "fmp_calls": 100}
+    assert variables.values[BUDGET] == {"report_day": REPORT_DAY, "fmp_calls": 50}
     assert ("set", BUDGET) not in variables.calls
+    assert spy_poll.polls == []
 
 
-def test_a_broken_count_for_the_day_polls_nothing(clock: Any, variables: FakeVariables):
+def test_a_broken_count_for_the_day_polls_nothing(clock: Any, variables: FakeVariables, spy_poll: SimpleNamespace):
     """A count that is not a number must not reopen the day's budget."""
     _report_days(variables, {"MSFT": [REPORT_DAY]})
     variables.values[BUDGET] = {"report_day": REPORT_DAY, "fmp_calls": "many"}
@@ -379,54 +586,79 @@ def test_a_broken_count_for_the_day_polls_nothing(clock: Any, variables: FakeVar
     _untouched_watch(truf_tn_block=_published())
 
     assert ("set", BUDGET) not in variables.calls
+    assert spy_poll.polls == []
 
 
 @pytest.mark.parametrize("failing", ["get", "set"])
 def test_a_count_that_cannot_be_kept_polls_nothing_and_fails_the_run(
-    clock: Any, variables: FakeVariables, failing: str
+    clock: Any, variables: FakeVariables, spy_poll: SimpleNamespace, failing: str
 ):
     """Polling without the count written could overspend the shared FMP key."""
     _report_days(variables, {"MSFT": [REPORT_DAY]})
     errors = variables.get_errors if failing == "get" else variables.set_errors
     errors[BUDGET] = ConnectionError("Prefect API unreachable")
 
-    with pytest.raises(RuntimeError, match="MSFT"):
+    with pytest.raises(RuntimeError, match=r"MSFT.*Prefect API unreachable"):
         _untouched_watch(truf_tn_block=_published())
+
+    assert spy_poll.polls == []
+
+
+@pytest.mark.parametrize(
+    "stored,polled,kept",
+    [
+        pytest.param(7, ["MSFT"], 8, id="room-left"),
+        pytest.param(20, [], 20, id="spent"),
+    ],
+)
+def test_the_count_stays_with_the_report_day_past_utc_midnight(
+    clock: Any,
+    variables: FakeVariables,
+    spy_poll: SimpleNamespace,
+    stored: int,
+    polled: list[str],
+    kept: int,
+):
+    """2 to 3 hours of each window fall on the next UTC date; the count must
+    not start again from 0 there."""
+    clock(datetime(2026, 10, 29, 1, 0, tzinfo=timezone.utc))
+    _report_days(variables, {"MSFT": [REPORT_DAY]})
+    variables.values[BUDGET] = {"report_day": REPORT_DAY, "fmp_calls": stored}
+
+    _untouched_watch(truf_tn_block=_published(), fmp_budget_per_report_day=20)
+
+    assert [poll["symbol"] for poll in spy_poll.polls] == polled
+    assert variables.values[BUDGET] == {"report_day": REPORT_DAY, "fmp_calls": kept}
+
+
+def test_by_default_a_report_day_gets_50_fmp_calls(clock: Any, variables: FakeVariables, spy_poll: SimpleNamespace):
+    """The other flows made 150 FMP calls on their busiest day in the 30 days to
+    18 Nov 2026; 50 more keeps such a day at about 200 of the key's 250."""
+    _report_days(variables, {"MSFT": [REPORT_DAY], "GOOGL": [REPORT_DAY]})
+    variables.values[BUDGET] = {"report_day": REPORT_DAY, "fmp_calls": 49}
+
+    _untouched_watch(truf_tn_block=_published())
+
+    assert [poll["symbol"] for poll in spy_poll.polls] == ["MSFT"]
+    assert variables.values[BUDGET] == {"report_day": REPORT_DAY, "fmp_calls": 50}
 
 
 # --- Polling: retries off, one FMP call, published as the real-time flow does ---
 
 
 def test_a_poll_runs_with_task_retries_off_and_no_income_statement(
-    clock: Any, variables: FakeVariables, monkeypatch: pytest.MonkeyPatch
+    clock: Any, variables: FakeVariables, spy_poll: SimpleNamespace
 ):
     """conftest.py strips retries from every task in tests, so this checks
     what the watch asks of Prefect. The overdue list is not the watch's to act
     on: it does not fail the tick."""
     _report_days(variables, {"MSFT": [REPORT_DAY]})
-    options: list[dict[str, Any]] = []
-    polls: list[dict[str, Any]] = []
+    spy_poll.result = EpsDetection([], [], [], [f"MSFT {REPORT_DAY}"], [])
 
-    def poll(**kwargs: Any) -> EpsDetection:
-        polls.append(kwargs)
-        return EpsDetection([], [], [], [f"MSFT {REPORT_DAY}"], [])
+    _untouched_watch(truf_tn_block=_published())
 
-    def with_options(**kwargs: Any) -> Any:
-        options.append(kwargs)
-        return poll
-
-    monkeypatch.setattr(watch_module, "detect_and_prepare_eps", SimpleNamespace(with_options=with_options))
-
-    eps_report_watch_flow.fn(
-        fmp_block=Untouchable(),
-        yahoo_block=Untouchable(),
-        fmp_tn_block=Untouchable(),
-        yahoo_tn_block=Untouchable(),
-        truf_tn_block=_published(),
-    )
-
-    assert options == [{"retries": 0}]
-    assert [(p["symbol"], p["fetch_income_statement"]) for p in polls] == [("MSFT", False)]
+    assert spy_poll.options == [{"retries": 0}]
+    assert [(p["symbol"], p["fetch_income_statement"]) for p in spy_poll.polls] == [("MSFT", False)]
 
 
 def _blocks(variables: FakeVariables) -> dict[str, Any]:
@@ -481,7 +713,7 @@ def test_the_budget_caps_the_polls_in_symbol_order(prefect_harness: Any, clock: 
     variables.values[BUDGET] = {"report_day": REPORT_DAY, "fmp_calls": 99}
     blocks = _blocks(variables)
 
-    eps_report_watch_flow(**blocks)
+    eps_report_watch_flow(**blocks, fmp_budget_per_report_day=100)
 
     assert blocks["fmp_block"]._calls == [("earnings", "MSFT")]
     assert variables.values[BUDGET] == {"report_day": REPORT_DAY, "fmp_calls": 100}

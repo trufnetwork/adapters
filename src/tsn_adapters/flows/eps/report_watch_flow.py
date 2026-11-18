@@ -11,16 +11,25 @@ Per tick:
   2. A symbol is due from 16:00 New York time on its report day, for
      REPORT_WINDOW. All Mag-7 report after the US close (16:00 to 16:30 New
      York time). No symbol due: stop before any FMP, Yahoo or TN call.
-  3. Skip the tick while a run of `busy_deployments` is RUNNING and started
-     less than BUSY_RUN_MAX_AGE ago. Two EPS processes at once break each
-     other's Yahoo session: YahooBlock clears the process-wide yfinance cookie
-     cache. A run stuck in RUNNING longer stops counting.
+  3. Skip the tick while another EPS run is busy or about to start. Two EPS
+     processes at once break each other's Yahoo session: YahooBlock clears
+     the container-wide yfinance cookie cache. Busy means a run of
+     `busy_deployments`, or another tick of this deployment, RUNNING for less
+     than BUSY_RUN_MAX_AGE (a run stuck in RUNNING longer stops counting).
+     About to start means a run of `busy_deployments` SCHEDULED or PENDING
+     to start within `busy_lookahead_minutes`. The other EPS flows never
+     check for the watch, and the 00:00 UTC real-time run falls inside every
+     report window, so the watch keeps out of their way.
   4. Leave out a symbol whose consensus stream already holds the day.
   5. Count FMP calls per report day in a Prefect Variable (`budget_variable`),
-     capped at `fmp_budget_per_report_day`; the FMP key is shared with other
-     flows and allows 250 calls a day. Each poll is one FMP call: no income
-     statement and no task retries. The count is written before polling, so
-     a crash cannot under-count.
+     capped at `fmp_budget_per_report_day`. The FMP key is shared with other
+     flows and allows 250 calls a day. The other flows made about 80 to 95
+     calls a day in the 30 days to 18 Nov 2026 and 150 on their busiest day,
+     so the default cap of 50 keeps even such a day at about 200. One poll
+     is one FMP call: no income statement and no task retries. The count is
+     written before polling, so a crash cannot under-count. A tick skips
+     while another tick of its deployment is RUNNING (step 3), so two ticks
+     do not read and write the count at once.
   6. Publish as the real-time flow does. The overdue check stays with the
      real-time flow. A symbol that fails fails the run after the others are
      published.
@@ -32,7 +41,7 @@ Usage:
         fmp_tn_block=TNAccessBlock.load("fmp-eps"),
         yahoo_tn_block=TNAccessBlock.load("yahoo-eps"),
         truf_tn_block=TNAccessBlock.load("truf-eps"),
-        busy_deployments=["eps-real-time-flow", "eps-report-watch"],
+        busy_deployments=["eps-real-time-flow", "eps-historical-flow", "testnet_eps_historical"],
     )
 """
 
@@ -42,18 +51,23 @@ from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta, timezone
 import os
 from typing import Any, cast
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from prefect import flow
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import (
     DeploymentFilter,
+    DeploymentFilterId,
     DeploymentFilterName,
     FlowRunFilter,
+    FlowRunFilterExpectedStartTime,
     FlowRunFilterState,
     FlowRunFilterStateType,
+    Operator,
 )
-from prefect.client.schemas.objects import StateType
+from prefect.client.schemas.objects import FlowRun, StateType
+from prefect.runtime import deployment as current_deployment
 from prefect.runtime.flow_run import get_id as current_flow_run_id
 from prefect.variables import Variable
 
@@ -75,9 +89,10 @@ NEW_YORK = ZoneInfo("America/New_York")
 REPORT_WINDOW_OPENS = time(16, 0)  # New York time, the US close
 REPORT_WINDOW = timedelta(hours=6)
 BUSY_RUN_MAX_AGE = timedelta(hours=1)
+BUSY_LOOKAHEAD_MINUTES = 15
 
 BUDGET_VARIABLE = "eps_watch_fmp_calls"
-FMP_BUDGET_PER_REPORT_DAY = 100
+FMP_BUDGET_PER_REPORT_DAY = 50
 
 
 def _utc_now() -> datetime:
@@ -136,27 +151,71 @@ def _read_report_days(variable: str) -> dict[str, list[str]] | None:
     }
 
 
-def _busy_runs(deployments: Sequence[str], now: datetime) -> list[str]:
-    """Runs of `deployments`, other than this one, RUNNING for less than BUSY_RUN_MAX_AGE."""
-    logger = get_logger_safe(__name__)
+def _own_deployment_id() -> str | None:
+    """The deployment this tick runs under, or None outside a deployment.
+
+    When a wrapper flow calls `eps_report_watch_flow.fn`, it is the wrapper's.
+    """
+    deployment_id: Any = current_deployment.id
+    return str(deployment_id) if deployment_id else None
+
+
+def _busy_runs(deployments: Sequence[str], now: datetime, lookahead: timedelta) -> list[FlowRun]:
+    """The runs this tick must keep out of the way of.
+
+    - A run of `deployments`, or another tick of this tick's own deployment,
+      RUNNING and started less than BUSY_RUN_MAX_AGE ago.
+    - A run of `deployments` SCHEDULED or PENDING to start before
+      `now + lookahead`, and not more than BUSY_RUN_MAX_AGE ago. This
+      deployment's own coming ticks do not count.
+
+    This run itself never counts. Raises when the runs cannot be read.
+    """
+    own_deployment = _own_deployment_id()
+    if not deployments and own_deployment is None:
+        return []
     # This run when it is deployed directly, or the deployed run that called it.
     own_ids = {current_flow_run_id(), os.environ.get("PREFECT__FLOW_RUN_ID")}
+    # model_validate: `before_` takes a datetime and `operator` is a field, though
+    # the type stubs say otherwise.
+    flow_run_filter = FlowRunFilter(
+        state=FlowRunFilterState(
+            type=FlowRunFilterStateType(any_=[StateType.RUNNING, StateType.PENDING, StateType.SCHEDULED])
+        ),
+        expected_start_time=FlowRunFilterExpectedStartTime.model_validate({"before_": now + lookahead}),
+    )
+    deployment_filter = DeploymentFilter.model_validate(
+        {
+            "operator": Operator.or_,  # a run of `deployments` or of this deployment
+            "name": DeploymentFilterName(any_=list(deployments)) if deployments else None,
+            "id": DeploymentFilterId(any_=[UUID(own_deployment)]) if own_deployment else None,
+        }
+    )
     with get_client(sync_client=True) as client:
-        runs = client.read_flow_runs(
-            flow_run_filter=FlowRunFilter(
-                state=FlowRunFilterState(type=FlowRunFilterStateType(any_=[StateType.RUNNING])),
-            ),
-            deployment_filter=DeploymentFilter(name=DeploymentFilterName(any_=list(deployments))),
-        )
-    busy: list[str] = []
+        runs = client.read_flow_runs(flow_run_filter=flow_run_filter, deployment_filter=deployment_filter)
+    logger = get_logger_safe(__name__)
+    busy: list[FlowRun] = []
     for run in runs:
         if str(run.id) in own_ids:
             continue
-        if run.start_time is None or now - run.start_time >= BUSY_RUN_MAX_AGE:
-            logger.warning(f"Flow run {run.name} has been RUNNING since {run.start_time}; not waiting for it")
-            continue
-        busy.append(f"{run.name} (started {run.start_time:%Y-%m-%d %H:%M} UTC)")
+        if run.state_type == StateType.RUNNING:
+            if run.start_time is None or now - run.start_time >= BUSY_RUN_MAX_AGE:
+                logger.warning(f"Flow run {run.name} has been RUNNING since {run.start_time}; not waiting for it")
+                continue
+            busy.append(run)
+        elif own_deployment is not None and str(run.deployment_id) == own_deployment:
+            continue  # this deployment's own coming ticks
+        elif run.expected_start_time and now - BUSY_RUN_MAX_AGE < run.expected_start_time < now + lookahead:
+            busy.append(run)
     return busy
+
+
+def _describe(run: FlowRun) -> str:
+    """A busy run for the log, such as "eps-real-time-run (SCHEDULED for 2026-10-29 00:00 UTC)"."""
+    running = run.state_type == StateType.RUNNING
+    when = run.start_time if running else run.expected_start_time
+    state = run.state_type.value if run.state_type else "no state"
+    return f"{run.name} ({state} {'since' if running else 'for'} {when:%Y-%m-%d %H:%M} UTC)"
 
 
 def _reserve_fmp_calls(variable: str, report_day: str, wanted: int, budget: int) -> tuple[int, int]:
@@ -195,12 +254,14 @@ def eps_report_watch_flow(
     budget_variable: str = BUDGET_VARIABLE,
     fmp_budget_per_report_day: int = FMP_BUDGET_PER_REPORT_DAY,
     busy_deployments: Sequence[str] = (),
+    busy_lookahead_minutes: int = BUSY_LOOKAHEAD_MINUTES,
 ) -> None:
     """Poll each symbol on its report evening and publish its print to TN.
 
     See the module docstring for the steps of a tick. `busy_deployments` are
-    deployment names (without the flow name); this run never counts as busy,
-    so the watch's own deployment can be listed to keep two ticks apart.
+    the names (without the flow name) of the deployments that share the
+    watch's Yahoo cookie cache. The watch keeps two of its own ticks apart
+    without being listed; this run never counts as busy.
     """
     logger = get_logger_safe(__name__)
     now = _utc_now()
@@ -214,15 +275,14 @@ def eps_report_watch_flow(
         return
     logger.info(f"In their report window: {', '.join(f'{symbol} {day}' for symbol, day in due)}")
 
-    if busy_deployments:
-        try:
-            busy = _busy_runs(busy_deployments, now)
-        except Exception as err:
-            logger.warning(f"Tick skipped: the runs of {list(busy_deployments)} could not be read: {err!r}")
-            return
-        if busy:
-            logger.info(f"Tick skipped while another EPS run is busy: {', '.join(busy)}")
-            return
+    try:
+        busy = _busy_runs(busy_deployments, now, timedelta(minutes=busy_lookahead_minutes))
+    except Exception as err:
+        logger.warning(f"Tick skipped: the EPS runs could not be read: {err!r}")
+        return
+    if busy:
+        logger.info(f"Tick skipped while another EPS run is busy or about to start: {', '.join(map(_describe, busy))}")
+        return
 
     failed: dict[str, str] = {}
     pending: list[tuple[str, str]] = []
