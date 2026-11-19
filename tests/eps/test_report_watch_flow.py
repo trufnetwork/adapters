@@ -6,6 +6,8 @@ and the Prefect client are in-memory fakes.
 """
 
 from datetime import date, datetime, timedelta, timezone
+import logging
+import time
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -14,6 +16,7 @@ import pandas as pd
 from pandera.typing import DataFrame
 from prefect.client.schemas.filters import Operator
 from prefect.client.schemas.objects import FlowRun, StateType
+from prefect.client.schemas.sorting import FlowRunSort
 from pydantic import PrivateAttr, SecretStr
 import pytest
 from tests.utils.constants import FAKE_PRIVATE_KEY
@@ -94,7 +97,8 @@ class Untouchable:
 
 
 class FakeClient:
-    """The sync Prefect client: returns `runs` from read_flow_runs, or raises `error`."""
+    """The sync Prefect client: returns the `runs` in the states read_flow_runs
+    asks for, or raises `error`. It applies no other filter."""
 
     def __init__(self, runs: list[FlowRun] | None = None, error: Exception | None = None) -> None:
         self.runs = runs or []
@@ -111,7 +115,7 @@ class FakeClient:
         self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        return self.runs
+        return [run for run in self.runs if run.state_type in kwargs["flow_run_filter"].state.type.any_]
 
 
 def _running(started: datetime, run_id: Any = None, deployment_id: Any = None) -> FlowRun:
@@ -348,11 +352,18 @@ def test_a_recent_eps_run_skips_the_tick(clock: Any, variables: FakeVariables, c
 
     _untouched_watch(busy_deployments=["eps-real-time-flow", "eps-historical-flow"])
 
-    [call] = client.calls
-    assert call["deployment_filter"].name.any_ == ["eps-real-time-flow", "eps-historical-flow"]
-    assert call["deployment_filter"].id is None  # outside a deployment
-    assert call["flow_run_filter"].state.type.any_ == [StateType.RUNNING, StateType.PENDING, StateType.SCHEDULED]
-    assert call["flow_run_filter"].expected_start_time.before_ == IN_WINDOW + LOOKAHEAD
+    # Old runs cannot fill a page: RUNNING runs come newest first, and the other
+    # read asks only for runs that can count. Waiting runs are read first, so a
+    # run that starts between the two reads is in one of them.
+    waiting, running = client.calls
+    for call in client.calls:
+        assert call["deployment_filter"].name.any_ == ["eps-real-time-flow", "eps-historical-flow"]
+        assert call["deployment_filter"].id is None  # outside a deployment
+        assert call["flow_run_filter"].expected_start_time.before_ == IN_WINDOW + LOOKAHEAD
+    assert running["flow_run_filter"].state.type.any_ == [StateType.RUNNING]
+    assert running["sort"] == FlowRunSort.START_TIME_DESC
+    assert waiting["flow_run_filter"].state.type.any_ == [StateType.PENDING, StateType.SCHEDULED]
+    assert waiting["flow_run_filter"].expected_start_time.after_ == IN_WINDOW - timedelta(hours=1)
     assert variables.names_touched() == {REPORT_DAYS}
 
 
@@ -407,8 +418,9 @@ def test_the_lookahead_is_a_parameter(clock: Any, variables: FakeVariables, clie
 
     _untouched_watch(busy_deployments=["eps-real-time-flow"], busy_lookahead_minutes=30)
 
-    [call] = client.calls
-    assert call["flow_run_filter"].expected_start_time.before_ == IN_WINDOW + timedelta(minutes=30)
+    assert len(client.calls) == 2
+    for call in client.calls:
+        assert call["flow_run_filter"].expected_start_time.before_ == IN_WINDOW + timedelta(minutes=30)
 
 
 @pytest.mark.parametrize("age", [timedelta(minutes=60), timedelta(hours=5)])
@@ -485,6 +497,42 @@ def test_this_run_does_not_count_as_busy(
     assert len(consensus_reads) == 1
 
 
+class StartingClient(FakeClient):
+    """Moves every PENDING run to RUNNING right after each read, like a run that
+    starts between the guard's two requests."""
+
+    def read_flow_runs(self, **kwargs: Any) -> list[FlowRun]:
+        runs = super().read_flow_runs(**kwargs)
+        self.runs = [
+            (
+                run.model_copy(update={"state_type": StateType.RUNNING, "start_time": run.expected_start_time})
+                if run.state_type == StateType.PENDING
+                else run
+            )
+            for run in self.runs
+        ]
+        return runs
+
+
+def test_a_run_that_starts_between_the_two_reads_still_counts(clock: Any, monkeypatch: pytest.MonkeyPatch):
+    starting = _waiting(StateType.PENDING, IN_WINDOW - timedelta(minutes=1))
+    fake = StartingClient(runs=[starting])
+    monkeypatch.setattr(watch_module, "get_client", lambda *a, **k: fake)
+
+    busy = watch_module._busy_runs(["eps-real-time-flow"], IN_WINDOW, LOOKAHEAD)
+
+    assert [run.id for run in busy] == [starting.id]
+
+
+def test_a_run_in_both_reads_counts_once(clock: Any, client: FakeClient):
+    running = _running(IN_WINDOW - timedelta(minutes=1))
+    client.runs = [running, running.model_copy(update={"state_type": StateType.PENDING})]
+
+    busy = watch_module._busy_runs(["eps-real-time-flow"], IN_WINDOW, LOOKAHEAD)
+
+    assert [(run.id, run.state_type) for run in busy] == [(running.id, StateType.RUNNING)]
+
+
 def test_runs_that_cannot_be_read_skip_the_tick(clock: Any, variables: FakeVariables, client: FakeClient):
     _report_days(variables, {"MSFT": [REPORT_DAY]})
     client.error = ConnectionError("Prefect API unreachable")
@@ -550,6 +598,83 @@ def test_the_busy_guard_reads_the_runs_from_prefect(
     # hour before, so they no longer count; the runs due at +10 and +30 minutes are
     # late, not stale.
     assert busy(now + timedelta(minutes=61)) == {"due-soon", "due-later"}
+
+
+@pytest.mark.timeout(180, func_only=True)
+def test_a_busy_run_behind_a_full_page_of_missed_runs_still_counts(prefect_harness: Any):
+    """Prefect returns one page of runs (200 by default), highest id first, and
+    ids are random. Missed SCHEDULED runs pile up while a runner is down; they
+    must not fill that page and hide a run that is RUNNING. The busy run here
+    has the lowest id, and was due 3 hours ago: a missed run started late."""
+    from prefect.client.orchestration import get_client
+    from prefect.settings import PREFECT_API_DEFAULT_LIMIT
+    from prefect.states import Running, Scheduled
+
+    now = datetime.now(timezone.utc)
+    tag = uuid4().hex[:8]
+    with get_client(sync_client=True) as api:
+        flow_id = api.create_flow_from_name(f"busy-guard-page-{tag}")
+        other = api.create_deployment(flow_id=flow_id, name=f"eps-real-time-{tag}")
+        missed = [
+            api.create_flow_run_from_deployment(other, state=Scheduled(scheduled_time=now - timedelta(hours=3))).id
+            for _ in range(PREFECT_API_DEFAULT_LIMIT.value() + 1)
+        ]
+        started_late = min(missed)
+        api.set_flow_run_state(started_late, Running(), force=True)
+
+    assert [r.id for r in watch_module._busy_runs([f"eps-real-time-{tag}"], now, LOOKAHEAD)] == [started_late]
+
+
+@pytest.mark.timeout(180, func_only=True)
+def test_a_busy_run_behind_a_full_page_of_stuck_runs_still_counts(prefect_harness: Any):
+    """Runs stuck in RUNNING pile up as well, one per crash. They must not fill
+    the page and hide a run that counts. The busy run here has the lowest id
+    and started last."""
+    from prefect.client.orchestration import get_client
+    from prefect.settings import PREFECT_API_DEFAULT_LIMIT
+    from prefect.states import Running, Scheduled
+
+    tag = uuid4().hex[:8]
+    with get_client(sync_client=True) as api:
+        flow_id = api.create_flow_from_name(f"busy-guard-stuck-page-{tag}")
+        other = api.create_deployment(flow_id=flow_id, name=f"eps-real-time-{tag}")
+        due = datetime.now(timezone.utc)
+        started_last, *stuck = sorted(
+            api.create_flow_run_from_deployment(other, state=Scheduled(scheduled_time=due)).id
+            for _ in range(PREFECT_API_DEFAULT_LIMIT.value() + 1)
+        )
+        for run_id in stuck:
+            api.set_flow_run_state(run_id, Running(), force=True)
+        time.sleep(2)
+        api.set_flow_run_state(started_last, Running(), force=True)
+        started = api.read_flow_run(started_last).start_time
+    assert started is not None
+
+    # Just under an hour after the last start, every other run is stuck.
+    at = started + timedelta(hours=1) - timedelta(seconds=1)
+    assert [r.id for r in watch_module._busy_runs([f"eps-real-time-{tag}"], at, LOOKAHEAD)] == [started_last]
+
+
+@pytest.mark.timeout(120, func_only=True)
+def test_a_run_stuck_in_running_is_logged(prefect_harness: Any, caplog: pytest.LogCaptureFixture):
+    """A run that crashed without reporting it stays RUNNING for good. After an
+    hour the tick no longer waits for it, and says so in its log."""
+    from prefect.client.orchestration import get_client
+    from prefect.states import Running, Scheduled
+
+    now = datetime.now(timezone.utc)
+    tag = uuid4().hex[:8]
+    with get_client(sync_client=True) as api:
+        flow_id = api.create_flow_from_name(f"busy-guard-stuck-{tag}")
+        other = api.create_deployment(flow_id=flow_id, name=f"eps-real-time-{tag}")
+        stuck = api.create_flow_run_from_deployment(other, name=f"stuck-{tag}", state=Scheduled(scheduled_time=now))
+        api.set_flow_run_state(stuck.id, Running(), force=True)
+
+    with caplog.at_level(logging.WARNING, logger=watch_module.__name__):
+        assert watch_module._busy_runs([f"eps-real-time-{tag}"], now + timedelta(hours=2), LOOKAHEAD) == []
+
+    [warning] = [r.getMessage() for r in caplog.records if r.name == watch_module.__name__]
+    assert warning.startswith(f"Flow run stuck-{tag} has been RUNNING since ")
 
 
 # --- Symbols already published, and the FMP budget ---

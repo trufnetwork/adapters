@@ -67,6 +67,7 @@ from prefect.client.schemas.filters import (
     Operator,
 )
 from prefect.client.schemas.objects import FlowRun, StateType
+from prefect.client.schemas.sorting import FlowRunSort
 from prefect.runtime import deployment as current_deployment
 from prefect.runtime.flow_run import get_id as current_flow_run_id
 from prefect.variables import Variable
@@ -164,7 +165,8 @@ def _busy_runs(deployments: Sequence[str], now: datetime, lookahead: timedelta) 
     """The runs this tick must keep out of the way of.
 
     - A run of `deployments`, or another tick of this tick's own deployment,
-      RUNNING and started less than BUSY_RUN_MAX_AGE ago.
+      RUNNING and started less than BUSY_RUN_MAX_AGE ago. A run stuck in
+      RUNNING longer is logged.
     - A run of `deployments` SCHEDULED or PENDING to start before
       `now + lookahead`, and not more than BUSY_RUN_MAX_AGE ago. This
       deployment's own coming ticks do not count.
@@ -176,13 +178,24 @@ def _busy_runs(deployments: Sequence[str], now: datetime, lookahead: timedelta) 
         return []
     # This run when it is deployed directly, or the deployed run that called it.
     own_ids = {current_flow_run_id(), os.environ.get("PREFECT__FLOW_RUN_ID")}
-    # model_validate: `before_` takes a datetime and `operator` is a field, though
-    # the type stubs say otherwise.
-    flow_run_filter = FlowRunFilter(
-        state=FlowRunFilterState(
-            type=FlowRunFilterStateType(any_=[StateType.RUNNING, StateType.PENDING, StateType.SCHEDULED])
-        ),
-        expected_start_time=FlowRunFilterExpectedStartTime.model_validate({"before_": now + lookahead}),
+    since, until = now - BUSY_RUN_MAX_AGE, now + lookahead
+    # One read per rule. Prefect returns one page (200 runs by default), by id
+    # unless sorted, and ids are random, so old runs that cannot count (stuck in
+    # RUNNING, or SCHEDULED and missed) could fill it and hide one that counts.
+    # RUNNING runs come newest first: stuck ones come after every run that
+    # counts, and are still read so they can be logged. SCHEDULED and PENDING
+    # runs are bounded in time by the server, so missed ones never come back.
+    # The two reads are separate requests, so waiting runs are read first: a run
+    # that moves from PENDING to RUNNING between them is in one read or the other.
+    # model_validate: `before_` and `after_` take a datetime and `operator` is a
+    # field, though the type stubs say otherwise.
+    running = FlowRunFilter(
+        state=FlowRunFilterState(type=FlowRunFilterStateType(any_=[StateType.RUNNING])),
+        expected_start_time=FlowRunFilterExpectedStartTime.model_validate({"before_": until}),
+    )
+    waiting = FlowRunFilter(
+        state=FlowRunFilterState(type=FlowRunFilterStateType(any_=[StateType.PENDING, StateType.SCHEDULED])),
+        expected_start_time=FlowRunFilterExpectedStartTime.model_validate({"after_": since, "before_": until}),
     )
     deployment_filter = DeploymentFilter.model_validate(
         {
@@ -192,7 +205,18 @@ def _busy_runs(deployments: Sequence[str], now: datetime, lookahead: timedelta) 
         }
     )
     with get_client(sync_client=True) as client:
-        runs = client.read_flow_runs(flow_run_filter=flow_run_filter, deployment_filter=deployment_filter)
+        runs: list[FlowRun] = []
+        if deployments:  # this deployment's own coming ticks never count
+            runs = client.read_flow_runs(
+                flow_run_filter=waiting,
+                deployment_filter=DeploymentFilter(name=DeploymentFilterName(any_=list(deployments))),
+            )
+        running_runs = client.read_flow_runs(
+            flow_run_filter=running, deployment_filter=deployment_filter, sort=FlowRunSort.START_TIME_DESC
+        )
+    # A run in both reads started in between: keep its RUNNING copy.
+    started = {run.id for run in running_runs}
+    runs = [run for run in runs if run.id not in started] + running_runs
     logger = get_logger_safe(__name__)
     busy: list[FlowRun] = []
     for run in runs:
