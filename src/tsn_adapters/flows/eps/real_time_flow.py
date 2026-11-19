@@ -24,6 +24,10 @@ A report still missing from the consensus stream at 06:00 UTC the day after
 it (OVERDUE_AFTER) fails the run, after everything else is published, so it
 shows hours before the market settles.
 
+Each run also records the days FMP lists for each symbol's reports, past and
+scheduled, in a Prefect Variable (REPORT_DAYS_VARIABLE). The report watch
+(report_watch_flow.py) reads it to poll a symbol on its report evening.
+
 Idempotency: each stream is checked before writing (TN read-before-write).
 Scheduling: external (Prefect, cron); this flow is single-shot.
 
@@ -48,16 +52,19 @@ block for all three when source identities share a wallet.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple, cast
 
 import pandas as pd
 from prefect import flow, task
+from prefect.variables import Variable
 
-from tsn_adapters.blocks.fmp import EarningsData, FMPBlock
+from tsn_adapters.blocks.fmp import EarningsData, FMPBlock, QuarterlyIncomeStatementData
 from tsn_adapters.blocks.tn_access import TNAccessBlock
 from tsn_adapters.blocks.yahoo import YahooBlock
-from tsn_adapters.flows.eps.publish import publish_eps_records
+from tsn_adapters.flows.eps.publish import EpsRow, publish_detected_rows
 from tsn_adapters.tasks.eps.config import EPS_STREAM_IDS, FMP_EPS_STREAM_IDS, MAG7, YAHOO_EPS_STREAM_IDS
 from tsn_adapters.tasks.eps.reconciler import TOLERANCE, SourceReading, canonical_key, reconcile
 from tsn_adapters.utils.create_empty_df import create_empty_df
@@ -80,7 +87,38 @@ MAX_REPORT_LAG_DAYS = 75
 OVERDUE_AFTER = timedelta(hours=30)
 OVERDUE_UNTIL = timedelta(days=3)
 
+# The Prefect Variable that holds each symbol's report days, as
+# {"updated_at": iso, "days": {symbol: ["YYYY-MM-DD", ...]}}. A run records the
+# days FMP lists from REPORT_DAYS_BEHIND before today (UTC) to REPORT_DAYS_AHEAD
+# after it, with or without an actual, so a report day stays listed through
+# its evening after FMP fills in the figure.
+REPORT_DAYS_VARIABLE = "eps_report_days"
+REPORT_DAYS_BEHIND = timedelta(days=2)
+REPORT_DAYS_AHEAD = timedelta(days=60)
+
 YahooReading = tuple[float, str]  # (eps, fiscal-period-end date)
+
+
+class EpsDetection(NamedTuple):
+    """What `detect_and_prepare_eps` found for one symbol."""
+
+    fmp_rows: list[EpsRow]
+    yahoo_rows: list[EpsRow]
+    truf_rows: list[EpsRow]
+    overdue: list[str]
+    report_days: list[str]
+
+
+@dataclass
+class DetectedEps:
+    """What a run found across its symbols. `report_days` and `failed` are keyed by symbol."""
+
+    fmp_rows: list[EpsRow] = field(default_factory=lambda: [])
+    yahoo_rows: list[EpsRow] = field(default_factory=lambda: [])
+    truf_rows: list[EpsRow] = field(default_factory=lambda: [])
+    overdue: list[str] = field(default_factory=lambda: [])
+    report_days: dict[str, list[str]] = field(default_factory=lambda: {})
+    failed: dict[str, str] = field(default_factory=lambda: {})
 
 
 def _utc_now() -> datetime:
@@ -135,7 +173,7 @@ def _recent_period_end(announcement_date: str, period_ends: list[date]) -> str |
     return max(candidates).isoformat() if candidates else None
 
 
-def _is_published(tn_block: TNAccessBlock, stream_id: str, date_unix: int) -> bool:
+def is_published(tn_block: TNAccessBlock, stream_id: str, date_unix: int) -> bool:
     """Return True if a record for this exact date already exists in TN.
 
     TN's `get_records` gap-fills: a query for [date, date] also returns the
@@ -166,17 +204,26 @@ def detect_and_prepare_eps(
     yahoo_tn_block: TNAccessBlock,
     truf_tn_block: TNAccessBlock,
     symbol: str,
-) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+    fetch_income_statement: bool = True,
+) -> EpsDetection:
     """Detect new EPS prints for one symbol and return per-wallet TN rows.
 
-    Returns a tuple `(fmp_rows, yahoo_rows, truf_rows, overdue)`. The first
-    three lists are destined for the matching wallet's TN block:
+    Returns an `EpsDetection` `(fmp_rows, yahoo_rows, truf_rows, overdue,
+    report_days)`. The first three lists are destined for the matching
+    wallet's TN block:
     - fmp_rows  → FMP primitive stream (raw value, when FMP has the data)
     - yahoo_rows → Yahoo primitive stream (raw value, when Yahoo has the data)
     - truf_rows → consensus stream (exact primary-source value, when ≥2 agree)
     `overdue` names each report ("SYMBOL YYYY-MM-DD") that is still missing
     from the consensus stream past OVERDUE_AFTER and will not be written by
-    this run.
+    this run. `report_days` are the days of FMP's earnings rows from
+    REPORT_DAYS_BEHIND before today (UTC) to REPORT_DAYS_AHEAD after it,
+    whether or not FMP has the actual yet.
+
+    `fetch_income_statement=False` skips FMP's income statement, so the call
+    costs one FMP request instead of two. FMP's reading then pairs with the
+    Yahoo quarter that ended shortly before the announcement, as it does
+    whenever the statement has no row for the filing yet.
 
     Read scoping: each stream's "already-published?" check uses the block
     that owns it, so the underlying `read_records` query resolves to the
@@ -213,10 +260,15 @@ def detect_and_prepare_eps(
 
     earnings_df = fmp_block.get_historical_earnings(symbol, limit=RECENT_QUARTERS)
     yahoo_df = yahoo_block.get_historical_earnings(symbol, limit=RECENT_QUARTERS)
-    # +2 keeps the lookup tolerant of fetch-window drift between earnings and
-    # income-statement (income-statement may lag earnings by one filing).
-    # Capped at 5: the current FMP plan rejects `limit` > 5 with HTTP 402.
-    income_stmt_df = fmp_block.get_quarterly_income_statements(symbol, limit=min(RECENT_QUARTERS + 2, 5))
+    if fetch_income_statement:
+        # +2 keeps the lookup tolerant of fetch-window drift between earnings and
+        # income-statement (income-statement may lag earnings by one filing).
+        # Capped at 5: the current FMP plan rejects `limit` > 5 with HTTP 402.
+        income_stmt_df = fmp_block.get_quarterly_income_statements(symbol, limit=min(RECENT_QUARTERS + 2, 5))
+        missing_statement = "income-statement not yet published for this filing"
+    else:
+        income_stmt_df = create_empty_df(QuarterlyIncomeStatementData)
+        missing_statement = "income-statement not read in this poll"
     # Yahoo's earnings page is an extra source: when it cannot be read, the run
     # goes on with the JSON feed alone, as it did before the page was read.
     feed_period_ends = [date.fromisoformat(str(d)[:10]) for d in yahoo_df["date"]]
@@ -254,9 +306,9 @@ def detect_and_prepare_eps(
         }
     )
 
-    fmp_rows: list[dict] = []
-    yahoo_rows: list[dict] = []
-    truf_rows: list[dict] = []
+    fmp_rows: list[EpsRow] = []
+    yahoo_rows: list[EpsRow] = []
+    truf_rows: list[EpsRow] = []
 
     # FMP ingestion. Always emit the raw primitive when fresh; populate the
     # canonical-key dict only when income-statement provides the period-end.
@@ -274,7 +326,7 @@ def detect_and_prepare_eps(
 
         # Emit primitive (always, when FMP has data and the date isn't published)
         fmp_date_unix = date_string_to_unix(announcement_date)
-        if not _is_published(fmp_tn_block, fmp_stream, fmp_date_unix):
+        if not is_published(fmp_tn_block, fmp_stream, fmp_date_unix):
             fmp_rows.append(
                 {
                     "stream_id": fmp_stream,
@@ -293,15 +345,13 @@ def detect_and_prepare_eps(
             period_end = _recent_period_end(announcement_date, yahoo_period_ends)
             if period_end is None:
                 logger.info(
-                    f"{symbol} {announcement_date}: income-statement not yet "
-                    f"published for this filing and no Yahoo quarter ended in the "
+                    f"{symbol} {announcement_date}: {missing_statement} and no Yahoo quarter ended in the "
                     f"{MAX_REPORT_LAG_DAYS} days before it; primitive emitted, "
                     f"reconciliation deferred to next cycle"
                 )
                 continue
             logger.info(
-                f"{symbol} {announcement_date}: income-statement not yet published "
-                f"for this filing; paired with Yahoo's quarter ending {period_end}"
+                f"{symbol} {announcement_date}: {missing_statement}; paired with Yahoo's quarter ending {period_end}"
             )
         fmp_by_key[canonical_key(symbol, period_end)] = (eps, announcement_date, retrieved_at)
 
@@ -328,7 +378,7 @@ def detect_and_prepare_eps(
 
         # Emit primitive
         yahoo_date_unix = date_string_to_unix(yahoo_date)
-        if not _is_published(yahoo_tn_block, yahoo_stream, yahoo_date_unix):
+        if not is_published(yahoo_tn_block, yahoo_stream, yahoo_date_unix):
             yahoo_rows.append(
                 {
                     "stream_id": yahoo_stream,
@@ -357,7 +407,7 @@ def detect_and_prepare_eps(
         consensus_date_unix = date_string_to_unix(consensus_date_str)
 
         # Skip if consensus is already committed
-        if _is_published(truf_tn_block, consensus_stream, consensus_date_unix):
+        if is_published(truf_tn_block, consensus_stream, consensus_date_unix):
             continue
 
         # Build readings in priority order (spec §3: fmp first)
@@ -417,6 +467,14 @@ def detect_and_prepare_eps(
     # yet. FMP lists a report's day before it has the figure, so its rows
     # without an actual count too.
     now = _utc_now()
+    today = now.date()
+    report_days = sorted(
+        {
+            day
+            for day in (str(d) for d in earnings_df["date"])
+            if today - REPORT_DAYS_BEHIND <= datetime.fromisoformat(day).date() <= today + REPORT_DAYS_AHEAD
+        }
+    )
     settling = {row["date"] for row in truf_rows}
     overdue: list[str] = []
     for report_day in sorted({str(d) for d in earnings_df["date"]}):
@@ -424,7 +482,7 @@ def detect_and_prepare_eps(
         if not day_start + OVERDUE_AFTER <= now < day_start + OVERDUE_UNTIL:
             continue
         report_unix = date_string_to_unix(report_day)
-        if report_unix in settling or _is_published(truf_tn_block, consensus_stream, report_unix):
+        if report_unix in settling or is_published(truf_tn_block, consensus_stream, report_unix):
             continue
         logger.error(
             f"{symbol} {report_day}: not on the consensus stream at {now:%Y-%m-%d %H:%M} UTC; "
@@ -432,7 +490,84 @@ def detect_and_prepare_eps(
         )
         overdue.append(f"{symbol} {report_day}")
 
-    return fmp_rows, yahoo_rows, truf_rows, overdue
+    return EpsDetection(fmp_rows, yahoo_rows, truf_rows, overdue, report_days)
+
+
+def detect_symbols(
+    detect: Callable[..., EpsDetection],
+    symbols: list[str],
+    *,
+    fmp_block: FMPBlock,
+    yahoo_block: YahooBlock,
+    fmp_tn_block: TNAccessBlock,
+    yahoo_tn_block: TNAccessBlock,
+    truf_tn_block: TNAccessBlock,
+    **options: Any,
+) -> DetectedEps:
+    """Run `detect` (detect_and_prepare_eps or a variant of it) for each symbol.
+
+    A symbol that raises is logged and named in `failed`; the others go on.
+    `options` are passed to every call.
+    """
+    logger = get_logger_safe(__name__)
+    found = DetectedEps()
+    for symbol in symbols:
+        # One symbol's failure must not drop the others' prints: the run used
+        # to end at the first failing symbol, before anything was published.
+        try:
+            detection = detect(
+                fmp_block=fmp_block,
+                yahoo_block=yahoo_block,
+                fmp_tn_block=fmp_tn_block,
+                yahoo_tn_block=yahoo_tn_block,
+                truf_tn_block=truf_tn_block,
+                symbol=symbol,
+                **options,
+            )
+        except Exception as err:
+            logger.error(f"{symbol}: EPS detection failed, continuing with the other symbols: {err!r}")
+            found.failed[symbol] = repr(err)
+            continue
+        found.fmp_rows.extend(detection.fmp_rows)
+        found.yahoo_rows.extend(detection.yahoo_rows)
+        found.truf_rows.extend(detection.truf_rows)
+        found.overdue.extend(detection.overdue)
+        found.report_days[symbol] = detection.report_days
+    return found
+
+
+def record_report_days(variable: str, report_days: dict[str, list[str]]) -> None:
+    """Merge this run's report days into the Prefect Variable `variable`.
+
+    A symbol this run did not read (it failed, or was not asked for) keeps its
+    previous entry. Any error is logged as a warning: recording never fails the
+    run or holds up publishing. An unreadable previous value skips the write,
+    so it cannot drop the entries of symbols that failed.
+    """
+    logger = get_logger_safe(__name__)
+    try:
+        previous: Any = Variable.get(variable)
+    except Exception as err:
+        logger.warning(f"Report days not recorded: Prefect Variable {variable!r} could not be read: {err!r}")
+        return
+
+    days: dict[str, list[str]] = {}
+    previous_days: Any = cast(dict[str, Any], previous).get("days") if isinstance(previous, dict) else None
+    if isinstance(previous_days, dict):
+        for symbol, symbol_days in cast(dict[Any, Any], previous_days).items():
+            if isinstance(symbol_days, list):
+                days[str(symbol)] = [str(d) for d in cast(list[Any], symbol_days)]
+    elif previous is not None:
+        logger.warning(f"Prefect Variable {variable!r} held no report days, replacing it: {previous!r}")
+    days.update(report_days)
+
+    value = {"updated_at": _utc_now().isoformat(), "days": days}
+    try:
+        Variable.set(variable, value, overwrite=True)
+    except Exception as err:
+        logger.warning(f"Report days not recorded in Prefect Variable {variable!r}: {err!r}")
+        return
+    logger.info(f"Recorded report days in Prefect Variable {variable!r}: {days}")
 
 
 @flow(name="EPS Real-Time Detection Flow")
@@ -443,6 +578,7 @@ def eps_real_time_flow(
     yahoo_tn_block: TNAccessBlock,
     truf_tn_block: TNAccessBlock,
     symbols: list[str] = MAG7,
+    report_days_variable: str | None = REPORT_DAYS_VARIABLE,
 ) -> None:
     """Detect and publish Mag-7 EPS prints to TN.
 
@@ -452,59 +588,44 @@ def eps_real_time_flow(
     reflects the identity that produced the data. Single-shot — driven by
     external scheduler.
 
+    Records each symbol's report days in the Prefect Variable
+    `report_days_variable` for the report watch; None turns that off.
+
     Fails the run, after publishing, when a symbol fails or a report is still
     missing from the consensus stream past OVERDUE_AFTER.
     """
     logger = get_logger_safe(__name__)
     logger.info(f"EPS real-time detection starting for {symbols}")
 
-    fmp_rows: list[dict] = []
-    yahoo_rows: list[dict] = []
-    truf_rows: list[dict] = []
-    failed: dict[str, str] = {}
-    overdue: list[str] = []
+    found = detect_symbols(
+        detect_and_prepare_eps,
+        symbols,
+        fmp_block=fmp_block,
+        yahoo_block=yahoo_block,
+        fmp_tn_block=fmp_tn_block,
+        yahoo_tn_block=yahoo_tn_block,
+        truf_tn_block=truf_tn_block,
+    )
 
-    for symbol in symbols:
-        # One symbol's failure must not drop the others' prints: the run used
-        # to end at the first failing symbol, before anything was published.
-        try:
-            fmp_new, yahoo_new, truf_new, overdue_new = detect_and_prepare_eps(
-                fmp_block=fmp_block,
-                yahoo_block=yahoo_block,
-                fmp_tn_block=fmp_tn_block,
-                yahoo_tn_block=yahoo_tn_block,
-                truf_tn_block=truf_tn_block,
-                symbol=symbol,
-            )
-        except Exception as err:
-            logger.error(f"{symbol}: EPS detection failed, continuing with the other symbols: {err!r}")
-            failed[symbol] = repr(err)
-            continue
-        fmp_rows.extend(fmp_new)
-        yahoo_rows.extend(yahoo_new)
-        truf_rows.extend(truf_new)
-        overdue.extend(overdue_new)
+    if report_days_variable:
+        record_report_days(report_days_variable, found.report_days)
 
-    total = len(fmp_rows) + len(yahoo_rows) + len(truf_rows)
-    if total == 0:
-        logger.info("No new EPS records to publish")
-
-    if fmp_rows:
-        publish_eps_records(fmp_tn_block, pd.DataFrame(fmp_rows), "FMP")
-
-    if yahoo_rows:
-        publish_eps_records(yahoo_tn_block, pd.DataFrame(yahoo_rows), "Yahoo")
-
-    if truf_rows:
-        publish_eps_records(truf_tn_block, pd.DataFrame(truf_rows), "Truf consensus")
+    publish_detected_rows(
+        fmp_tn_block=fmp_tn_block,
+        yahoo_tn_block=yahoo_tn_block,
+        truf_tn_block=truf_tn_block,
+        fmp_rows=found.fmp_rows,
+        yahoo_rows=found.yahoo_rows,
+        truf_rows=found.truf_rows,
+    )
 
     # Fail the run after publishing, so the other symbols' prints still land
     # and the failure stays visible in the run state.
     problems: list[str] = []
-    if failed:
-        problems.append(f"EPS detection failed for {', '.join(failed)}: {failed}")
-    if overdue:
-        problems.append(f"EPS print not on the consensus stream yet for {', '.join(overdue)}")
+    if found.failed:
+        problems.append(f"EPS detection failed for {', '.join(found.failed)}: {found.failed}")
+    if found.overdue:
+        problems.append(f"EPS print not on the consensus stream yet for {', '.join(found.overdue)}")
     if problems:
         raise RuntimeError("; ".join(problems))
 
