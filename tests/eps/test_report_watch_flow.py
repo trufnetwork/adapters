@@ -353,8 +353,9 @@ def test_a_recent_eps_run_skips_the_tick(clock: Any, variables: FakeVariables, c
     _untouched_watch(busy_deployments=["eps-real-time-flow", "eps-historical-flow"])
 
     # Old runs cannot fill a page: RUNNING runs come newest first, and the other
-    # read asks only for runs that can count.
-    running, waiting = client.calls
+    # read asks only for runs that can count. Waiting runs are read first, so a
+    # run that starts between the two reads is in one of them.
+    waiting, running = client.calls
     for call in client.calls:
         assert call["deployment_filter"].name.any_ == ["eps-real-time-flow", "eps-historical-flow"]
         assert call["deployment_filter"].id is None  # outside a deployment
@@ -494,6 +495,42 @@ def test_this_run_does_not_count_as_busy(
     _untouched_watch(busy_deployments=["eps-report-watch"], truf_tn_block=_published("MSFT"))
 
     assert len(consensus_reads) == 1
+
+
+class StartingClient(FakeClient):
+    """Moves every PENDING run to RUNNING right after each read, like a run that
+    starts between the guard's two requests."""
+
+    def read_flow_runs(self, **kwargs: Any) -> list[FlowRun]:
+        runs = super().read_flow_runs(**kwargs)
+        self.runs = [
+            (
+                run.model_copy(update={"state_type": StateType.RUNNING, "start_time": run.expected_start_time})
+                if run.state_type == StateType.PENDING
+                else run
+            )
+            for run in self.runs
+        ]
+        return runs
+
+
+def test_a_run_that_starts_between_the_two_reads_still_counts(clock: Any, monkeypatch: pytest.MonkeyPatch):
+    starting = _waiting(StateType.PENDING, IN_WINDOW - timedelta(minutes=1))
+    fake = StartingClient(runs=[starting])
+    monkeypatch.setattr(watch_module, "get_client", lambda *a, **k: fake)
+
+    busy = watch_module._busy_runs(["eps-real-time-flow"], IN_WINDOW, LOOKAHEAD)
+
+    assert [run.id for run in busy] == [starting.id]
+
+
+def test_a_run_in_both_reads_counts_once(clock: Any, client: FakeClient):
+    running = _running(IN_WINDOW - timedelta(minutes=1))
+    client.runs = [running, running.model_copy(update={"state_type": StateType.PENDING})]
+
+    busy = watch_module._busy_runs(["eps-real-time-flow"], IN_WINDOW, LOOKAHEAD)
+
+    assert [(run.id, run.state_type) for run in busy] == [(running.id, StateType.RUNNING)]
 
 
 def test_runs_that_cannot_be_read_skip_the_tick(clock: Any, variables: FakeVariables, client: FakeClient):

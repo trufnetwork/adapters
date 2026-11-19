@@ -185,6 +185,8 @@ def _busy_runs(deployments: Sequence[str], now: datetime, lookahead: timedelta) 
     # RUNNING runs come newest first: stuck ones come after every run that
     # counts, and are still read so they can be logged. SCHEDULED and PENDING
     # runs are bounded in time by the server, so missed ones never come back.
+    # The two reads are separate requests, so waiting runs are read first: a run
+    # that moves from PENDING to RUNNING between them is in one read or the other.
     # model_validate: `before_` and `after_` take a datetime and `operator` is a
     # field, though the type stubs say otherwise.
     running = FlowRunFilter(
@@ -203,14 +205,18 @@ def _busy_runs(deployments: Sequence[str], now: datetime, lookahead: timedelta) 
         }
     )
     with get_client(sync_client=True) as client:
-        runs = client.read_flow_runs(
-            flow_run_filter=running, deployment_filter=deployment_filter, sort=FlowRunSort.START_TIME_DESC
-        )
+        runs: list[FlowRun] = []
         if deployments:  # this deployment's own coming ticks never count
-            runs = runs + client.read_flow_runs(
+            runs = client.read_flow_runs(
                 flow_run_filter=waiting,
                 deployment_filter=DeploymentFilter(name=DeploymentFilterName(any_=list(deployments))),
             )
+        running_runs = client.read_flow_runs(
+            flow_run_filter=running, deployment_filter=deployment_filter, sort=FlowRunSort.START_TIME_DESC
+        )
+    # A run in both reads started in between: keep its RUNNING copy.
+    started = {run.id for run in running_runs}
+    runs = [run for run in runs if run.id not in started] + running_runs
     logger = get_logger_safe(__name__)
     busy: list[FlowRun] = []
     for run in runs:
